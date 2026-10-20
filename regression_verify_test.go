@@ -616,41 +616,95 @@ func TestDigestDistinguishesConversationsWithSameSystem(t *testing.T) {
 	}
 }
 
-// 账号过载保护：新键不再钉到已占多数份额的账号，老键仍可刷新。
-func TestAffinityOverloadGuard(t *testing.T) {
+// 绑定计数必须与存储内容一致：重建、换账号、过期、淘汰、清空都要同步。
+// （绑定占比只用于观察分布，不参与调度决策——见本文件末尾的说明。）
+func TestAffinityCountersOnReconfigure(t *testing.T) {
 	silenceLogs(t)
 	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
 	enableAffinity(t, true, affinityModeSession)
-	setAffinityMaxShare(0.6)
-	affinityMetrics.reset()
 
-	for i := 0; i < 12; i++ {
-		affinityRemember("key-"+string(rune('a'+i)), "hot.json")
+	affinityRemember("k1", "A")
+	affinityRemember("k2", "A")
+	affinityRemember("k3", "A")
+	affinityRemember("k4", "B")
+
+	affinityStoreReconfigure(3, time.Hour) // 缩容：保留最近 3 条（k2,k3,k4）
+
+	got := affinityBindingsByAccount()
+	total := 0
+	for _, v := range got {
+		total += v
 	}
 	affinityStoreMu.RLock()
-	store := affinityStore
-	store.mu.Lock()
-	share, total := store.shareOf("hot.json")
-	store.mu.Unlock()
+	size := affinityStore.stats()
 	affinityStoreMu.RUnlock()
-	if total < affinityShareMinSamples || share <= 0.6 {
-		t.Fatalf("前提不成立: total=%d share=%.2f", total, share)
+	if total != size {
+		t.Fatalf("计数与条目数不一致: counters=%d store=%d (%v)", total, size, got)
+	}
+	if got["A"] != 2 || got["B"] != 1 {
+		t.Fatalf("缩容后分布应为 A=2 B=1，实际 %v", got)
+	}
+}
+
+func TestAffinityCountersOnAccountSwitch(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModeSession)
+
+	affinityRemember("same-key", "A")
+	if got := affinityBindingsByAccount(); got["A"] != 1 || got["B"] != 0 {
+		t.Fatalf("初始应为 A=1，实际 %v", got)
+	}
+	affinityRemember("same-key", "B") // 同一键换账号
+	got := affinityBindingsByAccount()
+	if got["A"] != 0 || got["B"] != 1 {
+		t.Fatalf("换账号后应为 A=0 B=1，实际 %v", got)
+	}
+	affinityRemember("same-key", "B") // 重复刷新不得重复计数
+	if got := affinityBindingsByAccount(); got["B"] != 1 {
+		t.Fatalf("重复刷新不应增加计数，实际 %v", got)
+	}
+}
+
+func TestAffinityCountersOnExpireEvictDrop(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModeSession)
+
+	// drop
+	affinityRemember("k-drop", "A")
+	affinityForget("k-drop")
+	if got := affinityBindingsByAccount(); got["A"] != 0 {
+		t.Fatalf("drop 后计数应归零，实际 %v", got)
 	}
 
-	before := affinityMetrics.spread.Load()
-	affinityRemember("brand-new-key", "hot.json")
-	if affinityMetrics.spread.Load() == before {
-		t.Fatal("新键钉到过载账号时应被拒绝并计数")
+	// expire
+	affinityRemember("k-exp", "A")
+	setAffinityConfig(true, affinityModeSession, 1, 4096, 65536)
+	time.Sleep(1200 * time.Millisecond)
+	if acc := affinityLookup("k-exp"); acc != "" {
+		t.Fatal("前提：应已过期")
 	}
-	affinityStoreMu.RLock()
-	_, ok := affinityStore.items["brand-new-key"]
-	affinityStoreMu.RUnlock()
-	if ok {
-		t.Fatal("被拒绝的新键不应写入存储")
+	if got := affinityBindingsByAccount(); got["A"] != 0 {
+		t.Fatalf("过期后计数应归零，实际 %v", got)
 	}
 
-	// 已存在的键仍可刷新（不能把老会话赶走）
-	if acc := affinityLookup("key-a"); acc != "hot.json" {
-		t.Fatalf("老键应仍然命中，实际 %q", acc)
+	// evict
+	setAffinityConfig(true, affinityModeSession, 1800, 2, 65536)
+	for _, k := range []string{"e1", "e2", "e3", "e4"} {
+		affinityRemember(k, "A")
+	}
+	total := 0
+	for _, v := range affinityBindingsByAccount() {
+		total += v
+	}
+	if total != 2 {
+		t.Fatalf("淘汰后计数总数应为 2，实际 %d", total)
+	}
+
+	// clear
+	setAffinityConfig(false, affinityModeSession, 1800, 2, 65536)
+	if got := affinityBindingsByAccount(); len(got) != 0 {
+		t.Fatalf("清空后不应残留计数，实际 %v", got)
 	}
 }

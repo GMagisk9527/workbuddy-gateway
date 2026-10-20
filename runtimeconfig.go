@@ -116,7 +116,6 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	_ = setModelAccountFilter(c.Models.Accounts)
 	setSystemPromptConfig(c.SystemPrompt.Fallback, c.SystemPrompt.Force)
 	setAffinityConfig(c.Affinity.Enabled, c.Affinity.Mode, c.Affinity.TTLSeconds, c.Affinity.Capacity, c.Affinity.PrefixHeadBytes)
-	setAffinityMaxShare(c.Affinity.MaxAccountShare)
 	logRetentionDays.Store(int64(c.Logs.RetentionDays))
 	header, idle, retries := upstreamHeaderTimeoutDefault, upstreamIdleTimeoutDefault, upstreamTransientRetriesDefault
 	if n := c.Upstream.HeaderTimeoutSeconds; n > 0 {

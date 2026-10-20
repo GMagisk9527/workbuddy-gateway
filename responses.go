@@ -904,7 +904,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 						textPrefix = respTextDeltaPrefix(make([]byte, 0, 192), msgItemID, msgIndex)
 					}
 					msgRaw = append(msgRaw, raw...)
-					emitRawDelta(w, flusher, &deltaBuf, textPrefix, raw, &seq)
+					if err := emitRawDelta(w, flusher, &deltaBuf, textPrefix, raw, &seq); err != nil {
+						sseWriteErr = err
+					}
 				}
 				if n := view.toolCnt[c]; n > 0 {
 					before := len(toolOrder)
@@ -938,7 +940,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 							p = respToolDeltaPrefix(make([]byte, 0, 192), tcItemID[tv.index], tcIndex[tv.index])
 							toolPrefix[tv.index] = p
 						}
-						emitRawDelta(w, flusher, &deltaBuf, p, tv.args, &seq)
+						if err := emitRawDelta(w, flusher, &deltaBuf, p, tv.args, &seq); err != nil {
+							sseWriteErr = err
+						}
 					}
 				}
 			}

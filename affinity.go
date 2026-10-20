@@ -53,13 +53,7 @@ type affinitySettings struct {
 	TTL            time.Duration
 	Capacity       int
 	PrefixHeadByte int
-	MaxShare       float64 // 单账号最多承载多少比例的绑定；<=0 用默认值
 }
-
-const (
-	affinityDefaultMaxShare = 0.6
-	affinityShareMinSamples = 8 // 绑定数少于该值时不判断集中度
-)
 
 var (
 	affinityConfigMu sync.RWMutex
@@ -68,7 +62,6 @@ var (
 		TTL:            affinityDefaultTTL,
 		Capacity:       affinityDefaultCapacity,
 		PrefixHeadByte: affinityDefaultHeadBytes,
-		MaxShare:       affinityDefaultMaxShare,
 	}
 )
 
@@ -110,7 +103,7 @@ func setAffinityConfig(enabled bool, mode string, ttlSeconds, capacity, headByte
 	}
 	affinityConfigMu.Lock()
 	prev := affinityCfg
-	affinityCfg = affinitySettings{Enabled: enabled, Mode: mode, TTL: ttl, Capacity: capacity, PrefixHeadByte: headBytes, MaxShare: prev.MaxShare}
+	affinityCfg = affinitySettings{Enabled: enabled, Mode: mode, TTL: ttl, Capacity: capacity, PrefixHeadByte: headBytes}
 	affinityConfigMu.Unlock()
 
 	switch {
@@ -185,13 +178,17 @@ func affinityStoreReconfigure(capacity int, ttl time.Duration) {
 	for e := old.lru.Back(); e != nil; e = e.Prev() {
 		item := e.Value.(*affinityEntry)
 		next.items[item.key] = next.lru.PushFront(&affinityEntry{key: item.key, account: item.account, at: item.at})
+		next.byAccount[item.account]++
 		for next.lru.Len() > next.cap {
 			back := next.lru.Back()
 			if back == nil {
 				break
 			}
 			next.lru.Remove(back)
-			delete(next.items, back.Value.(*affinityEntry).key)
+			evicted := back.Value.(*affinityEntry)
+			delete(next.items, evicted.key)
+			next.decAccount(evicted.account)
+			affinityMetrics.evicted.Add(1)
 		}
 	}
 	old.mu.Unlock()
@@ -219,22 +216,20 @@ func (s *affinityStoreT) get(key string, now time.Time) (string, bool) {
 	return item.account, true
 }
 
-func (s *affinityStoreT) put(key, account string, now time.Time, maxShare float64) bool {
+func (s *affinityStoreT) put(key, account string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if el, ok := s.items[key]; ok {
-		// 已存在的绑定只做刷新：即使账号当前占比偏高，也不能把老会话赶到别的账号上，
-		// 否则等于主动放弃缓存局部性。
 		item := el.Value.(*affinityEntry)
-		item.account = account
+		if item.account != account {
+			// 绑定换账号：两个账号的计数都必须同步，否则快照与实际分布会漂移。
+			s.decAccount(item.account)
+			s.byAccount[account]++
+			item.account = account
+		}
 		item.at = now.UnixNano()
 		s.lru.MoveToFront(el)
-		return true
-	}
-	if maxShare > 0 && s.lru.Len() >= affinityShareMinSamples {
-		if share, _ := s.shareOfAmount(account); share > maxShare {
-			return false // 新会话不再钉到已过载的账号
-		}
+		return
 	}
 	el := s.lru.PushFront(&affinityEntry{key: key, account: account, at: now.UnixNano()})
 	s.items[key] = el
@@ -250,7 +245,6 @@ func (s *affinityStoreT) put(key, account string, now time.Time, maxShare float6
 		s.decAccount(item.account)
 		affinityMetrics.evicted.Add(1)
 	}
-	return true
 }
 
 func (s *affinityStoreT) drop(key string) {
@@ -282,10 +276,10 @@ type affinityMetricsT struct {
 	rebind    atomic.Int64 // 因账号失效或换号而解除绑定
 	bound     atomic.Int64 // 新建绑定
 	prefixKey atomic.Int64 // 用前缀摘要作为键的次数
-	spread    atomic.Int64 // 因账号过度集中而放弃亲和的次数
-	session   atomic.Int64 // 用客户端会话标识作为键的次数
-	expired   atomic.Int64 // TTL 到期被清理
-	evicted   atomic.Int64 // LRU 容量淘汰
+
+	session atomic.Int64 // 用客户端会话标识作为键的次数
+	expired atomic.Int64 // TTL 到期被清理
+	evicted atomic.Int64 // LRU 容量淘汰
 }
 
 var affinityMetrics affinityMetricsT
@@ -298,7 +292,7 @@ func (m *affinityMetricsT) reset() {
 	m.rebind.Store(0)
 	m.bound.Store(0)
 	m.prefixKey.Store(0)
-	m.spread.Store(0)
+
 	m.session.Store(0)
 	m.expired.Store(0)
 	m.evicted.Store(0)
@@ -310,21 +304,20 @@ func affinitySnapshot() map[string]any {
 	entries := affinityStore.stats()
 	affinityStoreMu.RUnlock()
 	return map[string]any{
-		"enabled":      settings.Enabled,
-		"mode":         settings.Mode,
-		"ttlSeconds":   int(settings.TTL / time.Second),
-		"capacity":     settings.Capacity,
-		"entries":      entries,
-		"hit":          affinityMetrics.hit.Load(),
-		"miss":         affinityMetrics.miss.Load(),
-		"fallback":     affinityMetrics.fallback.Load(),
-		"disabled":     affinityMetrics.disabled.Load(),
-		"bound":        affinityMetrics.bound.Load(),
-		"rebind":       affinityMetrics.rebind.Load(),
-		"sessionKeyed": affinityMetrics.session.Load(),
-		"prefixKeyed":  affinityMetrics.prefixKey.Load(),
-		"spreadSkips":  affinityMetrics.spread.Load(),
-		"maxShare":     settings.MaxShare,
+		"enabled":           settings.Enabled,
+		"mode":              settings.Mode,
+		"ttlSeconds":        int(settings.TTL / time.Second),
+		"capacity":          settings.Capacity,
+		"entries":           entries,
+		"hit":               affinityMetrics.hit.Load(),
+		"miss":              affinityMetrics.miss.Load(),
+		"fallback":          affinityMetrics.fallback.Load(),
+		"disabled":          affinityMetrics.disabled.Load(),
+		"bound":             affinityMetrics.bound.Load(),
+		"rebind":            affinityMetrics.rebind.Load(),
+		"sessionKeyed":      affinityMetrics.session.Load(),
+		"prefixKeyed":       affinityMetrics.prefixKey.Load(),
+		"bindingsByAccount": affinityBindingsByAccount(),
 	}
 }
 
@@ -553,15 +546,10 @@ func affinityRemember(key, accountPath string) {
 	if !currentAffinitySettings().Enabled {
 		return
 	}
-	settings := currentAffinitySettings()
 	affinityStoreMu.RLock()
 	store := affinityStore
-	ok := store.put(key, accountPath, time.Now(), settings.MaxShare)
+	store.put(key, accountPath, time.Now())
 	affinityStoreMu.RUnlock()
-	if !ok {
-		affinityMetrics.spread.Add(1)
-		return
-	}
 	affinityMetrics.bound.Add(1)
 }
 
@@ -695,51 +683,23 @@ func (s *affinityStoreT) decAccount(account string) {
 	}
 }
 
-func (s *affinityStoreT) shareOfAmount(account string) (float64, int) {
-	total := s.lru.Len()
-	if total == 0 {
-		return 0, 0
-	}
-	return float64(s.byAccount[account]) / float64(total), total
-}
-
-// shareOf 返回某账号当前持有的绑定占比与总条目数（调用方需持 s.mu）。
-func (s *affinityStoreT) shareOf(account string) (float64, int) {
-	total := s.lru.Len()
-	if total == 0 {
-		return 0, 0
-	}
-	return float64(s.byAccount[account]) / float64(total), total
-}
-
-// affinityAccountOverloaded 判断"继续把新会话钉到该账号"是否会过度集中。
-// 绑定数太少时不判断，避免一两条记录就触发。
-func affinityAccountOverloaded(account string) bool {
-	settings := currentAffinitySettings()
-	if !settings.Enabled || settings.MaxShare <= 0 {
-		return false
-	}
+// affinityBindingsByAccount 返回各账号当前持有的绑定数（只读快照，用于观察分布）。
+// 关于"账号负载均衡"的取舍（2026-10 实测后定案）：
+//
+// 曾尝试用"绑定数量占比"限制单账号最多承载多少会话（maxAccountShare）。实测后移除：
+//   - 新绑定本来就走既有轮询，分布天然均匀，限制极少触发；
+//   - 占比是"会话数"，不是"请求量"，用它调度等于用一个假信号换掉真实的缓存局部性；
+//   - 真正决定负载的是每账号的串行发送锁、429 冷却与配额阻断，这些已在调度器里生效。
+// 因此这里只保留 byAccount 计数用于观察分布，不参与任何选号决策。
+func affinityBindingsByAccount() map[string]int {
 	affinityStoreMu.RLock()
 	store := affinityStore
 	store.mu.Lock()
-	share, total := store.shareOf(account)
+	out := make(map[string]int, len(store.byAccount))
+	for k, v := range store.byAccount {
+		out[k] = v
+	}
 	store.mu.Unlock()
 	affinityStoreMu.RUnlock()
-	if total < affinityShareMinSamples {
-		return false
-	}
-	return share > settings.MaxShare
-}
-
-// setAffinityMaxShare 由配置加载调用；<=0 用默认 0.6，>1 视为不限制。
-func setAffinityMaxShare(v float64) {
-	if v <= 0 {
-		v = affinityDefaultMaxShare
-	}
-	if v > 1 {
-		v = 1
-	}
-	affinityConfigMu.Lock()
-	affinityCfg.MaxShare = v
-	affinityConfigMu.Unlock()
+	return out
 }
