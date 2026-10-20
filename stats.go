@@ -381,7 +381,7 @@ func statsFinishAttempt(r *http.Request, status int) {
 	}
 	// 额度结算：只有真正拿到 usage 的尝试才记账（换号失败的那次没有 usage，不计费）。
 	// 身份来自请求上下文，不依赖会被 statsSelectAccount 重置的 attempt。
-	if len(p.usage) > 0 && p.attemptID != "" {
+	if p.attemptID != "" && (len(p.usage) > 0 || (p.id != "" && status < 400)) {
 		if identity := keyIdentityFor(r); identity != nil {
 			if k := keyByID(identity.ID); k != nil {
 				outcome := keySettle(k, p.attemptID, p.usage, status)

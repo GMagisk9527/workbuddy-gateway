@@ -8,13 +8,13 @@ package main
 // 既保证不丢账，也不会在高频路径上重写大文件。
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,18 +27,25 @@ const (
 	ledgerWALMaxBytes  = 512 << 10  // 或 WAL 超过这个大小
 )
 
+// ledgerEntry 是 WAL 的一行。语义必须唯一：**只存增量，绝不混用累计值**。
+// Kind 区分结算与重置；DayKey/MonthKey 记录该笔消费归属的北京时区窗口，
+// 重放时据此决定是否计入"今日/本月"额度，避免跨日跨月错记。
 type ledgerEntry struct {
-	Seq     int64   `json:"seq"`
-	Key     string  `json:"key"`
-	Attempt string  `json:"attempt,omitempty"`
-	Credit  float64 `json:"credit,omitempty"`
-	Known   bool    `json:"known,omitempty"`
-	Reset   bool    `json:"reset,omitempty"`
-	At      int64   `json:"at,omitempty"`
-	Status  int     `json:"status,omitempty"`
-	Input   int64   `json:"input,omitempty"`
-	Output  int64   `json:"output,omitempty"`
-	Cached  int64   `json:"cached,omitempty"`
+	Seq        int64   `json:"seq"`
+	Key        string  `json:"key"`
+	Attempt    string  `json:"attempt,omitempty"`
+	Kind       string  `json:"kind,omitempty"` // settle（默认）| reset
+	Credit     float64 `json:"credit,omitempty"`
+	Known      bool    `json:"known,omitempty"`
+	Zero       bool    `json:"zero,omitempty"`
+	Unknown    bool    `json:"unknown,omitempty"`
+	At         int64   `json:"at,omitempty"`
+	DayKey     string  `json:"day,omitempty"`
+	MonthKey   string  `json:"month,omitempty"`
+	InDelta    int64   `json:"in,omitempty"`
+	OutDelta   int64   `json:"out,omitempty"`
+	CachedDelta int64  `json:"cached,omitempty"`
+	Status     int     `json:"status,omitempty"`
 }
 
 type ledgerSnapshot struct {
@@ -89,49 +96,68 @@ func ledgerLoad(dir string) error {
 	}
 	apiKeys.mu.RUnlock()
 
-	// 重放 WAL
+	// 打开 WAL（追加写）。必须在重放前完成，否则后续结算无处可写。
 	f, err := os.OpenFile(ledger.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
-	if errors.Is(err, os.ErrNotExist) {
-		f, err = os.OpenFile(ledger.path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
-	}
 	if err != nil {
 		return err
 	}
 	ledger.file = f
 	ledger.writable = true
 
-	replayed, dropped := 0, 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var e ledgerEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			dropped++ // 半行（断电截断）跳过，不影响其余账目
-			continue
-		}
-		if e.Seq <= snap.LastSeq {
-			continue
-		}
-		ledgerApply(e)
-		if e.Seq > ledger.seq.Load() {
-			ledger.seq.Store(e.Seq)
-		}
-		replayed++
+	// 重放 WAL。文件上限 512KiB（超过即压缩），一次性读入可接受。
+	replayed, droppedTail := 0, 0
+	raw, readErr := os.ReadFile(ledger.path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
 	}
-	if dropped > 0 {
-		log.Printf("[账本] 警告=重放时跳过 %d 行无法解析的记录（多为断电截断）", dropped)
+	if len(raw) > 0 {
+		lines := strings.Split(string(raw), "\n")
+		lastIdx := len(lines) - 1
+		endsWithNewline := lines[lastIdx] == ""
+		for idx, line := range lines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var e ledgerEntry
+			if err := json.Unmarshal([]byte(line), &e); err != nil {
+				if idx == lastIdx && !endsWithNewline {
+					droppedTail++ // 断电截断的半行：只有文件末尾才允许
+					continue
+				}
+				return fmt.Errorf("WAL 第 %d 行损坏，拒绝以部分账本启动: %w", idx+1, err)
+			}
+			if e.Seq <= snap.LastSeq {
+				continue
+			}
+			ledgerApply(e)
+			if e.Seq > ledger.seq.Load() {
+				ledger.seq.Store(e.Seq)
+			}
+			replayed++
+		}
 	}
+	if droppedTail > 0 {
+		log.Printf("[账本] 警告=跳过文件末尾 %d 行截断记录（断电半行）", droppedTail)
+	}
+	// 重放结束后把窗口对齐到当前北京时间：昨天的日额度不得带入今天。
+	now := time.Now()
+	apiKeys.mu.RLock()
+	for _, k := range apiKeys.byID {
+		if k.legacy {
+			continue
+		}
+		k.mu.Lock()
+		k.rollWindowLocked(now)
+		k.mu.Unlock()
+	}
+	apiKeys.mu.RUnlock()
 	if replayed > 0 {
 		log.Printf("[账本] 结果=已重放 %d 条消费记录 当前序号=%d", replayed, ledger.seq.Load())
 	}
 	return nil
 }
-
-// ledgerApply 把一条记录累加到对应 Key（重放与实时写共用）。
+// ledgerApply 重放一条记录。全部按增量累加；日/月额度只累加归属窗口等于
+// 当前窗口的条目，昨天的消费不会算进今天的额度。
 func ledgerApply(e ledgerEntry) {
 	apiKeys.mu.RLock()
 	k := apiKeys.byID[e.Key]
@@ -139,21 +165,34 @@ func ledgerApply(e ledgerEntry) {
 	if k == nil {
 		return // Key 已删除：历史仍留在 WAL/快照里，只是不再有归属对象
 	}
+	now := time.Now()
+	todayDay, todayMonth := keyDayKey(now), keyMonthKey(now)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if e.Reset {
-		k.usage = apiKeyUsage{DayKey: keyDayKey(time.Now()), MonthKey: keyMonthKey(time.Now())}
+	if e.Kind == "reset" {
+		at := time.UnixMilli(e.At)
+		k.usage = apiKeyUsage{DayKey: keyDayKey(at), MonthKey: keyMonthKey(at)}
 		return
 	}
 	if e.Known && e.Credit > 0 {
 		k.usage.Total += e.Credit
-		k.usage.Daily += e.Credit
-		k.usage.Monthly += e.Credit
+		if e.DayKey == todayDay {
+			k.usage.Daily += e.Credit
+		}
+		if e.MonthKey == todayMonth {
+			k.usage.Monthly += e.Credit
+		}
+	}
+	if e.Zero {
+		k.usage.ZeroCost++
+	}
+	if e.Unknown {
+		k.usage.Unknown++
 	}
 	k.usage.Requests++
-	k.usage.Input += e.Input
-	k.usage.Output += e.Output
-	k.usage.Cached += e.Cached
+	k.usage.Input += e.InDelta
+	k.usage.Output += e.OutDelta
+	k.usage.Cached += e.CachedDelta
 	if e.At > k.usage.LastUsedAt {
 		k.usage.LastUsedAt = e.At
 	}
@@ -161,47 +200,54 @@ func ledgerApply(e ledgerEntry) {
 
 func nextLedgerSeq() int64 { return ledger.seq.Add(1) }
 
-// ledgerAppend 只负责落盘；内存累加已由 keySettle 完成。
-func ledgerAppend(e ledgerEntry) {
-	if e.Seq == 0 {
-		e.Seq = nextLedgerSeq()
-	}
+// ledgerAppendLocked 在已持有 ledger.mu 时追加一行（不负责加锁）。
+func ledgerAppendLocked(e ledgerEntry) error {
 	if !ledger.writable || ledger.file == nil {
 		apiKeys.degraded.Store(true)
-		return
+		return errors.New("账本不可写")
 	}
 	line, err := json.Marshal(e)
 	if err != nil {
 		apiKeys.degraded.Store(true)
-		return
+		return err
 	}
 	line = append(line, '\n')
-	ledger.mu.Lock()
-	_, werr := ledger.file.Write(line)
-	if werr == nil {
-		werr = ledger.file.Sync()
+	if _, werr := ledger.file.Write(line); werr != nil {
+		apiKeys.degraded.Store(true)
+		return werr
+	}
+	if err := ledger.file.Sync(); err != nil {
+		apiKeys.degraded.Store(true)
+		return err
 	}
 	ledger.pending++
-	needCompact := ledger.pending >= ledgerCompactEvery
-	ledger.mu.Unlock()
-	if werr != nil {
-		apiKeys.degraded.Store(true)
-		log.Printf("[账本] 警告=追加写入失败 原因=%v 业务影响=有限额 Key 将停止放行", werr)
-		return
+	return nil
+}
+
+func ledgerAppend(e ledgerEntry) {
+	if e.Seq == 0 {
+		e.Seq = nextLedgerSeq()
 	}
-	if needCompact {
-		ledgerCompact()
+	ledger.mu.Lock()
+	err := ledgerAppendLocked(e)
+	ledger.mu.Unlock()
+	if err != nil {
+		log.Printf("[账本] 警告=追加写入失败 原因=%v 业务影响=有限额 Key 将停止放行", err)
 	}
 }
 
 func ledgerAppendReset(keyID string, now time.Time) {
-	ledgerAppend(ledgerEntry{Seq: nextLedgerSeq(), Key: keyID, Reset: true, At: now.UnixMilli()})
+	ledger.mu.Lock()
+	e := ledgerEntry{Seq: nextLedgerSeq(), Key: keyID, Kind: "reset", At: now.UnixMilli()}
+	_ = ledgerAppendLocked(e)
+	ledger.mu.Unlock()
 }
 
 // ledgerSnapshotSoon 在重置等低频操作后立即压缩一次，保证重启可见。
 func ledgerSnapshotSoon() { ledgerCompact() }
 
-// ledgerCompact 写快照并截断 WAL。快照用临时文件 + 原子重命名。
+// ledgerCompact 写快照并截断 WAL。全程持 ledger.mu，与结算串行，
+// 避免"快照已包含 A、WAL 又写了 A"或"快照没包含 A、WAL 被截断"这两类窗口。
 func ledgerCompact() {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()

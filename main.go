@@ -3654,7 +3654,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		// 3) 既没有旧 Key 也没有受管 Key：保持原有的"未配置鉴权=开放"语义。
-		if legacy == "" && !hasManagedAPIKeys() {
+		if !authRequired() {
 			log.Printf("[中间件-鉴权] traceId=%s 结果=通过", w.Header().Get("X-Trace-ID"))
 			next.ServeHTTP(w, r)
 			return
@@ -3669,16 +3669,20 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// hasManagedAPIKeys 报告是否存在受管密钥（不含兼容旧 Key）。
-func hasManagedAPIKeys() bool {
+// authRequired 决定是否必须出示密钥。只要曾经配置过任何鉴权手段就要求鉴权：
+//   - 配置了兼容旧 Key；
+//   - 创建过受管 Key（即使后来全部禁用或删除，requireAuth 也不会自动关闭）；
+//   - 密钥表/账本异常（fail closed，绝不因为读不到配置就放行）。
+func authRequired() bool {
+	if currentAPIKey() != "" {
+		return true
+	}
+	if apiKeys.degraded.Load() {
+		return true
+	}
 	apiKeys.mu.RLock()
 	defer apiKeys.mu.RUnlock()
-	for _, k := range apiKeys.byID {
-		if !k.legacy && k.Enabled {
-			return true
-		}
-	}
-	return false
+	return apiKeys.requireAuth
 }
 
 // -----------------------------------------------------------------------------

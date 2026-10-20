@@ -137,13 +137,21 @@ func keyAdminSnapshot(k *apiKey) keyAdminView {
 	view := keyUsageSnapshot(k)
 	k.mu.Lock()
 	reject := k.lastReject
+	name, note := k.Name, k.Note
+	enabled, expires := k.Enabled, k.ExpiresAt
+	models := append([]string(nil), k.Models...)
+	conc := k.MaxConcurrent
+	total, daily, monthly := k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly
 	k.mu.Unlock()
+	if conc <= 0 {
+		conc = defaultKeyConcurrent
+	}
 	return keyAdminView{
-		ID: k.ID, Name: k.Name, Masked: maskKeyPrefix(k), Status: view.Status, Legacy: k.isLegacy(),
-		Enabled: k.Enabled && !k.isLegacy(), CreatedAt: k.CreatedAt, ExpiresAt: k.ExpiresAt,
-		LastUsedAt: view.LastUsed, Models: k.Models, MaxConcurrent: k.concurrency(),
-		QuotaTotal: k.QuotaTotal, QuotaDaily: k.QuotaDaily, QuotaMonthly: k.QuotaMonthly,
-		Note: k.Note, Usage: view, LastReject: reject,
+		ID: k.ID, Name: name, Masked: maskKeyPrefix(k), Status: view.Status, Legacy: k.isLegacy(),
+		Enabled: enabled && !k.isLegacy(), CreatedAt: k.CreatedAt, ExpiresAt: expires,
+		LastUsedAt: view.LastUsed, Models: models, MaxConcurrent: conc,
+		QuotaTotal: total, QuotaDaily: daily, QuotaMonthly: monthly,
+		Note: note, Usage: view, LastReject: reject,
 	}
 }
 

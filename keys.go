@@ -124,15 +124,19 @@ func (k *apiKey) allowModel(model string) bool {
 type keyStoreData struct {
 	Version int       `json:"version"`
 	Keys    []*apiKey `json:"keys"`
+	// RequireAuth 只要曾经创建过受管 Key 就为 true，且不会因为删光 Key 自动关闭。
+	// 否则"禁用/删除最后一把 Key"会意外退回开放模式。
+	RequireAuth bool `json:"requireAuth"`
 }
 
 // keyStore 管理全部受管密钥。
 type keyStore struct {
 	mu       sync.RWMutex
 	byID     map[string]*apiKey
-	byPrefix map[string]*apiKey
-	path     string
-	degraded atomic.Bool // 落盘失败：有限额 Key 一律拒绝，避免无约束放行
+	byPrefix    map[string]*apiKey
+	path        string
+	requireAuth bool
+	degraded    atomic.Bool // 落盘失败：有限额 Key 一律拒绝，避免无约束放行
 }
 
 var apiKeys = &keyStore{byID: map[string]*apiKey{}, byPrefix: map[string]*apiKey{}}
@@ -232,6 +236,7 @@ func keyStoreLoad() error {
 		apiKeys.byID[k.ID] = k
 		apiKeys.byPrefix[k.Prefix] = k
 	}
+	apiKeys.requireAuth = doc.RequireAuth || len(doc.Keys) > 0
 	return nil
 }
 
@@ -240,7 +245,7 @@ func (s *keyStore) persistLocked() error {
 	if s.path == "" {
 		s.path = keyFilePath("apikeys.json")
 	}
-	doc := keyStoreData{Version: 1, Keys: make([]*apiKey, 0, len(s.byID))}
+	doc := keyStoreData{Version: 1, RequireAuth: s.requireAuth, Keys: make([]*apiKey, 0, len(s.byID))}
 	for _, k := range s.byID {
 		if k.legacy {
 			continue // 兼容旧 Key 是运行时身份，不落盘
@@ -353,6 +358,7 @@ func keyCreate(in keyCreateOptions) (string, *apiKey, error) {
 	}
 	apiKeys.byID[k.ID] = k
 	apiKeys.byPrefix[prefix] = k
+	apiKeys.requireAuth = true
 	err = apiKeys.persistLocked()
 	apiKeys.mu.Unlock()
 	if err != nil {
@@ -415,9 +421,11 @@ func keyUpdate(id string, in keyCreateOptions) (*apiKey, error) {
 		apiKeys.mu.Unlock()
 		return nil, errKeyNotFound
 	}
+	k.mu.Lock()
 	k.Name, k.ExpiresAt, k.Models = in.Name, in.ExpiresAt, in.Models
 	k.MaxConcurrent, k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly = in.MaxConcurrent, in.QuotaTotal, in.QuotaDaily, in.QuotaMonthly
 	k.Note = in.Note
+	k.mu.Unlock()
 	err := apiKeys.persistLocked()
 	apiKeys.mu.Unlock()
 	if err != nil {
@@ -435,7 +443,9 @@ func keySetEnabled(id string, enabled bool) error {
 		apiKeys.mu.Unlock()
 		return errKeyNotFound
 	}
+	k.mu.Lock()
 	k.Enabled = enabled
+	k.mu.Unlock()
 	err := apiKeys.persistLocked()
 	apiKeys.mu.Unlock()
 	if err != nil {
@@ -556,22 +566,36 @@ func keyAdmit(k *apiKey, model string) (*keyAdmitError, func()) {
 		// 兼容旧 Key：不受额度与并发限制，行为与升级前一致。
 		return nil, func() {}
 	}
-	if !k.Enabled {
+	now := time.Now()
+	// 配置字段一律在 k.mu 下读取：管理接口会并发修改这些字段。
+	k.mu.Lock()
+	enabled := k.Enabled
+	expires := k.ExpiresAt
+	models := append([]string(nil), k.Models...)
+	limit := k.MaxConcurrent
+	total, daily, monthly := k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly
+	k.mu.Unlock()
+	if limit <= 0 {
+		limit = defaultKeyConcurrent
+	}
+
+	if !enabled {
 		return &keyAdmitError{403, "key_disabled", "该 API Key 已被禁用"}, nil
 	}
-	now := time.Now()
-	if k.ExpiresAt > 0 && now.UnixMilli() >= k.ExpiresAt {
+	if expires > 0 && now.UnixMilli() >= expires {
 		return &keyAdmitError{403, "key_expired", "该 API Key 已过期"}, nil
 	}
-	if !k.allowModel(model) {
+	// 模型未知（准入层拿不到请求体）时不判定白名单；白名单由各协议 handler
+	// 在解析出 model 之后用 keyModelAllowed 检查。否则空模型会拦掉所有请求。
+	if model != "" && !keyModelsAllow(models, model) {
 		return &keyAdmitError{403, "model_not_allowed", "该 API Key 无权使用模型 " + normalizeModelName(model)}, nil
 	}
-	if k.limited() && apiKeys.degraded.Load() {
+	limited := total > 0 || daily > 0 || monthly > 0
+	if limited && apiKeys.degraded.Load() {
 		return &keyAdmitError{503, "ledger_unavailable", "记账存储不可用，已暂停该 Key 的请求"}, nil
 	}
 
 	// 并发位：CAS 占位，失败即视为超限。
-	limit := k.concurrency()
 	if limit > 0 {
 		for {
 			cur := atomic.LoadInt32(&k.inflight)
@@ -597,27 +621,26 @@ func keyAdmit(k *apiKey, model string) (*keyAdmitError, func()) {
 	k.mu.Lock()
 	k.rollWindowLocked(now)
 	usage := k.usage
-	unknown := usage.Unknown
 	k.lastReject = ""
 	k.mu.Unlock()
 
-	if k.limited() {
-		if k.QuotaTotal > 0 && usage.Total >= k.QuotaTotal {
+	if limited {
+		if total > 0 && usage.Total >= total {
 			release()
 			k.setReject("total")
 			return &keyAdmitError{429, "credit_quota_exhausted", "该 API Key 的总积分额度已用尽"}, nil
 		}
-		if k.QuotaDaily > 0 && usage.Daily >= k.QuotaDaily {
+		if daily > 0 && usage.Daily >= daily {
 			release()
 			k.setReject("daily")
 			return &keyAdmitError{429, "credit_quota_exhausted", "该 API Key 的今日积分额度已用尽"}, nil
 		}
-		if k.QuotaMonthly > 0 && usage.Monthly >= k.QuotaMonthly {
+		if monthly > 0 && usage.Monthly >= monthly {
 			release()
 			k.setReject("monthly")
 			return &keyAdmitError{429, "credit_quota_exhausted", "该 API Key 的本月积分额度已用尽"}, nil
 		}
-		if unknown >= defaultUnknownTolerance {
+		if usage.Unknown >= defaultUnknownTolerance {
 			release()
 			k.setReject("unknown")
 			return &keyAdmitError{429, "credit_quota_exhausted", "上游长期未返回计费字段，该 Key 已进入安全状态，请联系管理员"}, nil
@@ -626,6 +649,19 @@ func keyAdmit(k *apiKey, model string) (*keyAdmitError, func()) {
 	return nil, release
 }
 
+// keyModelsAllow 判断模型是否在给定白名单内（空名单 = 不限）。
+func keyModelsAllow(models []string, model string) bool {
+	if len(models) == 0 {
+		return true
+	}
+	name := normalizeModelName(model)
+	for _, allowed := range models {
+		if normalizeModelName(allowed) == name {
+			return true
+		}
+	}
+	return false
+}
 func (k *apiKey) setReject(reason string) {
 	k.mu.Lock()
 	k.lastReject = reason
@@ -659,48 +695,73 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	valid := hasCredit && credit >= 0 && !isBadFloat(credit)
 	now := time.Now()
 
-	k.mu.Lock()
-	k.rollWindowLocked(now)
-	outcome := settleUnknown
+	e := ledgerEntry{
+		Key: k.ID, Attempt: attemptID, Kind: "settle", Status: status,
+		At: now.UnixMilli(), DayKey: keyDayKey(now), MonthKey: keyMonthKey(now),
+	}
+	var outcome keySettleOutcome
 	switch {
 	case valid && credit > 0:
-		k.usage.Total += credit
-		k.usage.Daily += credit
-		k.usage.Monthly += credit
+		e.Credit, e.Known = credit, true
 		outcome = settleCharged
-	case valid && credit == 0:
-		k.usage.ZeroCost++
+	case valid:
+		e.Zero = true
 		outcome = settleZero
 	default:
-		k.usage.Unknown++
+		e.Unknown = true
 		outcome = settleUnknown
 	}
-	k.usage.Requests++
 	if v := statsTokenValue(usage, "prompt_tokens"); v != nil {
-		k.usage.Input += *v
+		e.InDelta = *v
 	}
 	if v := statsTokenValue(usage, "completion_tokens"); v != nil {
-		k.usage.Output += *v
+		e.OutDelta = *v
 	}
 	if cached, _, ok := statsCachedValue(usage); ok {
-		k.usage.Cached += cached
+		e.CachedDelta = cached
 	}
+
+	// 并发窗口：分配序号 -> 更新内存 -> 追加 WAL，三步都在 ledger.mu 内完成，
+	// 与压缩快照互斥。这样快照的 lastSeq 与内存状态、WAL 内容始终一致，
+	// 既不会重放重复记账，也不会出现"快照漏掉、WAL 又被截断"的丢账。
+	ledger.mu.Lock()
+	e.Seq = nextLedgerSeq()
+	k.mu.Lock()
+	k.rollWindowLocked(now)
+	if e.Known {
+		k.usage.Total += e.Credit
+		k.usage.Daily += e.Credit
+		k.usage.Monthly += e.Credit
+	}
+	if e.Zero {
+		k.usage.ZeroCost++
+	}
+	if e.Unknown {
+		k.usage.Unknown++
+	}
+	k.usage.Requests++
+	k.usage.Input += e.InDelta
+	k.usage.Output += e.OutDelta
+	k.usage.Cached += e.CachedDelta
 	k.usage.LastUsedAt = now.UnixMilli()
 	snapshot := k.usage
 	k.mu.Unlock()
 
-	ledgerAppend(ledgerEntry{
-		Seq: nextLedgerSeq(), Key: k.ID, Attempt: attemptID, Credit: credit,
-		Known: valid, At: now.UnixMilli(), Status: status,
-		Input: snapshot.Input, Output: snapshot.Output, Cached: snapshot.Cached,
-	})
+	if err := ledgerAppendLocked(e); err != nil {
+		log.Printf("[账本] 警告=结算落盘失败 key=%s attempt=%s 原因=%v 业务影响=内存已记，有限额 Key 已停止放行", k.ID, attemptID, err)
+	}
+	needCompact := ledger.pending >= ledgerCompactEvery
+	ledger.mu.Unlock()
+
+	if needCompact {
+		ledgerCompact()
+	}
 	if outcome == settleUnknown && k.limited() {
 		log.Printf("[APIKey] 警告=本次未获得计费字段 key=%s attempt=%s 业务影响=累计未知次数=%d，达到 %d 次后停止放行",
 			k.ID, attemptID, snapshot.Unknown, defaultUnknownTolerance)
 	}
 	return outcome
 }
-
 func isBadFloat(v float64) bool { return v != v || v > 1e308 || v < -1e308 }
 
 // settledAttempts 保存进程内已结算的 attempt，避免重复记账。
@@ -777,34 +838,37 @@ func keyUsageSnapshot(k *apiKey) keyUsageView {
 	k.mu.Lock()
 	k.rollWindowLocked(now)
 	u := k.usage
+	quotaTotal, quotaDaily, quotaMonthly := k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly
+	enabled, expires, name := k.Enabled, k.ExpiresAt, k.Name
 	k.mu.Unlock()
 	view := keyUsageView{
-		Name: k.Name, Legacy: k.legacy, Used: u.Total, DailyUsed: u.Daily, MonthUsed: u.Monthly,
+		Name: name, Legacy: k.legacy, Used: u.Total, DailyUsed: u.Daily, MonthUsed: u.Monthly,
 		Requests: u.Requests, Input: u.Input, Output: u.Output, Cached: u.Cached,
 		Unknown: u.Unknown, ZeroCost: u.ZeroCost, LastUsed: u.LastUsedAt,
-		ExpiresAt: k.ExpiresAt, DayKey: u.DayKey, MonthKey: u.MonthKey,
+		ExpiresAt: expires, DayKey: u.DayKey, MonthKey: u.MonthKey,
 	}
-	view.Limit, view.Remaining = limitPtr(k.QuotaTotal, u.Total)
-	_, view.DailyLeft = limitPtr(k.QuotaDaily, u.Daily)
+	view.Limit, view.Remaining = limitPtr(quotaTotal, u.Total)
+	_, view.DailyLeft = limitPtr(quotaDaily, u.Daily)
 	view.MonthLeft = nil
-	if k.QuotaMonthly > 0 {
-		l := k.QuotaMonthly
+	if quotaMonthly > 0 {
+		l := quotaMonthly
 		left := l - u.Monthly
 		if left < 0 {
 			left = 0
 		}
 		view.MonthLeft = &left
 	}
+	limited := quotaTotal > 0 || quotaDaily > 0 || quotaMonthly > 0
 	switch {
-	case !k.Enabled:
+	case enabled == false:
 		view.Status = "disabled"
-	case view.ExpiresAt > 0 && now.UnixMilli() >= view.ExpiresAt:
+	case expires > 0 && now.UnixMilli() >= expires:
 		view.Status = "expired"
-	case k.limited() && view.Remaining != nil && *view.Remaining <= 0:
+	case limited && view.Remaining != nil && *view.Remaining <= 0:
 		view.Status = "exhausted"
-	case k.limited() && view.DailyLeft != nil && *view.DailyLeft <= 0:
+	case limited && view.DailyLeft != nil && *view.DailyLeft <= 0:
 		view.Status = "exhausted"
-	case k.limited() && view.MonthLeft != nil && *view.MonthLeft <= 0:
+	case limited && view.MonthLeft != nil && *view.MonthLeft <= 0:
 		view.Status = "exhausted"
 	default:
 		view.Status = "active"

@@ -24,6 +24,7 @@ func resetKeyWorld(t *testing.T) string {
 	apiKeys.path = filepath.Join(dir, "apikeys.json")
 	apiKeys.mu.Unlock()
 	apiKeys.degraded.Store(false)
+	apiKeys.requireAuth = false
 	registerRuntimeKeys()
 	settledMu.Lock()
 	settledIDs = map[string]struct{}{}
@@ -45,6 +46,7 @@ func resetKeyWorld(t *testing.T) string {
 		apiKeys.byPrefix = map[string]*apiKey{}
 		apiKeys.mu.Unlock()
 		apiKeys.degraded.Store(false)
+		apiKeys.requireAuth = false
 		keyDataDir = "."
 		ledger.mu.Lock()
 		if ledger.file != nil {
