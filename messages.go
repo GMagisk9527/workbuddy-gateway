@@ -753,21 +753,27 @@ func intFloat(v any) int {
 // 已包含命中的缓存 token；Anthropic 的 input_tokens 不含缓存——不减的话
 // 客户端把 input 与 cache_read 相加时缓存会被算两遍。
 func (s *anthropicStreamState) anthropicUsage() map[string]any {
-	in, out, cached := 0, 0, 0
+	in, out, cached, created := 0, 0, 0, 0
 	if s.usage != nil {
 		in = intFloat(s.usage["prompt_tokens"])
 		out = intFloat(s.usage["completion_tokens"])
-		if d, ok := s.usage["prompt_tokens_details"].(map[string]any); ok {
-			cached = intFloat(d["cached_tokens"])
+		// 与 stats 共用同一套归一化：多字段只取一个，不相加。
+		if v, _, ok := statsCachedValue(s.usage); ok {
+			cached = int(v)
 		}
+		// 只有上游明确给出写入量时才透传；没有就是 0，绝不编造。
+		created = intFloat(s.usage["cache_creation_input_tokens"])
 	}
 	if cached > in {
 		cached = in // 上游给了畸形命中数时钳到非负
 	}
+	if created < 0 {
+		created = 0
+	}
 	return map[string]any{
 		"input_tokens":                in - cached,
 		"cache_read_input_tokens":     cached,
-		"cache_creation_input_tokens": 0,
+		"cache_creation_input_tokens": created,
 		"output_tokens":               out,
 	}
 }

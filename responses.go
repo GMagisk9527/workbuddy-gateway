@@ -724,8 +724,10 @@ func toResponsesUsage(u map[string]any) map[string]any {
 		total = in + out
 	}
 	cached, reasoningTokens := 0.0, 0.0
-	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
-		cached = numOr0(d["cached_tokens"])
+	// 统一走 statsCachedValue：兼容 prompt_cache_hit_tokens / cache_read_input_tokens /
+	// cached_tokens / *_details.cached_tokens 多种表示，只取一个、不相加。
+	if v, _, ok := statsCachedValue(u); ok {
+		cached = float64(v)
 	}
 	if d, ok := u["completion_tokens_details"].(map[string]any); ok {
 		reasoningTokens = numOr0(d["reasoning_tokens"])
@@ -762,6 +764,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	seq := 0
 	var eventBuf []byte
+	var sseWriteErr error
 	emit := func(eventType string, data map[string]any) {
 		data["type"] = eventType
 		data["sequence_number"] = seq
@@ -775,8 +778,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		eventBuf = append(eventBuf, "\ndata: "...)
 		eventBuf = append(eventBuf, b...)
 		eventBuf = append(eventBuf, '\n', '\n')
-		_, _ = w.Write(eventBuf)
-		flusher.Flush()
+		if err := writeSSE(w, flusher, eventBuf); err != nil {
+			sseWriteErr = err
+		}
 	}
 
 	created := time.Now().Unix()
@@ -792,13 +796,11 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	reasoningOpen := false
 	reasoningIndex := -1
 	reasoningItemID := ""
-	var reasoningSB strings.Builder
 
 	// message item 状态
 	msgOpen := false
 	msgIndex := -1
 	msgItemID := ""
-	var msgSB strings.Builder
 
 	// function_call item 状态
 	toolCalls := map[int]*mergedToolCall{}
@@ -858,6 +860,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
 	for scanner.Scan() {
+		if sseWriteErr != nil {
+			break
+		}
 		data := stripDataPrefixBytes(scanner.Bytes())
 		if len(data) == 0 {
 			continue
@@ -884,7 +889,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 						reasoningPrefix = respReasoningDeltaPrefix(make([]byte, 0, 192), reasoningItemID, reasoningIndex)
 					}
 					reasoningRaw = append(reasoningRaw, raw...)
-					emitRawDelta(w, flusher, &deltaBuf, reasoningPrefix, raw, &seq)
+					if err := emitRawDelta(w, flusher, &deltaBuf, reasoningPrefix, raw, &seq); err != nil {
+						sseWriteErr = err
+					}
 				}
 				if raw := view.content[c]; len(raw) > 0 {
 					openMessage()
@@ -954,14 +961,16 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 			if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
 				openReasoning()
-				reasoningSB.WriteString(rc)
+				// 统一累计到 raw 缓冲区：快慢路径可能逐片交替，只有单一累计器才能保证
+				// 收尾事件（*.done / response.completed）包含全部输出。
+				reasoningRaw = append(reasoningRaw, jsonEscapeBody(rc)...)
 				emit("response.reasoning_summary_text.delta", map[string]any{
 					"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "delta": rc,
 				})
 			}
 			if ct, ok := delta["content"].(string); ok && ct != "" {
 				openMessage()
-				msgSB.WriteString(ct)
+				msgRaw = append(msgRaw, jsonEscapeBody(ct)...)
 				emit("response.output_text.delta", map[string]any{
 					"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "delta": ct,
 				})
@@ -1015,6 +1024,12 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			}
 		}
 	}
+	if sseWriteErr != nil {
+		// 客户端已断开：关闭响应体会取消上游请求，停止继续消耗额度。
+		_ = resp.Body.Close()
+		log.Printf("[#%d] 下游写入失败，已终止本次流 (账号 %s)", reqID, acc.Path)
+		return
+	}
 	scanErr := scanner.Err()
 	completeTokenStream(body, scanErr == nil && finishReason != "")
 	if len(usageRaw) > 0 {
@@ -1023,14 +1038,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			usage = u
 		}
 	}
-	messageText := msgSB.String()
-	reasoningText := reasoningSB.String()
-	messageChars, reasoningChars := msgSB.Len(), reasoningSB.Len()
-	if mode == int32(fastPathOn) {
-		messageText = decodeJSONBody(msgRaw)
-		reasoningText = decodeJSONBody(reasoningRaw)
-		messageChars, reasoningChars = len(messageText), len(reasoningText)
-	}
+	messageText := decodeJSONBody(msgRaw)
+	reasoningText := decodeJSONBody(reasoningRaw)
+	messageChars, reasoningChars := len(messageText), len(reasoningText)
 	statsObserveUsage(r, usage, scanErr == nil && finishReason != "")
 	if scanErr != nil {
 		debugEvent(r, "error", "stream_response_failed", map[string]any{

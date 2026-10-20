@@ -521,3 +521,23 @@ func TestAffinityKeyIsolatesByClientIPWhenNoAPIKey(t *testing.T) {
 		t.Fatal("无 API Key 时，不同来源地址不应共享绑定")
 	}
 }
+
+// BenchmarkAffinityKeyStructuralBody 测"结构化前缀摘要"的真实开销：
+// 请求体是网关实际会发的那种（含 messages 数组与 tools），大小 ~80 KiB。
+func BenchmarkAffinityKeyStructuralBody(b *testing.B) {
+	quietBench()
+	setAffinityConfig(false, affinityModeHybrid, 0, 0, 0)
+	setAffinityConfig(true, affinityModePrefix, 1800, 4096, 64<<10)
+	msgs := []string{strings.Repeat("系统提示与工具说明。", 800), strings.Repeat("第一轮用户消息。", 200), "第二轮"}
+	body := buildUpstreamBody(msgs, `[{"name":"Bash"},{"name":"Read"}]`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	prepareConversationContext(req, nil)
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if affinityKeyFor(req, "m", body) == "" {
+			b.Fatal("空键")
+		}
+	}
+}

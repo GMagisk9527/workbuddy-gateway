@@ -17,9 +17,11 @@ package main
 // 打开方式见 config.example.json 的 affinity 段。
 
 import (
+	"bytes"
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"hash"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -101,11 +103,16 @@ func setAffinityConfig(enabled bool, mode string, ttlSeconds, capacity, headByte
 	prev := affinityCfg
 	affinityCfg = affinitySettings{Enabled: enabled, Mode: mode, TTL: ttl, Capacity: capacity, PrefixHeadByte: headBytes}
 	affinityConfigMu.Unlock()
-	if prev.Capacity != capacity {
-		affinityStoreResize(capacity)
-	}
-	if !enabled {
-		affinityStoreClear()
+
+	switch {
+	case !enabled:
+		if prev.Enabled {
+			// 关闭即丢弃绑定：重新启用后不应命中旧关系。
+			affinityStoreClear()
+		}
+	case prev.Capacity != capacity || prev.TTL != ttl:
+		// 容量或 TTL 变化：重建存储，新 TTL 立即对既有条目生效。
+		affinityStoreReconfigure(capacity, ttl)
 	}
 }
 
@@ -141,18 +148,34 @@ func newAffinityStore(capacity int, ttl time.Duration) *affinityStoreT {
 	}
 }
 
-func affinityStoreResize(capacity int) {
+
+
+// affinityStoreClear 真正清空绑定（禁用亲和时必须丢弃旧关系，避免重新启用后
+// 沿用过期/错误的账号绑定）。
+func affinityStoreClear() {
 	affinityStoreMu.Lock()
 	old := affinityStore
-	next := newAffinityStore(capacity, old.ttl)
+	affinityStore = newAffinityStore(old.cap, old.ttl)
+	affinityStoreMu.Unlock()
+	affinityMetrics.reset()
+}
+
+// affinityStoreReconfigure 在容量或 TTL 变化时重建存储：
+//   - 条目按最近使用顺序保留（LRU -> MRU，逐条 PushFront 才能保持顺序）；
+//   - 每条复制成新的 *affinityEntry，绝不让新旧存储共享同一个指针
+//     （否则两边各持不同的锁去改 item.at，就是数据竞争）；
+//   - 新 TTL 立即对既有条目生效（按各自的最近使用时间判断）。
+func affinityStoreReconfigure(capacity int, ttl time.Duration) {
+	if capacity <= 0 {
+		capacity = affinityDefaultCapacity
+	}
+	affinityStoreMu.Lock()
+	old := affinityStore
+	next := newAffinityStore(capacity, ttl)
 	old.mu.Lock()
-	for e := old.lru.Front(); e != nil; e = e.Next() {
+	for e := old.lru.Back(); e != nil; e = e.Prev() {
 		item := e.Value.(*affinityEntry)
-		if el, ok := next.items[item.key]; ok {
-			next.lru.MoveToFront(el)
-			continue
-		}
-		next.items[item.key] = next.lru.PushFront(item)
+		next.items[item.key] = next.lru.PushFront(&affinityEntry{key: item.key, account: item.account, at: item.at})
 		for next.lru.Len() > next.cap {
 			back := next.lru.Back()
 			if back == nil {
@@ -165,21 +188,6 @@ func affinityStoreResize(capacity int) {
 	old.mu.Unlock()
 	affinityStore = next
 	affinityStoreMu.Unlock()
-}
-
-func affinityStoreClear() {
-	affinityStoreMu.Lock()
-	old := affinityStore
-	next := newAffinityStore(old.cap, old.ttl)
-	old.mu.Lock()
-	for e := old.lru.Front(); e != nil; e = e.Next() {
-		item := e.Value.(*affinityEntry)
-		next.items[item.key] = next.lru.PushFront(&affinityEntry{key: item.key, account: item.account, at: item.at})
-	}
-	old.mu.Unlock()
-	affinityStore = next
-	affinityStoreMu.Unlock()
-	affinityMetrics.reset()
 }
 
 func (s *affinityStoreT) get(key string, now time.Time) (string, bool) {
@@ -274,12 +282,15 @@ func (m *affinityMetricsT) reset() {
 
 func affinitySnapshot() map[string]any {
 	settings := currentAffinitySettings()
+	affinityStoreMu.RLock()
+	entries := affinityStore.stats()
+	affinityStoreMu.RUnlock()
 	return map[string]any{
 		"enabled":      settings.Enabled,
 		"mode":         settings.Mode,
 		"ttlSeconds":   int(settings.TTL / time.Second),
 		"capacity":     settings.Capacity,
-		"entries":      affinityStore.stats(),
+		"entries":      entries,
 		"hit":          affinityMetrics.hit.Load(),
 		"miss":         affinityMetrics.miss.Load(),
 		"fallback":     affinityMetrics.fallback.Load(),
@@ -366,19 +377,116 @@ func stableSessionID(id string) string {
 	return id
 }
 
-// promptPrefixDigest 对上游请求体的前 head 字节做摘要。
+var (
+	affKeyMessages = []byte("messages")
+	affKeyTools    = []byte("tools")
+)
+
+// promptPrefixDigest 生成"可缓存前缀"的摘要。
 //
-// 只取头部而不是全量：多轮会话只在尾部追加，头部（system + 工具定义 + 早期历史）
-// 是不变量；全量哈希会随上下文线性变慢，且尾部变化本来就不应影响前缀身份。
+// 直接哈希请求体前 N 字节是不够的：当请求体本身就小于 N（小会话）时，尾部一追加
+// 消息整段字节都会变，亲和键随之失效。这里改为按**结构**取前缀：
+//
+//	摘要 = SHA256( messages 之前的全部字段 | tools 原文 | 前若干条完整消息 )
+//
+// 其中"前若干条"按字节预算在**消息边界**上截断，且至少包含 1 条。这样：
+//   - 会话只在尾部追加时，前缀完全不变（核心诉求）；
+//   - 改工具定义、改早期消息、换模型都会改变摘要；
+//   - 扫描量与哈希量都封顶在 head 字节，不随上下文增长。
+//
+// 找不到 messages 数组时（异常请求体）回退到旧的"前 N 字节"策略。
 func promptPrefixDigest(body []byte, head int) string {
 	if len(body) < affinityMinPrefixBytes {
 		return ""
 	}
-	if head <= 0 || head > len(body) {
-		head = len(body)
+	if head <= 0 {
+		head = affinityDefaultHeadBytes
 	}
-	sum := sha256.Sum256(body[:head])
+	h := sha256.New()
+	if !hashStablePrefix(h, body, head) {
+		n := len(body)
+		if head < n {
+			n = head
+		}
+		h.Reset()
+		h.Write([]byte("raw\x00"))
+		h.Write(body[:n])
+	}
+	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:16])
+}
+
+func hashStablePrefix(h hash.Hash, body []byte, budget int) bool {
+	i := skipWS(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return false
+	}
+	i++
+	msgStart, msgEnd := -1, -1
+	toolStart, toolEnd := -1, -1
+	for i < len(body) {
+		i = skipWS(body, i)
+		if i >= len(body) || body[i] == '}' {
+			break
+		}
+		ks := i
+		n, ok := skipString(body, i)
+		if !ok {
+			return false
+		}
+		key := body[ks+1 : n-1]
+		i = skipWS(body, n)
+		if i >= len(body) || body[i] != ':' {
+			return false
+		}
+		i = skipWS(body, i+1)
+		vs := i
+		end, ok := skipValue(body, i)
+		if !ok {
+			return false
+		}
+		switch {
+		case bytes.Equal(key, affKeyMessages):
+			msgStart, msgEnd = vs, end
+		case bytes.Equal(key, affKeyTools):
+			toolStart, toolEnd = vs, end
+		}
+		i = skipWS(body, end)
+		if i < len(body) && body[i] == ',' {
+			i++
+			continue
+		}
+		break
+	}
+	if msgStart < 0 || msgEnd <= msgStart {
+		return false
+	}
+
+	h.Write([]byte("v2\x00"))
+	h.Write(body[:msgStart]) // messages 之前的所有字段（model / max_tokens / ...）
+	if toolStart >= 0 {
+		h.Write([]byte("tools\x00"))
+		h.Write(body[toolStart:toolEnd])
+	}
+	h.Write([]byte("msgs\x00"))
+
+	// 只取第一条消息（通常是 system prompt，或会话的首个用户消息）。
+	// 会话增长只追加尾部，第一条永远不变 —— 这正是"可缓存前缀"的最小充分表示。
+	// 取更多条会引入"消息数从 N 变 N+1 时摘要跳变"的问题，反而制造误绑定。
+	j := skipWS(body, msgStart+1) // 跳过 '['
+	if j >= len(body) || body[j] == ']' {
+		return false
+	}
+	e, ok := skipValue(body, j)
+	if !ok {
+		return false
+	}
+	first := body[j:e]
+	if len(first) > 32<<10 {
+		first = first[:32<<10] // 封顶，避免超长 system 拖慢每轮哈希
+	}
+	h.Write(first)
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +504,8 @@ func affinityLookup(key string) string {
 	}
 	affinityStoreMu.RLock()
 	store := affinityStore
-	affinityStoreMu.RUnlock()
 	acc, ok := store.get(key, time.Now())
+	affinityStoreMu.RUnlock()
 	if !ok {
 		affinityMetrics.miss.Add(1)
 		return ""
@@ -415,8 +523,8 @@ func affinityRemember(key, accountPath string) {
 	}
 	affinityStoreMu.RLock()
 	store := affinityStore
-	affinityStoreMu.RUnlock()
 	store.put(key, accountPath, time.Now())
+	affinityStoreMu.RUnlock()
 	affinityMetrics.bound.Add(1)
 }
 
@@ -427,8 +535,8 @@ func affinityForget(key string) {
 	}
 	affinityStoreMu.RLock()
 	store := affinityStore
-	affinityStoreMu.RUnlock()
 	store.drop(key)
+	affinityStoreMu.RUnlock()
 	affinityMetrics.rebind.Add(1)
 }
 
@@ -449,4 +557,13 @@ func affinityLogLine(decision, key, account string) {
 		return
 	}
 	log.Printf("[会话亲和] 决策=%s 账号=%s 说明=仅在同资格账号间调整顺序；不记录会话键与提示词", decision, filepath.Base(account))
+}
+
+// shortDigest 返回内容的匿名摘要，用于诊断日志（不可逆、不含原文）。
+func shortDigest(s string) string {
+	if s == "" {
+		return "-"
+	}
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:6])
 }

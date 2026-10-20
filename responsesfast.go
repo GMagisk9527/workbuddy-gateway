@@ -118,7 +118,7 @@ func parseResponsesChunk(src []byte, v *respChunkView) bool {
 			return false
 		}
 		key := src[start+1 : n-1]
-		if ks.seen(key) {
+		if bytes.IndexByte(key, '\\') >= 0 || ks.seen(key) {
 			return false
 		}
 		i = skipWS(src, n)
@@ -220,7 +220,9 @@ func respParseChoice(src []byte, i int, v *respChunkView, c int) (int, bool) {
 			return i, false
 		}
 		key := src[start+1 : n-1]
-		if ks.seen(key) {
+		if bytes.IndexByte(key, '\\') >= 0 || ks.seen(key) {
+			// 转义键（如 "\u0063ontent"）解码后与字面量相同，按字节比较会漏字段；
+			// 重复键在原实现里经 map 合并，快路径无法等价表达 —— 两者都回退。
 			return i, false
 		}
 		i = skipWS(src, n)
@@ -285,7 +287,9 @@ func respParseDelta(src []byte, i int, v *respChunkView, c int) (int, bool) {
 			return i, false
 		}
 		key := src[start+1 : n-1]
-		if ks.seen(key) {
+		if bytes.IndexByte(key, '\\') >= 0 || ks.seen(key) {
+			// 转义键（如 "\u0063ontent"）解码后与字面量相同，按字节比较会漏字段；
+			// 重复键在原实现里经 map 合并，快路径无法等价表达 —— 两者都回退。
 			return i, false
 		}
 		i = skipWS(src, n)
@@ -302,9 +306,12 @@ func respParseDelta(src []byte, i int, v *respChunkView, c int) (int, bool) {
 				}
 				raw := src[i+1 : end-1]
 				if len(raw) > 0 {
-					if bytes.Equal(key, keyContB) {
+					// 与原路径对齐：只有 reasoning_content 会产出 reasoning 增量；
+					// reasoning 仅参与首 token 判定（hasFirstTokenDelta 认它）。
+					switch {
+					case bytes.Equal(key, keyContB):
 						v.content[c] = raw
-					} else if v.reasoning[c] == nil {
+					case bytes.Equal(key, keyReasB):
 						v.reasoning[c] = raw
 					}
 					v.firstTok = true
@@ -418,7 +425,9 @@ func respParseToolCall(src []byte, i int, t *respToolCallView) (int, bool) {
 			return i, false
 		}
 		key := src[start+1 : n-1]
-		if ks.seen(key) {
+		if bytes.IndexByte(key, '\\') >= 0 || ks.seen(key) {
+			// 转义键（如 "\u0063ontent"）解码后与字面量相同，按字节比较会漏字段；
+			// 重复键在原实现里经 map 合并，快路径无法等价表达 —— 两者都回退。
 			return i, false
 		}
 		i = skipWS(src, n)
@@ -485,7 +494,9 @@ func respParseFunction(src []byte, i int, t *respToolCallView) (int, bool) {
 			return i, false
 		}
 		key := src[start+1 : n-1]
-		if ks.seen(key) {
+		if bytes.IndexByte(key, '\\') >= 0 || ks.seen(key) {
+			// 转义键（如 "\u0063ontent"）解码后与字面量相同，按字节比较会漏字段；
+			// 重复键在原实现里经 map 合并，快路径无法等价表达 —— 两者都回退。
 			return i, false
 		}
 		i = skipWS(src, n)
@@ -569,16 +580,24 @@ func respToolDeltaPrefix(dst []byte, itemID string, outputIndex int) []byte {
 
 // emitRawDelta 写出一个 delta 事件：prefix 已含 event 行与 data 前缀，
 // raw 是上游原样转义体，seq 追加在末尾（键顺序与 map 序列化不同，语义一致）。
-func emitRawDelta(w io.Writer, fl http.Flusher, buf *[]byte, prefix, raw []byte, seq *int) {
+func emitRawDelta(w io.Writer, fl http.Flusher, buf *[]byte, prefix, raw []byte, seq *int) error {
 	b := append((*buf)[:0], prefix...)
 	b = append(b, raw...)
 	b = append(b, "\",\"sequence_number\":"...)
 	b = strconv.AppendInt(b, int64(*seq), 10)
 	b = append(b, '}', '\n', '\n')
 	*buf = b
-	_, _ = w.Write(b)
-	fl.Flush()
 	*seq = *seq + 1
+	return writeSSE(w, fl, b)
+}
+
+// writeSSE 写一帧并 flush；写失败返回错误，由调用方停止读取上游。
+func writeSSE(w io.Writer, fl http.Flusher, buf []byte) error {
+	if _, err := w.Write(buf); err != nil {
+		return err
+	}
+	fl.Flush()
+	return nil
 }
 
 // applyToolCallView 与 applyToolCallDelta 等价，入参是零拷贝视图。
@@ -602,4 +621,17 @@ func applyToolCallView(toolCalls map[int]*mergedToolCall, order *[]int, tv *resp
 	if args := decodeJSONBody(tv.args); args != "" {
 		st.Args.WriteString(args)
 	}
+}
+
+// jsonEscapeBody 把一个 Go 字符串转成 JSON 字符串体（不含两侧引号）。
+// 仅用于回退路径：慢路径拿到的是已解码文本，需要写回统一的 raw 累计器。
+func jsonEscapeBody(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	b, err := json.Marshal(s)
+	if err != nil || len(b) < 2 {
+		return []byte(s)
+	}
+	return b[1 : len(b)-1]
 }

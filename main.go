@@ -3925,7 +3925,9 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 				shadowChecked.Add(1)
 				if oldStr := cleanChunkJSON(string(cleanData)); !shadowCompare(oldStr, shadowOut) {
 					if shadowMismatch.Add(1) <= 3 {
-						log.Printf("[快路径影子] 不一致 原=%s 快=%s", truncate(oldStr, 300), truncate(string(shadowOut), 300))
+						// 只记录长度与匿名摘要：影子比对的是模型输出，绝不能落原文。
+						log.Printf("[快路径影子] 不一致 原长度=%d 快长度=%d 原摘要=%s 快摘要=%s 说明=仅用于诊断，未记录输出正文",
+							len(oldStr), len(shadowOut), shortDigest(oldStr), shortDigest(string(shadowOut)))
 					}
 				}
 			}
@@ -3981,7 +3983,11 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			frame = append(frame, cleanedChunk...)
 		}
 		frame = append(frame, '\n', '\n')
-		_, _ = w.Write(frame)
+		if _, werr := w.Write(frame); werr != nil {
+			// 客户端已断开：继续读上游只会白烧额度。关闭响应体即取消上游请求。
+			_ = resp.Body.Close()
+			return
+		}
 		flusher.Flush()
 	}
 	if len(usageRaw) > 0 {

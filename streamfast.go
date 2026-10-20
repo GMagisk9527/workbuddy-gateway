@@ -250,6 +250,9 @@ func functionCallIsStub(b []byte) bool {
 			return false
 		}
 		val := b[vs:i]
+		if bytes.IndexByte(key, '\\') >= 0 {
+			return false // 转义键：保守起见不判定为空壳
+		}
 		if len(val) > 0 && val[0] == '"' {
 			switch {
 			case bytes.Equal(key, keyName):
@@ -411,7 +414,7 @@ func cleanChunkInto(dst, src []byte, m *chunkMeta) ([]byte, bool) {
 			return dst[:base], false
 		}
 		key := src[ks+1 : n-1]
-		if keyDup(seen, key) {
+		if bytes.IndexByte(key, '\\') >= 0 || keyDup(seen, key) {
 			return dst[:base], false
 		}
 		if len(seen) >= len(seenBuf) {
@@ -535,7 +538,7 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 			return dst, i, false
 		}
 		key := src[ks+1 : n-1]
-		if keyDup(seen, key) {
+		if bytes.IndexByte(key, '\\') >= 0 || keyDup(seen, key) {
 			return dst, i, false
 		}
 		if len(seen) >= len(seenBuf) {
@@ -632,7 +635,7 @@ func rewriteDeltaInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int,
 			return dst, i, false
 		}
 		key := src[ks+1 : n-1]
-		if keyDup(seen, key) {
+		if bytes.IndexByte(key, '\\') >= 0 || keyDup(seen, key) {
 			return dst, i, false
 		}
 		if len(seen) >= len(seenBuf) {
