@@ -3871,6 +3871,8 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[#%d] POST /v1/chat/completions -> Upstream [Model: %s, Stream: %v]", reqID, modelName, isStream)
 	}
 
+	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
+	r = withPrefixDigest(r, digestFromRequestObject(reqObj, modelName, currentAffinitySettings().PrefixHeadByte))
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
 		return

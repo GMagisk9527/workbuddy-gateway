@@ -19,8 +19,10 @@ package main
 import (
 	"bytes"
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"hash"
 	"log"
 	"net/http"
@@ -147,8 +149,6 @@ func newAffinityStore(capacity int, ttl time.Duration) *affinityStoreT {
 		lru:   list.New(),
 	}
 }
-
-
 
 // affinityStoreClear 真正清空绑定（禁用亲和时必须丢弃旧关系，避免重新启用后
 // 沿用过期/错误的账号绑定）。
@@ -343,7 +343,13 @@ func affinityKeyFor(r *http.Request, model string, upstreamBody []byte) string {
 		}
 	}
 	if id == "" && (settings.Mode == affinityModePrefix || settings.Mode == affinityModeHybrid) {
-		if digest := promptPrefixDigest(upstreamBody, settings.PrefixHeadByte); digest != "" {
+		// 优先用请求转换阶段已解析对象算出的摘要（无需再扫一遍请求体）；
+		// 没有的话才回退到字节扫描。
+		digest := prefixDigestFromContext(r)
+		if digest == "" {
+			digest = promptPrefixDigest(upstreamBody, settings.PrefixHeadByte)
+		}
+		if digest != "" {
 			kind, id = "p", digest
 			affinityMetrics.prefixKey.Add(1)
 		}
@@ -566,4 +572,65 @@ func shortDigest(s string) string {
 	}
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:6])
+}
+
+// ---------------------------------------------------------------------------
+// 前缀摘要：优先用请求转换阶段已经解析好的结构，避免为算键再扫一遍历史
+// ---------------------------------------------------------------------------
+
+type affinityDigestCtxKey struct{}
+
+// withPrefixDigest 把当前请求的前缀摘要挂到 context 上。
+func withPrefixDigest(r *http.Request, digest string) *http.Request {
+	if r == nil || digest == "" {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), affinityDigestCtxKey{}, digest))
+}
+
+func prefixDigestFromContext(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if v, ok := r.Context().Value(affinityDigestCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// digestFromRequestObject 用已经解析好的请求对象生成前缀摘要。
+//
+// 成本只与"首条消息 + tools"成正比，与历史长度无关（不再扫描 messages 数组）。
+// 覆盖影响上游缓存的三个要素：model、tools（含顺序）、可缓存前缀的第一条消息。
+func digestFromRequestObject(obj map[string]any, model string, budget int) string {
+	if obj == nil {
+		return ""
+	}
+	if budget <= 0 {
+		budget = affinityDefaultHeadBytes
+	}
+	h := sha256.New()
+	h.Write([]byte("v4\x00"))
+	h.Write([]byte(normalizeModelName(model)))
+	h.Write([]byte{0})
+	if tools, ok := obj["tools"]; ok {
+		if b, err := json.Marshal(tools); err == nil && len(b) > 0 {
+			if len(b) > budget {
+				b = b[:budget]
+			}
+			h.Write([]byte("tools\x00"))
+			h.Write(b)
+		}
+	}
+	if msgs, ok := obj["messages"].([]any); ok && len(msgs) > 0 {
+		if b, err := json.Marshal(msgs[0]); err == nil && len(b) > 0 {
+			if len(b) > budget {
+				b = b[:budget]
+			}
+			h.Write([]byte("msg0\x00"))
+			h.Write(b)
+		}
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:16])
 }

@@ -206,25 +206,88 @@ func TestAffinityDisableClearsBindings(t *testing.T) {
 	}
 }
 
+// 只用公开的配置入口（setAffinityConfig）验证热加载，不直接改存储内部字段。
 func TestAffinityTTLHotUpdate(t *testing.T) {
 	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
 	enableAffinity(t, true, affinityModeSession)
+
 	key := "b" + strings.Repeat("0", 31)
 	affinityRemember(key, "acc.json")
 	if acc := affinityLookup(key); acc != "acc.json" {
 		t.Fatal("前提：应命中")
 	}
-	// 热更新 TTL 到 10ms：既有条目按新的 TTL 判定
-	setAffinityConfig(true, affinityModeSession, 0, 4096, 65536)
-	affinityStoreMu.RLock()
-	affinityStore.mu.Lock()
-	affinityStore.ttl = 10 * time.Millisecond
-	affinityStore.mu.Unlock()
-	affinityStoreMu.RUnlock()
 
-	time.Sleep(30 * time.Millisecond)
+	// 热加载：TTL 从 1800s 改成 1s（配置对象与存储参数必须同时生效）
+	setAffinityConfig(true, affinityModeSession, 1, 4096, 65536)
+	affinityStoreMu.RLock()
+	gotTTL := affinityStore.ttl
+	gotCap := affinityStore.cap
+	affinityStoreMu.RUnlock()
+	if gotTTL != time.Second || gotCap != 4096 {
+		t.Fatalf("热加载后存储参数应与配置一致，实际 ttl=%v cap=%d", gotTTL, gotCap)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
 	if acc := affinityLookup(key); acc != "" {
-		t.Fatalf("TTL 缩短后应立即过期，实际 %q", acc)
+		t.Fatalf("TTL 缩短到 1s 后旧绑定应过期，实际仍命中 %q", acc)
+	}
+}
+
+// 启用 -> 禁用 -> 重新启用：绑定必须被真正丢弃，且重新启用后可以正常建立新绑定。
+func TestAffinityEnableDisableReenable(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModeSession)
+
+	key := "c" + strings.Repeat("0", 31)
+	affinityRemember(key, "acc.json")
+	if affinityLookup(key) == "" {
+		t.Fatal("前提：启用时应命中")
+	}
+
+	setAffinityConfig(false, affinityModeSession, 1800, 4096, 65536)
+	if affinityLookup(key) != "" {
+		t.Fatal("禁用后不应再命中")
+	}
+	affinityStoreMu.RLock()
+	size := affinityStore.stats()
+	affinityStoreMu.RUnlock()
+	if size != 0 {
+		t.Fatalf("禁用后存储应为空，实际 %d", size)
+	}
+
+	// 重新启用：旧绑定不得复活，新绑定可以建立
+	setAffinityConfig(true, affinityModeSession, 1800, 4096, 65536)
+	if affinityLookup(key) != "" {
+		t.Fatal("重新启用后不应复活旧绑定")
+	}
+	affinityRemember(key, "acc2.json")
+	if acc := affinityLookup(key); acc != "acc2.json" {
+		t.Fatalf("重新启用后应能建立新绑定，实际 %q", acc)
+	}
+}
+
+// 容量热更新：缩容后存储容量与条目数都应符合新配置。
+func TestAffinityCapacityHotUpdate(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModeSession)
+
+	for i := 0; i < 20; i++ {
+		affinityRemember("k"+string(rune('a'+i)), "acc.json")
+	}
+	setAffinityConfig(true, affinityModeSession, 1800, 5, 65536)
+
+	affinityStoreMu.RLock()
+	capNow := affinityStore.cap
+	size := affinityStore.stats()
+	affinityStoreMu.RUnlock()
+	if capNow != 5 {
+		t.Fatalf("容量应更新为 5，实际 %d", capNow)
+	}
+	if size > 5 {
+		t.Fatalf("缩容后条目数不应超过 5，实际 %d", size)
 	}
 }
 
@@ -422,5 +485,80 @@ func TestShortDigestHasNoPlaintext(t *testing.T) {
 	}
 	if shortDigest("") != "-" {
 		t.Fatal("空串应返回占位符")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 结构化前缀摘要（用已解析对象，不再扫描历史）
+// ---------------------------------------------------------------------------
+
+func TestDigestFromRequestObjectStableWhenAppending(t *testing.T) {
+	base := map[string]any{
+		"model": "m",
+		"tools": []any{map[string]any{"name": "Bash"}},
+		"messages": []any{
+			map[string]any{"role": "system", "content": strings.Repeat("系统提示。", 200)},
+			map[string]any{"role": "user", "content": "第一轮"},
+		},
+	}
+	d1 := digestFromRequestObject(base, "m", 64<<10)
+
+	// 只在尾部追加：首条消息与 tools 未变 → 摘要必须不变
+	grown := map[string]any{
+		"model": "m",
+		"tools": []any{map[string]any{"name": "Bash"}},
+		"messages": []any{
+			map[string]any{"role": "system", "content": strings.Repeat("系统提示。", 200)},
+			map[string]any{"role": "user", "content": "第一轮"},
+			map[string]any{"role": "assistant", "content": "回答"},
+			map[string]any{"role": "user", "content": "第二轮"},
+		},
+	}
+	if d2 := digestFromRequestObject(grown, "m", 64<<10); d2 != d1 {
+		t.Fatalf("追加消息后摘要不应变化: %q vs %q", d1, d2)
+	}
+
+	// 改 tools → 变
+	withTools := map[string]any{
+		"model":    "m",
+		"tools":    []any{map[string]any{"name": "Read"}},
+		"messages": base["messages"],
+	}
+	if digestFromRequestObject(withTools, "m", 64<<10) == d1 {
+		t.Fatal("工具变化必须改变摘要")
+	}
+	// 换模型 → 变
+	if digestFromRequestObject(base, "other", 64<<10) == d1 {
+		t.Fatal("模型变化必须改变摘要")
+	}
+	// 改首条消息 → 变
+	changed := map[string]any{
+		"model": "m",
+		"tools": []any{map[string]any{"name": "Bash"}},
+		"messages": []any{
+			map[string]any{"role": "system", "content": "完全不同的系统提示"},
+			map[string]any{"role": "user", "content": "第一轮"},
+		},
+	}
+	if digestFromRequestObject(changed, "m", 64<<10) == d1 {
+		t.Fatal("首条消息变化必须改变摘要")
+	}
+}
+
+func TestAffinityKeyUsesContextDigest(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModePrefix)
+	req, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.RemoteAddr = "192.0.2.9:1234"
+	req = withPrefixDigest(req, "digest-from-object")
+
+	k1 := affinityKeyFor(req, "m", bigBody("x", 4096))
+	k2 := affinityKeyFor(req, "m", bigBody("different-bytes", 4096))
+	if k1 == "" {
+		t.Fatal("应生成键")
+	}
+	if k1 != k2 {
+		t.Fatal("有结构化摘要时应优先使用它，而不是重新扫描请求体")
 	}
 }

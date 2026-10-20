@@ -107,6 +107,8 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[#%d] POST /v1/responses -> Upstream [Model: %s, Stream: %v]", reqID, modelName, isStream)
 
+	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
+	r = withPrefixDigest(r, digestFromRequestObject(chatReq, modelName, currentAffinitySettings().PrefixHeadByte))
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
 		return
@@ -883,6 +885,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				finishReason = view.finish
 			}
 			for c := 0; c < view.nChoices; c++ {
+				if sseWriteErr != nil {
+					break
+				}
 				if raw := view.reasoning[c]; len(raw) > 0 {
 					openReasoning()
 					if reasoningPrefix == nil {
@@ -1022,6 +1027,10 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 					})
 				}
 			}
+		}
+		if sseWriteErr != nil {
+			_ = resp.Body.Close()
+			break
 		}
 	}
 	if sseWriteErr != nil {

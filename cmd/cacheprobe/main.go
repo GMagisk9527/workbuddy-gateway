@@ -40,6 +40,9 @@ type probeConfig struct {
 	filler   int
 	gap      time.Duration
 	timeout  time.Duration
+	nonce    string
+	maxTok   int
+	only     string
 }
 
 type probeResult struct {
@@ -53,8 +56,9 @@ type probeResult struct {
 	cacheField   string
 	totalTokens  int64
 	events       int
-	ttft         time.Duration
-	ttftSet      bool // 独立标志：避免"0 时长"与"没收到增量"混淆
+	firstEvent   time.Duration // 首个 SSE 事件到达
+	ttft         time.Duration // 首个有效输出增量
+	ttftSet      bool          // 独立标志：避免"0 时长"与"没收到增量"混淆
 	elapsed      time.Duration
 	status       int
 	err          string
@@ -70,17 +74,20 @@ func main() {
 	flag.IntVar(&cfg.filler, "filler", 240, "前缀填充段数量（每段约 30 个中文字符）")
 	flag.DurationVar(&cfg.gap, "gap", 0, "每轮之间的等待（用于测缓存 TTL，如 100s）")
 	flag.DurationVar(&cfg.timeout, "timeout", 180*time.Second, "单请求超时")
+	flag.StringVar(&cfg.nonce, "nonce", "", "独一无二的前缀标记（用于构造冷缓存）")
+	flag.IntVar(&cfg.maxTok, "max-tokens", 16, "输出上限，控制测试成本")
+	flag.StringVar(&cfg.only, "only", "", "只跑指定场景前缀（A/B/C/D/E），留空跑全部")
 	flag.Parse()
 
 	if cfg.apiKey == "" {
 		fmt.Fprintln(os.Stderr, "提示：未提供 -key（或 WBG_API_KEY）。网关未启用 API Key 校验时可直接留空。")
 	}
 
-	prefix := buildPrefix(cfg.filler)
+	prefix := buildPrefix(cfg.filler, cfg.nonce)
 	toolsA := buildTools("Bash")
 	toolsB := buildTools("ReadFile")
 
-	scenarios := []struct {
+	allScenarios := []struct {
 		phase   string
 		session func(int) string
 		tools   string
@@ -93,8 +100,28 @@ func main() {
 		{"E 同前缀+同 session（TTL 观察）", func(i int) string { return "probe-session-fixed" }, toolsA, prefix},
 	}
 
-	fmt.Printf("网关=%s 模型=%s 协议=%s 每场景 %d 轮 前缀填充=%d 段\n\n", cfg.url, cfg.model, cfg.protocol, cfg.rounds, cfg.filler)
-	fmt.Printf("%-40s %4s %9s %9s %8s %9s %9s %6s\n", "场景", "轮次", "prompt", "cached", "命中率", "TTFT", "耗时", "事件")
+	scenarios := allScenarios
+	if cfg.only != "" {
+		var picked []struct {
+			phase   string
+			session func(int) string
+			tools   string
+			prefix  string
+		}
+		for _, sc := range allScenarios {
+			if strings.HasPrefix(sc.phase, strings.ToUpper(cfg.only)) {
+				picked = append(picked, sc)
+			}
+		}
+		if len(picked) == 0 {
+			fmt.Fprintf(os.Stderr, "未知场景 %q\n", cfg.only)
+			os.Exit(2)
+		}
+		scenarios = picked
+	}
+
+	fmt.Printf("网关=%s 模型=%s 协议=%s 每场景 %d 轮 前缀填充=%d 段 nonce=%s\n\n", cfg.url, cfg.model, cfg.protocol, cfg.rounds, cfg.filler, cfg.nonce)
+	fmt.Printf("%-40s %4s %9s %9s %8s %9s %9s %9s %6s\n", "场景", "轮次", "prompt", "cached", "命中率", "首事件", "TTFT", "耗时", "事件")
 
 	var all []probeResult
 	for _, sc := range scenarios {
@@ -112,9 +139,9 @@ func main() {
 				ratio = fmt.Sprintf("%.1f%%", float64(r.cachedTokens)*100/float64(r.promptTokens))
 			}
 
-			fmt.Printf("%-40s %4d %9d %9d %8s %9s %9s %6d\n",
+			fmt.Printf("%-40s %4d %9d %9d %8s %9s %9s %9s %6d\n",
 				sc.phase, i+1, r.promptTokens, r.cachedTokens, ratio,
-				r.ttft.Round(time.Millisecond), r.elapsed.Round(time.Millisecond), r.events)
+				r.firstEvent.Round(time.Millisecond), r.ttft.Round(time.Millisecond), r.elapsed.Round(time.Millisecond), r.events)
 			if r.err != "" {
 				fmt.Printf("    ! %s\n", r.err)
 			}
@@ -125,9 +152,12 @@ func main() {
 	summarize(all)
 }
 
-func buildPrefix(n int) string {
+func buildPrefix(n int, nonce string) string {
 	var b strings.Builder
 	b.WriteString("You are a coding agent. Follow the repository conventions strictly.\n")
+	if nonce != "" {
+		b.WriteString("实验标记：" + nonce + "\n")
+	}
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(&b, "规则 %d：在修改任何文件之前先阅读相关实现，并在回复中说明改动理由与影响范围。\n", i)
 	}
@@ -147,17 +177,19 @@ func runOne(cfg probeConfig, prefix, tools, sessionID string) probeResult {
 	if cfg.protocol == "chat" {
 		path = "/v1/chat/completions"
 		payload = map[string]any{
-			"model":    cfg.model,
-			"stream":   true,
-			"messages": []any{map[string]any{"role": "system", "content": prefix}, map[string]any{"role": "user", "content": "回答：ok"}},
+			"model":      cfg.model,
+			"stream":     true,
+			"max_tokens": cfg.maxTok,
+			"messages":   []any{map[string]any{"role": "system", "content": prefix}, map[string]any{"role": "user", "content": "回答：ok"}},
 		}
 	} else {
 		path = "/v1/responses"
 		payload = map[string]any{
-			"model":        cfg.model,
-			"stream":       true,
-			"instructions": prefix,
-			"input":        []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "回答：ok"}}}},
+			"model":             cfg.model,
+			"stream":            true,
+			"max_output_tokens": cfg.maxTok,
+			"instructions":      prefix,
+			"input":             []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "回答：ok"}}}},
 		}
 	}
 	if tools != "" {
@@ -281,6 +313,9 @@ func handleSSEData(data []byte, start time.Time, res *probeResult) error {
 		return fmt.Errorf("SSE 事件不是合法 JSON: %v", err)
 	}
 	res.events++
+	if res.firstEvent == 0 {
+		res.firstEvent = time.Since(start)
+	}
 	if !res.ttftSet && hasDeltaContent(ev) {
 		res.ttft = time.Since(start)
 		res.ttftSet = true
@@ -290,17 +325,48 @@ func handleSSEData(data []byte, start time.Time, res *probeResult) error {
 }
 
 // hasDeltaContent 判断这个事件是否携带真正的输出增量（而不是 created/updated 之类的控制帧）。
+// 覆盖两种协议：
+//   - Responses: {"type":"response.output_text.delta","delta":"..."}
+//   - Chat:      {"choices":[{"delta":{"content":"..."}}]}
 func hasDeltaContent(ev map[string]any) bool {
+	// Responses 形态
 	if s, ok := ev["delta"].(string); ok && s != "" {
 		return true
 	}
-	if d, ok := ev["delta"].(map[string]any); ok && len(d) > 0 {
-		if s, ok := d["content"].(string); ok && s != "" {
+	if d, ok := ev["delta"].(map[string]any); ok && deltaHasContent(d) {
+		return true
+	}
+	// Chat 形态
+	if choices, ok := ev["choices"].([]any); ok {
+		for _, c := range choices {
+			ch, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			if d, ok := ch["delta"].(map[string]any); ok && deltaHasContent(d) {
+				return true
+			}
+		}
+	}
+	// Responses 的增量事件有时把文本放在 part/delta 的嵌套里
+	if d, ok := ev["delta"].(map[string]any); ok {
+		if part, ok := d["part"].(map[string]any); ok {
+			if s, ok := part["text"].(string); ok && s != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func deltaHasContent(d map[string]any) bool {
+	for _, k := range []string{"content", "reasoning_content", "reasoning", "text"} {
+		if s, ok := d[k].(string); ok && s != "" {
 			return true
 		}
-		if s, ok := d["reasoning_content"].(string); ok && s != "" {
-			return true
-		}
+	}
+	if calls, ok := d["tool_calls"].([]any); ok && len(calls) > 0 {
+		return true
 	}
 	return false
 }

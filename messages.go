@@ -164,6 +164,8 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[协议转换] traceId=%s requestId=%d 入口=/v1/messages 模型=%s 流式=%t 上游请求字节=%d 结果=已转换并应用统一规则，未记录提示词正文",
 		w.Header().Get("X-Trace-ID"), reqID, modelName, isStream, len(upstreamBytes))
 
+	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
+	r = withPrefixDigest(r, digestFromRequestObject(chatReq, modelName, currentAffinitySettings().PrefixHeadByte))
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
 		return
