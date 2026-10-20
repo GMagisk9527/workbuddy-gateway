@@ -41,6 +41,8 @@ type statsRequest struct {
 	InputTokens  *int64   `json:"inputTokens,omitempty"`
 	OutputTokens *int64   `json:"outputTokens,omitempty"`
 	CachedTokens *int64   `json:"cachedTokens,omitempty"` // 已包含在输入里，不再加到总Token
+	CacheSource  string   `json:"cacheSource,omitempty"`  // 命中数来自哪个字段；空=上游未提供（区分"缺失"与"为 0"）
+	Affinity     string   `json:"affinity,omitempty"`     // 会话/前缀亲和的决策结果
 	Credit       *float64 `json:"credit,omitempty"`       // usage.credit，而不是余额差
 	LatencyMS    float64  `json:"latencyMs"`
 	TTFTMS       *float64 `json:"ttftMs,omitempty"`
@@ -288,6 +290,7 @@ type statsAttempt struct {
 	usage    map[string]any
 	ttft     *float64
 	complete bool
+	affinity string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
 }
 
 func statsAttemptFor(r *http.Request) *statsAttempt {
@@ -322,27 +325,34 @@ func statsTokenValue(usage map[string]any, field string) *int64 {
 	return nil
 }
 
-func statsCachedValue(usage map[string]any) *int64 {
+// statsCachedValue 返回缓存命中 Token 数及其来源字段。
+// 这些字段是同一缓存数量的不同表示（OpenAI chat / Responses / Anthropic），
+// 只能取其一，绝不能相加；返回来源是为了区分"上游未提供"与"提供了但为 0"。
+func statsCachedValue(usage map[string]any) (int64, string, bool) {
 	var fallback *int64
+	var fallbackField string
 	for _, field := range []string{"prompt_cache_hit_tokens", "cache_read_input_tokens", "cached_tokens"} {
 		if v := statsTokenValue(usage, field); v != nil {
 			if *v > 0 {
-				return v
+				return *v, field, true
 			}
-			fallback = v
+			fallback, fallbackField = v, field
 		}
 	}
 	for _, field := range []string{"prompt_tokens_details", "input_tokens_details"} {
 		if nested, ok := usage[field].(map[string]any); ok {
 			if v := statsTokenValue(nested, "cached_tokens"); v != nil {
 				if *v > 0 {
-					return v
+					return *v, field + ".cached_tokens", true
 				}
-				fallback = v
+				fallback, fallbackField = v, field+".cached_tokens"
 			}
 		}
 	}
-	return fallback
+	if fallback != nil {
+		return *fallback, fallbackField, true
+	}
+	return 0, "", false
 }
 
 // 每次实际账号上游调用结束记录一次，失败重试的账号也单独记；未选号的鉴权拒绝不算账号消耗。
@@ -351,10 +361,15 @@ func statsFinishAttempt(r *http.Request, status int) {
 	if p == nil || p.id == "" {
 		return
 	}
+	cachedTokens, cacheSource, hasCached := statsCachedValue(p.usage)
+	var cachedPtr *int64
+	if hasCached {
+		cachedPtr = &cachedTokens
+	}
 	row := statsRequest{Account: p.id, Model: p.model, At: time.Now().UnixMilli(), Status: status,
 		Complete: p.complete && status < 400, LatencyMS: durationMilliseconds(time.Since(p.started)), TTFTMS: p.ttft, TTFTMetric: ttftMetric,
 		InputTokens: statsTokenValue(p.usage, "prompt_tokens"), OutputTokens: statsTokenValue(p.usage, "completion_tokens"),
-		CachedTokens: statsCachedValue(p.usage)}
+		CachedTokens: cachedPtr, CacheSource: cacheSource, Affinity: p.affinity}
 	if n, ok := usageTotalTokens(p.usage); ok && n >= 0 {
 		row.TotalTokens = &n
 	}

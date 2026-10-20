@@ -1294,7 +1294,13 @@ func usableForModelLocked(acc *Account, model string, now time.Time) (accountSel
 
 // nextAccountForModel 按「免费耗尽账号优先 → 有余额账号 → 零余额未知模型受控探测」选号。
 func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, accountSelectionKind, error) {
-	// 站点优先级必须在加锁前计算：preferredFreeSites 会读取账号账本并自行获取 accountMu，
+	return nextAccountForModelPrefer(model, attempted, "")
+}
+
+// nextAccountForModelPrefer 与原函数语义完全一致，只是当 preferPath 对应的账号
+// 通过**同样的资格检查**时优先选它（Prompt Cache 亲和）。亲和不是特权：
+// 模型名单、免费站点优先、冷却、配额、探测状态任一不满足就回退到原轮询。
+func nextAccountForModelPrefer(model string, attempted map[*Account]bool, preferPath string) (*Account, accountSelectionKind, error) {	// 站点优先级必须在加锁前计算：preferredFreeSites 会读取账号账本并自行获取 accountMu，
 	// 若在持锁期间调用会自锁。语义：该模型「一个站点免费、另一个站点收费」时优先用免费站点，
 	// 直到该站点账号全部不可用；其余情况不搞优先，正常轮询。
 	preferred := preferredFreeSites(model)
@@ -1316,10 +1322,36 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
 	}
 	now := time.Now()
 
-	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {
-		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
-			for i := 0; i < len(accounts); i++ {
-				idx := (rrIndex + i) % len(accounts)
+	var preferAcc *Account
+	if preferPath != "" {
+		for _, acc := range accounts {
+			if acc.Path == preferPath {
+				preferAcc = acc
+				break
+			}
+		}
+	}
+
+	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
+			// 亲和账号优先，但必须通过与本轮其它账号完全相同的检查。
+			if preferAcc != nil && (attempted == nil || !attempted[preferAcc]) {
+				if ok, _ := modelAccountAllowed(model, preferAcc, accounts); ok &&
+					(siteFilter == nil || siteFilter(accSiteLocked(preferAcc))) {
+					if kind, usable := usableForModelLocked(preferAcc, model, now); usable && kind == wanted {
+						if kind == selectionProbeExhausted {
+							modelStateLocked(preferAcc, model).NextProbeAt = now.Add(modelProbeDelay)
+						}
+						for i, acc := range accounts {
+							if acc == preferAcc {
+								rrIndex = (i + 1) % len(accounts)
+								break
+							}
+						}
+						return preferAcc, kind, true
+					}
+				}
+			}
+			for i := 0; i < len(accounts); i++ {				idx := (rrIndex + i) % len(accounts)
 				acc := accounts[idx]
 				if attempted != nil && attempted[acc] {
 					continue
@@ -2727,6 +2759,7 @@ type statusSnapshot struct {
 	Accounts     []accountSnapshot   `json:"accounts"`
 	Models       []modelStatSnapshot `json:"models,omitempty"`
 	ModelCatalog []modelStatSnapshot `json:"modelCatalog,omitempty"` // 管理页完整模型目录，含停用项。
+	Affinity     map[string]any      `json:"affinity,omitempty"`     // 会话/前缀亲和：命中、回退、容量
 }
 
 // writeStatusSnapshot 将账号池实时状态（含冷却/失效）原子写入状态快照文件。
@@ -2817,6 +2850,7 @@ func writeStatusSnapshot() error {
 	}
 	annotateAccountPolicies(snap.Accounts)
 	snap.ModelCatalog = buildAllModelStatSnapshots(now, accounts)
+	snap.Affinity = affinitySnapshot()
 	captureAccountStatsLocked()
 	for _, row := range snap.ModelCatalog {
 		if disabled, _ := modelDisabled(row.ID); !disabled {
@@ -3545,8 +3579,11 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 	var lastRateErr string
 	var lastAuthErr string
 	attempted := make(map[*Account]bool, poolSize)
+	// Prompt Cache 亲和：只改变同等可用账号之间的先后顺序，不改变任何资格判定。
+	affKey := affinityKeyFor(r, modelName, upstreamBytes)
+	preferPath := affinityLookup(affKey)
 	for attempt := 0; attempt < poolSize; attempt++ {
-		acc, selection, err := nextAccountForModel(modelName, attempted)
+		acc, selection, err := nextAccountForModelPrefer(modelName, attempted, preferPath)
 		if err != nil {
 			if errors.Is(err, errModelAccountPolicy) {
 				log.Printf("[请求被拒绝] traceId=%s requestId=%d 模型=%s 原因=账号黑白名单没有匹配的凭据 返回状态码=403 业务影响=未进入上游", traceID, reqID, modelName)
@@ -3576,6 +3613,22 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			return nil, nil, nil, false
 		}
 		attempted[acc] = true
+		if affKey != "" {
+			decision := ""
+			if preferPath != "" {
+				if acc.Path == preferPath {
+					decision = "hit"
+					affinityMetrics.hit.Add(1)
+				} else {
+					decision = "fallback"
+					affinityMetrics.fallback.Add(1)
+					affinityLogLine("回退", affKey, acc.Path)
+				}
+			}
+			if p := statsAttemptFor(r); p != nil {
+				p.affinity = decision
+			}
+		}
 		debugSetAccount(r, acc.Path)
 		debugEvent(r, "debug", "account_selected", map[string]any{
 			"selection": string(selection),
@@ -3711,6 +3764,12 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		// 用空闲看门狗包装响应体：持续有数据就永不超时，超过 upstreamIdleTimeout 无数据才中断。
 		// 关闭响应体时会一并取消上游 context，完成清理。
 		resp.Body = newIdleReadCloser(resp.Body, currentIdleTimeout(), upstreamCancel)
+		if affKey != "" {
+			if preferPath != "" && acc.Path != preferPath {
+				affinityForget(affKey)
+			}
+			affinityRemember(affKey, acc.Path)
+		}
 		return resp, acc, prof, true
 	}
 

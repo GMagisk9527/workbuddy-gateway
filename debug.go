@@ -96,6 +96,20 @@ type runtimeFileConfig struct {
 		// Accounts：all 控制全局调度，其余键限定各模型的凭据文件名。
 		Accounts map[string]modelAccountFileConfig `json:"accounts"`
 	} `json:"models"`
+	// Affinity 段可选：Prompt Cache 会话/前缀亲和。默认关闭，未知字段会报错，
+	// 因此新增配置必须有对应结构体字段。
+	Affinity struct {
+		// Enabled：总开关。未验证上游缓存是否按账号隔离前建议保持 false。
+		Enabled bool `json:"enabled"`
+		// Mode：session（只用客户端会话标识）/ prefix（只用前缀摘要）/ hybrid（先会话后前缀）。
+		Mode string `json:"mode"`
+		// TTLSeconds：绑定有效期；<=0 用默认 30 分钟。
+		TTLSeconds int `json:"ttlSeconds"`
+		// Capacity：最多保存多少条绑定；<=0 用默认 4096。
+		Capacity int `json:"capacity"`
+		// PrefixHeadBytes：前缀摘要取上游请求体前多少字节；<=0 用默认 64 KiB。
+		PrefixHeadBytes int `json:"prefixHeadBytes"`
+	} `json:"affinity"`
 }
 
 type modelAccountFileConfig struct {

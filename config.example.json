@@ -29,5 +29,12 @@
         "blocklist": []
       }
     }
+  },
+  "affinity": {
+    "enabled": false,
+    "mode": "hybrid",
+    "ttlSeconds": 1800,
+    "capacity": 4096,
+    "prefixHeadBytes": 65536
   }
 }
