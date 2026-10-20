@@ -277,7 +277,7 @@ func keyAdminListPayload() map[string]any {
 		if strings.HasPrefix(v.Status, "active") {
 			enabledCount++
 		}
-		totalAll += v.Usage.Used
+		totalAll += v.Usage.Lifetime // 历史累计：重置额度不应让面板上的历史消费消失
 		if v.Usage.DayKey == today {
 			todayAll += v.Usage.DailyUsed
 		}

@@ -492,3 +492,27 @@ func BenchmarkKeyAdmitLimited(b *testing.B) {
 		release()
 	}
 }
+// 重置后历史累计仍要能在面板上看到（/v1/usage 的 lifetime 字段）。
+func TestUsageViewExposesLifetime(t *testing.T) {
+	dir := resetKeyWorld(t)
+	if err := ledgerLoad(dir); err != nil {
+		t.Fatal(err)
+	}
+	_, k := mustCreateKey(t, keyCreateOptions{Name: "life2", QuotaTotal: 100})
+	keySettle(k, "lf1", map[string]any{"credit": 12.0}, 200)
+	if err := keyResetUsage(k.ID); err != nil {
+		t.Fatal(err)
+	}
+	view := keyUsageSnapshot(k)
+	if view.Used != 0 {
+		t.Fatalf("准入累计应清零，实际 %v", view.Used)
+	}
+	if view.Lifetime != 12 {
+		t.Fatalf("lifetime 应保留 12，实际 %v", view.Lifetime)
+	}
+	payload := keyAdminListPayload()
+	summary := payload["summary"].(map[string]any)
+	if summary["allTimeCredits"].(float64) != 12 {
+		t.Fatalf("面板累计消费应取历史累计，实际 %v", summary["allTimeCredits"])
+	}
+}

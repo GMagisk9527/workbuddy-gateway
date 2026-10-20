@@ -838,6 +838,7 @@ type keyUsageView struct {
 	Status    string   `json:"status"`
 	Legacy    bool     `json:"legacy"`
 	Used      float64  `json:"used"`
+	Lifetime  float64  `json:"lifetime"` // 历史累计，不随重置清零
 	Limit     *float64 `json:"limit"`
 	Remaining *float64 `json:"remaining"`
 	DailyUsed float64  `json:"dailyUsed"`
@@ -880,7 +881,7 @@ func keyUsageSnapshot(k *apiKey) keyUsageView {
 	enabled, expires, name := k.Enabled, k.ExpiresAt, k.Name
 	k.mu.Unlock()
 	view := keyUsageView{
-		Name: name, Legacy: k.legacy, Used: u.Total, DailyUsed: u.Daily, MonthUsed: u.Monthly,
+		Name: name, Legacy: k.legacy, Used: u.Total, Lifetime: u.Lifetime, DailyUsed: u.Daily, MonthUsed: u.Monthly,
 		Requests: u.Requests, Input: u.Input, Output: u.Output, Cached: u.Cached,
 		Unknown: u.Unknown, ZeroCost: u.ZeroCost, LastUsed: u.LastUsedAt,
 		ExpiresAt: expires, DayKey: u.DayKey, MonthKey: u.MonthKey,
