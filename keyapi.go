@@ -46,7 +46,9 @@ func keyModelAllowed(w http.ResponseWriter, r *http.Request, model string) bool 
 	}
 	k := keyByID(id.ID)
 	if k == nil {
-		return true
+		// Key 在请求处理过程中被删除/轮换掉：不能默认放行。
+		writeUpstreamError(w, r, http.StatusUnauthorized, "invalid_api_key", "该 API Key 已失效")
+		return false
 	}
 	if k.allowModel(model) {
 		return true
@@ -64,7 +66,10 @@ func keyAllowedModelFilter(r *http.Request) func(string) bool {
 		return func(string) bool { return true }
 	}
 	k := keyByID(id.ID)
-	if k == nil || k.legacy || len(k.Models) == 0 {
+	if k == nil {
+		return func(string) bool { return false } // 已删除：一律不可见
+	}
+	if k.legacy {
 		return func(string) bool { return true }
 	}
 	return k.allowModel

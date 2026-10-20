@@ -61,6 +61,9 @@ type apiKeyUsage struct {
 	Cached     int64   `json:"cachedTokens"`
 	Unknown    int64   `json:"unknownSettlements"`
 	ZeroCost   int64   `json:"zeroCostSettlements"`
+	// Lifetime 是生命周期累计，管理员的"重置用量"不会清除它；
+	// 用于区分"当前准入额度"和"历史真实消费"。
+	Lifetime float64 `json:"lifetime,omitempty"`
 	LastUsedAt int64   `json:"lastUsedAt,omitempty"`
 }
 
@@ -108,16 +111,13 @@ func (k *apiKey) concurrency() int {
 
 // allowModel 判断模型是否在该 Key 的白名单内（空名单 = 不限）。
 func (k *apiKey) allowModel(model string) bool {
-	if k == nil || k.legacy || len(k.Models) == 0 {
+	if k == nil || k.legacy {
 		return true
 	}
-	name := normalizeModelName(model)
-	for _, allowed := range k.Models {
-		if normalizeModelName(allowed) == name {
-			return true
-		}
-	}
-	return false
+	k.mu.Lock()
+	models := append([]string(nil), k.Models...)
+	k.mu.Unlock()
+	return keyModelsAllow(models, model)
 }
 
 // keyStoreData 是 apikeys.json 的结构。
@@ -134,12 +134,13 @@ type keyStore struct {
 	mu       sync.RWMutex
 	byID     map[string]*apiKey
 	byPrefix    map[string]*apiKey
+	archive     map[string]*apiKeyUsage
 	path        string
 	requireAuth bool
 	degraded    atomic.Bool // 落盘失败：有限额 Key 一律拒绝，避免无约束放行
 }
 
-var apiKeys = &keyStore{byID: map[string]*apiKey{}, byPrefix: map[string]*apiKey{}}
+var apiKeys = &keyStore{byID: map[string]*apiKey{}, byPrefix: map[string]*apiKey{}, archive: map[string]*apiKeyUsage{}}
 
 // keyDataDir 决定账本与密钥文件目录（测试可覆盖）。
 var keyDataDir = "."
@@ -228,6 +229,9 @@ func keyStoreLoad() error {
 	defer apiKeys.mu.Unlock()
 	apiKeys.byID = make(map[string]*apiKey, len(doc.Keys))
 	apiKeys.byPrefix = make(map[string]*apiKey, len(doc.Keys))
+	if apiKeys.archive == nil {
+		apiKeys.archive = map[string]*apiKeyUsage{}
+	}
 	for _, k := range doc.Keys {
 		if k == nil || k.ID == "" || k.Hash == "" {
 			continue
@@ -365,6 +369,7 @@ func keyCreate(in keyCreateOptions) (string, *apiKey, error) {
 		apiKeys.degraded.Store(true)
 		return "", nil, err
 	}
+	ensureAuthSwitchOn(keyDataDir)
 	log.Printf("[APIKey] 结果=已创建 id=%s 前缀=%s 总额度=%.1f 日额度=%.1f 月额度=%.1f 并发=%d 说明=明文只在此处生成，不落盘",
 		k.ID, k.Prefix, k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly, k.concurrency())
 	return plain, k, nil
@@ -400,8 +405,11 @@ func keyRotate(id string) (string, *apiKey, error) {
 		apiKeys.mu.Unlock()
 		return "", nil, errKeyDuplicate
 	}
-	delete(apiKeys.byPrefix, k.Prefix)
+	k.mu.Lock()
+	oldPrefix := k.Prefix
 	k.Prefix, k.Hash = prefix, hash
+	k.mu.Unlock()
+	delete(apiKeys.byPrefix, oldPrefix)
 	apiKeys.byPrefix[prefix] = k
 	err = apiKeys.persistLocked()
 	apiKeys.mu.Unlock()
@@ -465,6 +473,14 @@ func keyDelete(id string) error {
 	}
 	delete(apiKeys.byID, id)
 	delete(apiKeys.byPrefix, k.Prefix)
+	// 历史消费转为匿名归档：删除 Key 不能抹掉已经发生的消费。
+	k.mu.Lock()
+	archived := k.usage
+	k.mu.Unlock()
+	if apiKeys.archive == nil {
+		apiKeys.archive = map[string]*apiKeyUsage{}
+	}
+	apiKeys.archive[id] = &archived
 	err := apiKeys.persistLocked()
 	apiKeys.mu.Unlock()
 	if err != nil {
@@ -478,23 +494,37 @@ func keyDelete(id string) error {
 
 // keyResetUsage 清零额度累计；历史消费事实仍保留在 WAL 中。
 func keyResetUsage(id string) error {
-	apiKeys.mu.RLock()
-	k := apiKeys.byID[id]
-	apiKeys.mu.RUnlock()
+	k := keyByID(id)
 	if k == nil {
 		return errKeyNotFound
 	}
 	now := time.Now()
+	// 与结算使用同一把锁、同一顺序：先写 reset 事件，再清内存。
+	// 写失败就返回错误、不动内存——绝不能假报成功，也不能让内存与 WAL 分叉。
+	ledger.mu.Lock()
+	e := ledgerEntry{Seq: nextLedgerSeq(), Key: id, Kind: "reset", At: now.UnixMilli()}
+	werr := ledgerAppendLocked(e)
+	if werr != nil {
+		ledger.mu.Unlock()
+		log.Printf("[APIKey] 结果=重置失败 id=%s 原因=%v 业务影响=额度累计保持不变", id, werr)
+		return werr
+	}
 	k.mu.Lock()
-	k.usage = apiKeyUsage{DayKey: keyDayKey(now), MonthKey: keyMonthKey(now)}
+	keep := apiKeyUsage{
+		Lifetime: k.usage.Lifetime, Requests: k.usage.Requests,
+		Input: k.usage.Input, Output: k.usage.Output, Cached: k.usage.Cached,
+		LastUsedAt: k.usage.LastUsedAt,
+		DayKey:     keyDayKey(now), MonthKey: keyMonthKey(now),
+	}
+	k.usage = keep
 	k.lastReject = ""
 	k.mu.Unlock()
-	ledgerAppendReset(id, now)
-	ledgerSnapshotSoon()
-	log.Printf("[APIKey] 结果=已重置用量 id=%s 说明=仅清零准入累计，历史消费记录保留", id)
+	ledger.mu.Unlock()
+
+	ledgerCompact()
+	log.Printf("[APIKey] 结果=已重置用量 id=%s 说明=仅清零准入累计，Lifetime 与历史消费记录保留", id)
 	return nil
 }
-
 // ---------------------------------------------------------------------------
 // 鉴权
 // ---------------------------------------------------------------------------
@@ -534,12 +564,16 @@ func authenticateAPIKey(token string) *apiKey {
 	}
 	apiKeys.mu.RLock()
 	k := apiKeys.byPrefix[prefix]
+	var wantHash string
+	if k != nil {
+		wantHash = k.Hash // 与轮换共享同一把锁，避免读到新旧混合状态
+	}
 	apiKeys.mu.RUnlock()
 	if k == nil {
 		return nil
 	}
 	want := hashAPIKey(token)
-	if subtle.ConstantTimeCompare([]byte(want), []byte(k.Hash)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(want), []byte(wantHash)) != 1 {
 		return nil
 	}
 	return k
@@ -721,17 +755,19 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 		e.CachedDelta = cached
 	}
 
-	// 并发窗口：分配序号 -> 更新内存 -> 追加 WAL，三步都在 ledger.mu 内完成，
-	// 与压缩快照互斥。这样快照的 lastSeq 与内存状态、WAL 内容始终一致，
-	// 既不会重放重复记账，也不会出现"快照漏掉、WAL 又被截断"的丢账。
+	// 顺序固定为「分配序号 -> 落盘 -> 更新内存」，全程持 ledger.mu 并与压缩互斥：
+	//   - 先落盘再改内存：即使写入后立刻崩溃，重放也能把这笔账补回来；
+	//   - 与压缩互斥：快照不会拍到"WAL 有、内存没有"的中间态。
 	ledger.mu.Lock()
 	e.Seq = nextLedgerSeq()
+	werr := ledgerAppendLocked(e)
 	k.mu.Lock()
 	k.rollWindowLocked(now)
 	if e.Known {
 		k.usage.Total += e.Credit
 		k.usage.Daily += e.Credit
 		k.usage.Monthly += e.Credit
+		k.usage.Lifetime += e.Credit
 	}
 	if e.Zero {
 		k.usage.ZeroCost++
@@ -744,21 +780,23 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	k.usage.Output += e.OutDelta
 	k.usage.Cached += e.CachedDelta
 	k.usage.LastUsedAt = now.UnixMilli()
-	snapshot := k.usage
+	unknownNow := k.usage.Unknown
 	k.mu.Unlock()
-
-	if err := ledgerAppendLocked(e); err != nil {
-		log.Printf("[账本] 警告=结算落盘失败 key=%s attempt=%s 原因=%v 业务影响=内存已记，有限额 Key 已停止放行", k.ID, attemptID, err)
-	}
 	needCompact := ledger.pending >= ledgerCompactEvery
 	ledger.mu.Unlock()
 
+	if werr != nil {
+		log.Printf("[账本] 警告=结算落盘失败 key=%s attempt=%s 原因=%v 业务影响=内存已记，有限额 Key 已停止放行", k.ID, attemptID, werr)
+	}
 	if needCompact {
 		ledgerCompact()
 	}
-	if outcome == settleUnknown && k.limited() {
+	k.mu.Lock()
+	limited := k.QuotaTotal > 0 || k.QuotaDaily > 0 || k.QuotaMonthly > 0
+	k.mu.Unlock()
+	if outcome == settleUnknown && limited {
 		log.Printf("[APIKey] 警告=本次未获得计费字段 key=%s attempt=%s 业务影响=累计未知次数=%d，达到 %d 次后停止放行",
-			k.ID, attemptID, snapshot.Unknown, defaultUnknownTolerance)
+			k.ID, attemptID, unknownNow, defaultUnknownTolerance)
 	}
 	return outcome
 }
@@ -908,4 +946,14 @@ func registerRuntimeKeys() {
 	apiKeys.mu.Lock()
 	apiKeys.byID[legacyKeyID] = legacyKey
 	apiKeys.mu.Unlock()
+}
+// archivedUsage 返回已删除 Key 的历史消费（匿名归档）。
+func archivedUsage(id string) *apiKeyUsage {
+	apiKeys.mu.RLock()
+	defer apiKeys.mu.RUnlock()
+	if u := apiKeys.archive[id]; u != nil {
+		cp := *u
+		return &cp
+	}
+	return nil
 }

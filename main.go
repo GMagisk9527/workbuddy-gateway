@@ -3329,6 +3329,12 @@ func runServe() {
 		log.Printf("[APIKey] 严重=密钥表加载失败 原因=%v 业务影响=受管 Key 全部不可用，请检查 apikeys.json", err)
 	}
 	registerRuntimeKeys()
+	if err := loadAuthSwitch("."); err != nil {
+		authSwitchMu.Lock()
+		authSwitchOn = true // 读不到文件就按"要求鉴权"处理
+		authSwitchMu.Unlock()
+		log.Printf("[APIKey] 严重=鉴权开关读取失败 原因=%v 业务影响=按要求鉴权处理", err)
+	}
 	if err := ledgerLoad("."); err != nil {
 		apiKeys.degraded.Store(true)
 		log.Printf("[账本] 严重=账本加载失败 原因=%v 业务影响=有限额 Key 停止放行", err)
@@ -3679,6 +3685,9 @@ func authRequired() bool {
 	}
 	if apiKeys.degraded.Load() {
 		return true
+	}
+	if authSwitchEnabled() {
+		return true // 独立开关：密钥文件丢失也仍然要求鉴权
 	}
 	apiKeys.mu.RLock()
 	defer apiKeys.mu.RUnlock()
