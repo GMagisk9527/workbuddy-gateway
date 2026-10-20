@@ -999,57 +999,67 @@
     return v.toFixed(2);
   }
 
-  function creditKnownAmount(account) {
-    var sum = 0;
+  // 合计剩余：所有仍有效的积分包（剩余 > 0 且未过作废时间）。
+  // 到期未知只影响倒计时，不影响余额统计；已过作废时间的包不能再抵扣，故排除。
+  // 上游抓取时已按 AccountId 去重，这里不再按键去重，避免把合法的同额同日期包算少。
+  function creditTotalRemain(account) {
+    var sum = 0, now = Date.now();
     (account.creditPackages || []).forEach(function (p) {
-      if (p.expiryKnown === false) return;
       var r = Number(p.remain);
-      if (isFinite(r) && r > 0) sum += r;
+      if (!isFinite(r) || r <= 0) return;
+      if (p.expiryKnown !== false && Number(p.expiresAt) > 0 && Number(p.expiresAt) * 1000 <= now) {
+        return; // 已过作废时间
+      }
+      sum += r;
     });
     return sum;
   }
 
-  // 分级：≤1 天 / ≤3 天 / ≤7 天为提醒，>365 天视为长期有效。
+  // 分级：≤1 天 / ≤3 天 / ≤7 天为提醒；超过 1 年只说「超过 1 年」，
+  // 不写「长期有效」——积分仍有确切作废日，只是比较远。
   function creditInfo(account) {
     if (account.creditKnown !== true) {
       return {
-        kind: "unknown", text: account.creditError ? "采集失败" : "未采集", cls: "", amount: 0,
+        kind: "unknown", text: account.creditError ? "采集失败" : "未采集", cls: "", amount: 0, soonestAmt: 0,
         tip: account.creditError || "尚未采集积分包（等待下一次额度扫描）"
       };
     }
     var packages = account.creditPackages || [];
+    var amount = creditTotalRemain(account);
     if (!packages.length) {
-      return {kind: "none", text: "无积分包", cls: "", amount: 0, tip: "上游未返回任何积分包"};
+      return {kind: "none", text: "无积分包", cls: "", amount: 0, soonestAmt: 0, tip: "上游未返回任何积分包"};
     }
-    var amount = creditKnownAmount(account);
     var soonest = Number(account.creditSoonestAt || 0);
-    if (!soonest || !(Number(account.creditSoonestAmt) > 0)) {
+    var soonestAmt = Number(account.creditSoonestAmt || 0);
+    if (!soonest || !(soonestAmt > 0)) {
       if (account.creditUnknownExpiry) {
-        return {kind: "unknown-expiry", text: "到期未知", cls: "", amount: 0,
-                tip: "有剩余积分，但上游没有给出 DeductionEndTime，无法判断作废时间"};
+        return {kind: "unknown-expiry", text: "到期未知", cls: "", amount: amount, soonestAmt: 0,
+                tip: "合计剩余 " + creditNum(amount) + " 分，但上游没有给出 DeductionEndTime，无法判断作废时间"};
       }
-      return {kind: "none", text: "无剩余", cls: "", amount: 0, tip: "积分包已用完或已过期"};
+      return {kind: "none", text: "无剩余", cls: "", amount: 0, soonestAmt: 0, tip: "积分包已用完或已过期"};
     }
     var days = (soonest * 1000 - Date.now()) / 86400000;
-    var tip = "最近一笔：" + fmtTime(soonest) + " 作废（" + creditNum(account.creditSoonestAmt) +
-              " 分），剩余天数 " + (days > 0 ? days.toFixed(1) : "0") + " 天";
-    var base = {amount: Number(account.creditSoonestAmt), soonest: soonest, tip: tip};
+    var when = fmtTime(soonest);
+    var countdown = days > 0 ? (days > CREDIT_LONG_DAYS ? (days / 365).toFixed(1) + " 年" : days.toFixed(1) + " 天") : "0 天";
+    var tip = "合计剩余 " + creditNum(amount) + " 分 · 最近一笔 " + when + " 作废（" +
+              creditNum(soonestAmt) + " 分，剩 " + countdown + "）";
+    var base = {amount: amount, soonestAmt: soonestAmt, soonest: soonest, tip: tip};
     if (days < 0) {
       base.kind = "expired"; base.text = "已过期"; base.cls = "";
-      base.tip = "最近一笔已于 " + fmtTime(soonest) + " 作废";
+      base.tip = "最近一笔已于 " + when + " 作废";
       return base;
     }
     if (days <= 1) { base.kind = "d1"; base.text = "≤1 天"; base.cls = "danger"; return base; }
     if (days <= 3) { base.kind = "d3"; base.text = "≤3 天"; base.cls = "danger"; return base; }
     if (days <= 7) { base.kind = "d7"; base.text = "≤7 天"; base.cls = "warn"; return base; }
-    if (days > CREDIT_LONG_DAYS) { base.kind = "long"; base.text = "长期"; base.cls = "ok"; return base; }
+    if (days > CREDIT_LONG_DAYS) { base.kind = "long"; base.text = "超过 1 年"; base.cls = "ok"; return base; }
     base.kind = "ok"; base.text = "剩 " + Math.ceil(days) + " 天"; base.cls = "ok";
     return base;
   }
 
   function creditCell(account) {
     var info = creditInfo(account);
-    var hasAmount = info.kind !== "unknown" && info.kind !== "none" && info.kind !== "expired" && info.kind !== "unknown-expiry";
+    var hasAmount = info.kind !== "unknown" && info.amount > 0;
     var main = hasAmount
       ? "<b>" + esc(creditNum(info.amount)) + "</b><span class='credit-unit'>分</span>"
       : "<span class='credit-dim'>—</span>";
@@ -1075,7 +1085,7 @@
     }
     if (days <= 3) return {text: "剩 " + Math.floor(days) + " 天", cls: "danger"};
     if (days <= 7) return {text: "剩 " + Math.floor(days) + " 天", cls: "warn"};
-    if (days > CREDIT_LONG_DAYS) return {text: "长期有效", cls: "ok"};
+    if (days > CREDIT_LONG_DAYS) return {text: "超过 1 年", cls: "ok"};
     return {text: "剩 " + Math.floor(days) + " 天", cls: "ok"};
   }
 
@@ -1088,7 +1098,7 @@
       return Number(x.expiresAt || 0) - Number(y.expiresAt || 0);
     });
     var shown = packages.slice(0, CREDIT_MAX_LIST);
-    var total = creditKnownAmount(account);
+    var total = creditTotalRemain(account);
     var items = shown.map(function (p) {
       var st = creditRowState(p);
       var date = p.expiryKnown === false ? "—" : creditDate(p.expiresAt);

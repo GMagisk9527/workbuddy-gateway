@@ -84,9 +84,15 @@ func TestCreditUIReusesSnapshotFields(t *testing.T) {
 // 分级阈值：7 天 / 3 天 / 1 天，以及长期与到期未知。
 func TestCreditUILevelsAndStates(t *testing.T) {
 	js := readWebAsset(t, "app.js")
-	for _, want := range []string{`"≤1 天"`, `"≤3 天"`, `"≤7 天"`, `"长期"`, `"到期未知"`, `"已过期"`, `"无积分包"`} {
+	for _, want := range []string{`"≤1 天"`, `"≤3 天"`, `"≤7 天"`, `"超过 1 年"`, `"到期未知"`, `"已过期"`, `"无积分包"`} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("缺少分级文案 %s", want)
+		}
+	}
+	// 超过一年仍会作废，不能说成「长期」。
+	for _, banned := range []string{`"长期"`, `"长期有效"`} {
+		if strings.Contains(js, banned) {
+			t.Fatalf("不应使用模糊文案 %s，应写「超过 1 年」并保留作废日期", banned)
 		}
 	}
 	body := functionBody(t, js, "function creditInfo(account) {")
