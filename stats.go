@@ -383,7 +383,11 @@ func statsFinishAttempt(r *http.Request, status int) {
 	// 身份来自请求上下文，不依赖会被 statsSelectAccount 重置的 attempt。
 	if p.attemptID != "" && (len(p.usage) > 0 || (p.id != "" && status < 400)) {
 		if identity := keyIdentityFor(r); identity != nil {
-			if k := keyByID(identity.ID); k != nil {
+			k := settlementKeyFor(r)
+			if k == nil {
+				k = keyByID(identity.ID) // 兜底：没有准入引用时按 ID 查
+			}
+			if k != nil {
 				outcome := keySettle(k, p.attemptID, p.usage, status)
 				debugEvent(r, "info", "api_key_settled", map[string]any{
 					"key_id": k.ID, "outcome": string(outcome),

@@ -34,6 +34,7 @@ func keyAdmissionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		defer release()
+		withSettlementKey(r, k) // 保留稳定引用：删除 Key 后仍能在结算时归账
 		next.ServeHTTP(w, r)
 	})
 }

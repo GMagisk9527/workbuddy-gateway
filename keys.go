@@ -545,8 +545,9 @@ type keyIdentityContextKey struct{}
 // 外层拿到的仍是旧 request；如果把身份只放在 request 上下文里，结算时就读不到，
 // 结果就是"请求成功但一分钱没记"。这里在审计层放一个可变持有者，鉴权层填进去。
 type keyIdentityHolder struct {
-	mu sync.RWMutex
-	id *keyIdentity
+	mu  sync.RWMutex
+	id  *keyIdentity
+	key *apiKey // 准入成功时的结算引用：删除/轮换后仍能把在途请求记到正确归属
 }
 
 type keyIdentityHolderKey struct{}
@@ -982,6 +983,31 @@ func archivedUsage(id string) *apiKeyUsage {
 	if u := apiKeys.archive[id]; u != nil {
 		cp := *u
 		return &cp
+	}
+	return nil
+}
+// withSettlementKey 把准入通过的 Key 绑定到请求上。结算时优先用它，
+// 而不是重新查索引——否则管理员在请求在途时删除 Key，这笔真实消费会直接丢失。
+func withSettlementKey(r *http.Request, k *apiKey) {
+	if r == nil || k == nil {
+		return
+	}
+	if h, ok := r.Context().Value(keyIdentityHolderKey{}).(*keyIdentityHolder); ok && h != nil {
+		h.mu.Lock()
+		h.key = k
+		h.mu.Unlock()
+	}
+}
+
+// settlementKeyFor 返回本次请求的结算引用（可能指向已被删除的 Key）。
+func settlementKeyFor(r *http.Request) *apiKey {
+	if r == nil {
+		return nil
+	}
+	if h, ok := r.Context().Value(keyIdentityHolderKey{}).(*keyIdentityHolder); ok && h != nil {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return h.key
 	}
 	return nil
 }
