@@ -453,3 +453,28 @@ func TestCreditsClearedOnDisable(t *testing.T) {
 		t.Fatal("禁用账号不应被临期优先选中")
 	}
 }
+
+// 上游这次没给套餐编码时，不得沿用旧积分包（否则会展示无法核实的临期信息）。
+func TestCreditsClearedWhenPackageCodesMissing(t *testing.T) {
+	quietCredits(t)
+	t.Cleanup(func() { setCreditConfig(true, false, 7) })
+	setCreditConfig(true, false, 7)
+	stubCreditHTTP(t, `{"code":0,"data":{"Accounts":[]}}`)
+
+	acc := mkAccount("nocode.json")
+	acc.Auth = &StoredAuth{Auth: StoredTokens{AccessToken: "tok"}}
+	acc.credits = accountCredits{Known: true, SoonestAt: time.Now().Add(time.Hour), SoonestAmt: 999}
+	acc.creditCodes = nil // 本次摘要没有返回任何套餐编码
+
+	refreshCreditsForAccount(context.Background(), acc)
+
+	accountMu.Lock()
+	known, errText := acc.credits.Known, acc.credits.Err
+	accountMu.Unlock()
+	if known {
+		t.Fatal("缺少套餐编码时必须标记为未知，不能保留旧积分包")
+	}
+	if errText == "" {
+		t.Fatal("应给出原因，便于面板显示采集失败")
+	}
+}

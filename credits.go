@@ -349,6 +349,10 @@ func refreshCreditsForAccount(ctx context.Context, acc *Account) {
 		if acc.Disabled || acc.Auth == nil {
 			acc.credits.reset()
 			acc.creditCodes = nil
+		} else {
+			// 上游这次没给套餐编码（偶发空响应或企业账号）：不能沿用上一次的
+			// 到期数据，否则面板会展示已经无法核实的"临期"信息。
+			acc.credits = accountCredits{Known: false, FetchedAt: time.Now().Unix(), Err: "上游未返回套餐编码"}
 		}
 		accountMu.Unlock()
 		return
