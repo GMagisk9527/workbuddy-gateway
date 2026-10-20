@@ -36,5 +36,10 @@
     "ttlSeconds": 1800,
     "capacity": 4096,
     "prefixHeadBytes": 65536
+  },
+  "credits": {
+    "fetch": true,
+    "expiringFirst": false,
+    "windowDays": 7
   }
 }

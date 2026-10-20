@@ -111,6 +111,15 @@ type runtimeFileConfig struct {
 		PrefixHeadBytes int `json:"prefixHeadBytes"`
 
 	} `json:"affinity"`
+	// Credits 段可选：临期积分优先。默认只抓取展示（fetch=true），不改变调度。
+	Credits struct {
+		// Fetch：是否抓取积分包明细（只读计费接口，不消耗模型积分）。
+		Fetch *bool `json:"fetch"`
+		// ExpiringFirst：是否启用"临期积分优先"调度。
+		ExpiringFirst bool `json:"expiringFirst"`
+		// WindowDays：临期窗口（天）；<=0 用默认 7 天。
+		WindowDays int `json:"windowDays"`
+	} `json:"credits"`
 }
 
 type modelAccountFileConfig struct {

@@ -344,6 +344,8 @@ type authStateData struct {
 }
 
 type quotaPackage struct {
+	PackageCode         string `json:"PackageCode"`
+	PackageName         string `json:"PackageName"`
 	CycleTotalCapacity  string `json:"CycleTotalCapacity"`
 	CycleUsedCapacity   string `json:"CycleUsedCapacity"`
 	CycleRemainCapacity string `json:"CycleRemainCapacity"`
@@ -414,6 +416,7 @@ type Account struct {
 	QuotaExhausted bool                          // 已确认额度为 0；额度扫描发现恢复后自动解除
 	QuotaUnlimited bool                          // 企业版 limitNum=-1：分配额度不限，禁止按 0 余额阻断
 	ModelStates    map[string]*modelRuntimeState // 按模型隔离的成本、限流和额度阻断状态
+	credits        accountCredits                // 积分包明细与最早作废时间（受 accountMu 保护）
 	fingerprint    string                        // 凭据文件变更指纹（mtime+size，凭据热加载用）
 	lock           sync.Mutex                    // 单账号串行锁（防止同账号并发触发 11128）
 	// 续期失败计数（仅内存，重启清零）：单次失败可能是上游抖动，连续失败才判定登录态失效。
@@ -1300,7 +1303,7 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
 // nextAccountForModelPrefer 与原函数语义完全一致，只是当 preferPath 对应的账号
 // 通过**同样的资格检查**时优先选它（Prompt Cache 亲和）。亲和不是特权：
 // 模型名单、免费站点优先、冷却、配额、探测状态任一不满足就回退到原轮询。
-func nextAccountForModelPrefer(model string, attempted map[*Account]bool, preferPath string) (*Account, accountSelectionKind, error) {	// 站点优先级必须在加锁前计算：preferredFreeSites 会读取账号账本并自行获取 accountMu，
+func nextAccountForModelPrefer(model string, attempted map[*Account]bool, preferPath string) (*Account, accountSelectionKind, error) { // 站点优先级必须在加锁前计算：preferredFreeSites 会读取账号账本并自行获取 accountMu，
 	// 若在持锁期间调用会自锁。语义：该模型「一个站点免费、另一个站点收费」时优先用免费站点，
 	// 直到该站点账号全部不可用；其余情况不搞优先，正常轮询。
 	preferred := preferredFreeSites(model)
@@ -1332,7 +1335,8 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 		}
 	}
 
-	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
+	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {
+		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
 			// 亲和账号优先，但必须通过与本轮其它账号完全相同的检查。
 			if preferAcc != nil && (attempted == nil || !attempted[preferAcc]) {
 				if ok, _ := modelAccountAllowed(model, preferAcc, accounts); ok &&
@@ -1351,7 +1355,38 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 					}
 				}
 			}
-			for i := 0; i < len(accounts); i++ {				idx := (rrIndex + i) % len(accounts)
+			// 临期积分优先：只在没有亲和绑定时生效。
+			// 已有绑定的会话必须保住缓存，不能为了烧临期积分把长对话搬走。
+			if preferAcc == nil {
+				eligible := func(a *Account) bool {
+					if attempted != nil && attempted[a] {
+						return false
+					}
+					if ok, _ := modelAccountAllowed(model, a, accounts); !ok {
+						return false
+					}
+					if siteFilter != nil && !siteFilter(accSiteLocked(a)) {
+						return false
+					}
+					k, ok := usableForModelLocked(a, model, now)
+					return ok && k == wanted
+				}
+				if ea, _ := expiringCandidateLocked(accounts, eligible, now); ea != nil {
+					if kind, _ := usableForModelLocked(ea, model, now); kind == selectionProbeExhausted {
+						modelStateLocked(ea, model).NextProbeAt = now.Add(modelProbeDelay)
+					}
+					for i, a := range accounts {
+						if a == ea {
+							rrIndex = (i + 1) % len(accounts)
+							break
+						}
+					}
+					creditPicked.Add(1)
+					return ea, wanted, true
+				}
+			}
+			for i := 0; i < len(accounts); i++ {
+				idx := (rrIndex + i) % len(accounts)
 				acc := accounts[idx]
 				if attempted != nil && attempted[acc] {
 					continue
@@ -2257,6 +2292,7 @@ func refreshAccountQuota(ctx context.Context, acc *Account) error {
 	var summary quotaSummaryData
 	_ = json.Unmarshal(data, &summary) // parseQuotaSummary 已校验。
 	now := time.Now()
+	refreshCreditsForAccount(ctx, acc, prof, headers, summary.Packages)
 	resources, planErr := fetchPlanResources(ctx, prof, headers, traceID, path, now)
 	if planErr == nil {
 		plan, planErr = identifyPlan(prof.Key, summary, resources, now)
@@ -2729,8 +2765,17 @@ type accountSnapshot struct {
 	QuotaRemaining    float64            `json:"quotaRemaining"`
 	IsPaidUser        bool               `json:"isPaidUser"`
 	PlanLabel         string             `json:"planLabel,omitempty"` // 官方套餐名称或已知短名称
-	PlanCheckedAt     int64              `json:"planCheckedAt,omitempty"`
-	PlanStale         bool               `json:"planStale,omitempty"`
+	// 积分包：CreditKnown=false 表示"没有可靠数据"，与"没有临期积分"严格区分。
+	CreditKnown      bool            `json:"creditKnown,omitempty"`
+	CreditFetchedAt  int64           `json:"creditFetchedAt,omitempty"`
+	CreditSoonestAt  int64           `json:"creditSoonestAt,omitempty"`  // 最近一笔会作废的积分时间
+	CreditSoonestAmt float64         `json:"creditSoonestAmt,omitempty"` // 该笔剩余额度
+	CreditExpiring   float64         `json:"creditExpiring,omitempty"`   // 窗口内会作废的额度合计
+	CreditUnknownExp bool            `json:"creditUnknownExpiry,omitempty"`
+	CreditError      string          `json:"creditError,omitempty"`
+	CreditPackages   []creditPackage `json:"creditPackages,omitempty"`
+	PlanCheckedAt    int64           `json:"planCheckedAt,omitempty"`
+	PlanStale        bool            `json:"planStale,omitempty"`
 	// 登录续期状态：刷新令牌到期时间与最近成功续期时间，便于提前发现需要重新登录的账号。
 	RefreshExpiresAt int64                         `json:"refreshExpiresAt,omitempty"`
 	LastRefreshTime  int64                         `json:"lastRefreshTime,omitempty"`
@@ -2760,6 +2805,7 @@ type statusSnapshot struct {
 	Models       []modelStatSnapshot `json:"models,omitempty"`
 	ModelCatalog []modelStatSnapshot `json:"modelCatalog,omitempty"` // 管理页完整模型目录，含停用项。
 	Affinity     map[string]any      `json:"affinity,omitempty"`     // 会话/前缀亲和：命中、回退、容量
+	Credits      map[string]any      `json:"credits,omitempty"`      // 临期积分：配置与命中计数
 }
 
 // writeStatusSnapshot 将账号池实时状态（含冷却/失效）原子写入状态快照文件。
@@ -2792,6 +2838,24 @@ func writeStatusSnapshot() error {
 		}
 		as.QuotaKnown = acc.QuotaKnown
 		as.QuotaExhausted = acc.QuotaExhausted
+		// 积分包：只做只读快照，复制一份避免与抓取协程竞争。
+		as.CreditKnown = acc.credits.Known
+		as.CreditFetchedAt = acc.credits.FetchedAt
+		as.CreditUnknownExp = acc.credits.AnyUnknown
+		as.CreditError = acc.credits.Err
+		if acc.credits.Known {
+			if !acc.credits.SoonestAt.IsZero() {
+				as.CreditSoonestAt = acc.credits.SoonestAt.Unix()
+				as.CreditSoonestAmt = acc.credits.SoonestAmt
+			}
+			if amt, _ := acc.credits.expiringWithin(currentCreditSettings().Window, now); amt > 0 {
+				as.CreditExpiring = amt
+			}
+			pkgs := make([]creditPackage, len(acc.credits.Packages))
+			copy(pkgs, acc.credits.Packages)
+			sortCreditsForDisplay(pkgs)
+			as.CreditPackages = pkgs
+		}
 		as.QuotaUnlimited = acc.QuotaUnlimited
 		if len(acc.ModelStates) > 0 {
 			as.ModelStates = make(map[string]modelStateSnapshot, len(acc.ModelStates))
@@ -2851,6 +2915,7 @@ func writeStatusSnapshot() error {
 	annotateAccountPolicies(snap.Accounts)
 	snap.ModelCatalog = buildAllModelStatSnapshots(now, accounts)
 	snap.Affinity = affinitySnapshot()
+	snap.Credits = creditSnapshot()
 	captureAccountStatsLocked()
 	for _, row := range snap.ModelCatalog {
 		if disabled, _ := modelDisabled(row.ID); !disabled {
