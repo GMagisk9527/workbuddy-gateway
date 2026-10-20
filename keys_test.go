@@ -519,3 +519,28 @@ func TestUsageViewExposesLifetime(t *testing.T) {
 		t.Fatalf("面板累计消费应取历史累计，实际 %v", summary["allTimeCredits"])
 	}
 }
+// 旧 Key 实际不限并发，面板必须显示「不限」而不是 1。
+func TestLegacyKeyReportsUnlimitedConcurrency(t *testing.T) {
+	resetKeyWorld(t)
+	legacy := keyByID(legacyKeyID)
+	if legacy == nil {
+		t.Fatal("兼容旧 Key 身份应存在")
+	}
+	if got := legacy.concurrency(); got != 0 {
+		t.Fatalf("旧 Key 并发上限应为 0（不限），实际 %d", got)
+	}
+	view := keyAdminSnapshot(legacy)
+	if view.MaxConcurrent != 0 {
+		t.Fatalf("面板应把旧 Key 报成不限（0），实际 %d", view.MaxConcurrent)
+	}
+	if err, release := keyAdmit(legacy, "any"); err != nil {
+		t.Fatalf("旧 Key 准入不应受并发限制: %v", err)
+	} else {
+		release()
+	}
+	// 受管 Key 仍按默认 1
+	_, k := mustCreateKey(t, keyCreateOptions{Name: "managed"})
+	if got := keyAdminSnapshot(k).MaxConcurrent; got != defaultKeyConcurrent {
+		t.Fatalf("受管 Key 未填并发时应报默认 %d，实际 %d", defaultKeyConcurrent, got)
+	}
+}

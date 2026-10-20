@@ -1690,7 +1690,7 @@
         "<td>" + esc(creditNum(u.used)) + " / " + esc(limit) + "</td>" +
         "<td>" + esc(daily) + "</td>" +
         "<td>" + esc(monthly) + "</td>" +
-        "<td>" + esc(k.maxConcurrent || 1) + "</td>" +
+        "<td>" + esc(k.maxConcurrent > 0 ? k.maxConcurrent : "不限") + "</td>" +
         "<td>" + esc(k.lastUsedAt ? fmtTime(Math.floor(k.lastUsedAt / 1000)) : "-") + "</td>" +
         "<td>" + esc(expire) + "</td>" +
         "<td>" + ops + "</td>" +

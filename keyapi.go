@@ -149,7 +149,11 @@ func keyAdminSnapshot(k *apiKey) keyAdminView {
 	conc := k.MaxConcurrent
 	total, daily, monthly := k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly
 	k.mu.Unlock()
-	if conc <= 0 {
+	// 兼容旧 Key 实际不限并发，报 0 让面板显示「不限」；
+	// 受管 Key 没填并发时才回落到默认值。
+	if k.isLegacy() {
+		conc = 0
+	} else if conc <= 0 {
 		conc = defaultKeyConcurrent
 	}
 	return keyAdminView{
