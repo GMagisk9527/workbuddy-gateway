@@ -3576,6 +3576,8 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 		// 普通落盘审计也需要稳定的 TraceID / requestID；不能依赖可选 JSON 日志。
 		ensureDebugRequestContext(r, traceID, start)
 		r = r.WithContext(context.WithValue(r.Context(), statsRequestContextKey{}, &statsAttempt{}))
+		// 鉴权层通过这个持有者回填身份，外层结算才能读到（否则成功请求不入账）。
+		r = r.WithContext(context.WithValue(r.Context(), keyIdentityHolderKey{}, &keyIdentityHolder{}))
 		if debugLoggingEnabled() {
 			debugEvent(r, "info", "request_received", map[string]any{
 				"message": "请求已进入网关，准备执行中间件与路由处理",

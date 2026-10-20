@@ -21,6 +21,17 @@ import (
 func isolatedGatewayConfig(t *testing.T) {
 	t.Helper()
 	chdirTemp(t)
+	// 隔离多 Key 的进程级状态：其他用例可能创建过密钥或打开过鉴权开关，
+	// 这里统一复位，避免"某个用例跑完导致后面所有用例都要求鉴权"。
+	apiKeys.mu.Lock()
+	apiKeys.byID = map[string]*apiKey{}
+	apiKeys.byPrefix = map[string]*apiKey{}
+	apiKeys.requireAuth = false
+	apiKeys.mu.Unlock()
+	apiKeys.degraded.Store(false)
+	authSwitchMu.Lock()
+	authSwitchOn = false
+	authSwitchMu.Unlock()
 	oldCfg := cfg
 	gatewayConfigMu.Lock()
 	oldSettings := gatewaySettings

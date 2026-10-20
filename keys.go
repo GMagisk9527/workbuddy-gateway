@@ -540,15 +540,38 @@ type keyIdentity struct {
 
 type keyIdentityContextKey struct{}
 
+// keyIdentityHolder 让鉴权层写入的身份能被**外层中间件**看到。
+// 中间件链是「审计(外层) -> CORS -> 鉴权(内层)」，鉴权返回的是新 request，
+// 外层拿到的仍是旧 request；如果把身份只放在 request 上下文里，结算时就读不到，
+// 结果就是"请求成功但一分钱没记"。这里在审计层放一个可变持有者，鉴权层填进去。
+type keyIdentityHolder struct {
+	mu sync.RWMutex
+	id *keyIdentity
+}
+
+type keyIdentityHolderKey struct{}
+
 func keyIdentityFor(r *http.Request) *keyIdentity {
 	if r == nil {
 		return nil
 	}
-	id, _ := r.Context().Value(keyIdentityContextKey{}).(*keyIdentity)
-	return id
+	if id, ok := r.Context().Value(keyIdentityContextKey{}).(*keyIdentity); ok && id != nil {
+		return id
+	}
+	if h, ok := r.Context().Value(keyIdentityHolderKey{}).(*keyIdentityHolder); ok && h != nil {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return h.id
+	}
+	return nil
 }
 
 func withKeyIdentity(r *http.Request, id *keyIdentity) *http.Request {
+	if h, ok := r.Context().Value(keyIdentityHolderKey{}).(*keyIdentityHolder); ok && h != nil {
+		h.mu.Lock()
+		h.id = id
+		h.mu.Unlock()
+	}
 	return r.WithContext(context.WithValue(r.Context(), keyIdentityContextKey{}, id))
 }
 
@@ -782,6 +805,10 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	k.usage.LastUsedAt = now.UnixMilli()
 	unknownNow := k.usage.Unknown
 	k.mu.Unlock()
+	// Key 可能在请求在途时被删除：真实消费仍要并入匿名归档，不能丢账。
+	if keyByID(k.ID) == nil {
+		archiveMergeSettlement(e, now)
+	}
 	needCompact := ledger.pending >= ledgerCompactEvery
 	ledger.mu.Unlock()
 

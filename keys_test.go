@@ -28,6 +28,9 @@ func resetKeyWorld(t *testing.T) string {
 	authSwitchMu.Lock()
 	authSwitchOn = false
 	authSwitchMu.Unlock()
+	legacyKey.mu.Lock()
+	legacyKey.usage = apiKeyUsage{}
+	legacyKey.mu.Unlock()
 	registerRuntimeKeys()
 	settledMu.Lock()
 	settledIDs = map[string]struct{}{}

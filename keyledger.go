@@ -76,12 +76,12 @@ func ledgerLoad(dir string) error {
 	snapPath := filepath.Join(dir, ledgerSnapshotName)
 	snap := ledgerSnapshot{Version: 1, Keys: map[string]*apiKeyUsage{}, Archived: map[string]*apiKeyUsage{}}
 
-	data, err := os.ReadFile(snapPath)
+	data, snapErr := os.ReadFile(snapPath)
 	switch {
-	case errors.Is(err, os.ErrNotExist):
+	case errors.Is(snapErr, os.ErrNotExist):
 		// 首次启动：空账本
-	case err != nil:
-		return err
+	case snapErr != nil:
+		return snapErr
 	default:
 		if err := json.Unmarshal(data, &snap); err != nil {
 			return fmt.Errorf("账本快照损坏（%s），拒绝以空账本启动: %w", snapPath, err)
@@ -97,6 +97,7 @@ func ledgerLoad(dir string) error {
 		apiKeys.mu.Unlock()
 	}
 	ledger.seq.Store(snap.LastSeq)
+	ledger.lostSettlements = snap.LostSettlements
 
 	apiKeys.mu.RLock()
 	for id, usage := range snap.Keys {
@@ -107,6 +108,13 @@ func ledgerLoad(dir string) error {
 		}
 	}
 	apiKeys.mu.RUnlock()
+
+	// 区分"首次初始化"和"已初始化账本丢失"：只要存在受管 Key（或鉴权开关已开），
+	// 账本文件却双双不见，就说明数据丢失，绝不能当成零消费重新开始。
+	if _, statErr := os.Stat(ledger.path); errors.Is(statErr, os.ErrNotExist) && errors.Is(snapErr, os.ErrNotExist) && keysEverConfigured() {
+		apiKeys.degraded.Store(true)
+		log.Printf("[账本] 严重=账本文件缺失但已存在受管 Key，拒绝以零消费启动（fail closed） 文件=%s/%s 业务影响=有限额 Key 停止放行", ledgerSnapshotName, ledgerWALName)
+	}
 
 	// 先把快照里的窗口对齐到当前北京时间：昨天快照的 Daily/Monthly 必须归零，
 	// 但 Total/Lifetime 保持不变。必须在重放之前做，否则重放累积的今日消费
@@ -126,6 +134,7 @@ func ledgerLoad(dir string) error {
 
 	// 读入 WAL 并定位最后一条完整记录。末尾半行必须物理截断，
 	// 否则下一次 O_APPEND 会把新 JSON 接在残缺内容后面，制造"中段损坏"。
+	tailLost, tailKeyID := false, ""
 	raw, readErr := os.ReadFile(ledger.path)
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return readErr
@@ -147,25 +156,14 @@ func ledgerLoad(dir string) error {
 			if err := os.WriteFile(ledger.path, body, 0o600); err != nil {
 				return err
 			}
-			ledger.mu.Lock()
-			ledger.lostSettlements++
-			lost := ledger.lostSettlements
-			ledger.mu.Unlock()
-			if id := extractKeyIDFromBrokenEntry(string(tail)); id != "" {
-				if k := keyByID(id); k != nil {
-					k.mu.Lock()
-					k.usage.Unknown++
-					k.usage.Requests++
-					k.usage.LastUsedAt = now.UnixMilli()
-					k.mu.Unlock()
-					log.Printf("[账本] 警告=WAL 尾部有 1 笔无法确认的结算，已按未知费用计入 key=%s（保守处理，不低估额度）", id)
-				} else {
-					apiKeys.degraded.Store(true)
-					log.Printf("[账本] 警告=WAL 尾部残缺记录无法归属任一 Key，已进入安全状态（有限额 Key 停止放行）累计=%d", lost)
-				}
-			} else {
+			tailLost = true
+			tailKeyID = extractKeyIDFromBrokenEntry(string(tail))
+			if tailKeyID == "" || keyByID(tailKeyID) == nil {
+				// 无法归属到具体 Key：不能当作免费，进入安全状态。
 				apiKeys.degraded.Store(true)
-				log.Printf("[账本] 警告=WAL 尾部残缺记录无法解析归属，已进入安全状态（有限额 Key 停止放行）累计=%d", lost)
+				log.Printf("[账本] 警告=WAL 尾部残缺记录无法归属任一 Key，已进入安全状态（有限额 Key 停止放行）")
+			} else {
+				log.Printf("[账本] 警告=WAL 尾部有 1 笔无法确认的结算，将按未知费用计入 key=%s（保守处理，不低估额度）", tailKeyID)
 			}
 		}
 	}
@@ -177,6 +175,28 @@ func ledgerLoad(dir string) error {
 	}
 	ledger.file = f
 	ledger.writable = true
+
+	// 尾部补偿必须作为一条持久化事件写入，否则"恢复后不压缩就再重启"会丢掉这次未知计数。
+	// 事件本身也走重放（Kind=recovery），因此不会重复累计：截断后尾部已不存在，
+	// 下次启动不会再生成第二条；已压缩的快照会按 lastSeq 跳过它。
+	if tailLost {
+		ev := ledgerEntry{Key: tailKeyID, Kind: "recovery", Unknown: true,
+			At: now.UnixMilli(), DayKey: todayDay, MonthKey: todayMonth}
+		if tailKeyID == "" {
+			ev.Key = ""
+		}
+		ledger.mu.Lock()
+		ev.Seq = nextLedgerSeq()
+		werr := ledgerAppendLocked(ev)
+		ledger.mu.Unlock()
+		if werr != nil {
+			apiKeys.degraded.Store(true)
+			log.Printf("[账本] 严重=尾部补偿写入失败 原因=%v 业务影响=有限额 Key 停止放行", werr)
+		} else {
+			// body 是写入前读出来的，重放循环看不到这条事件，这里直接应用一次。
+			ledgerApply(ev)
+		}
+	}
 
 	replayed := 0
 	if len(body) > 0 {
@@ -248,12 +268,28 @@ func ledgerApply(e ledgerEntry) {
 	k := apiKeys.byID[e.Key]
 	apiKeys.mu.RUnlock()
 	if k == nil {
-		return // Key 已删除：历史仍留在 WAL/快照里，只是不再有归属对象
+		// Key 已删除：真实消费仍要保留匿名归属，不能直接丢弃。
+		switch e.Kind {
+		case "settle":
+			archiveMergeSettlement(e, time.UnixMilli(e.At))
+		case "recovery":
+			ledger.mu.Lock()
+			ledger.lostSettlements++
+			ledger.mu.Unlock()
+		}
+		return
 	}
 	now := time.Now()
 	todayDay, todayMonth := keyDayKey(now), keyMonthKey(now)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if e.Kind == "recovery" {
+		k.usage.Unknown++
+		if e.At > k.usage.LastUsedAt {
+			k.usage.LastUsedAt = e.At
+		}
+		return
+	}
 	if e.Kind == "reset" {
 		at := time.UnixMilli(e.At)
 		// 重置只清准入累计，历史累计与请求次数必须保留。
@@ -371,22 +407,41 @@ func ledgerCompact() {
 	}
 	snapPath := filepath.Join(filepath.Dir(ledger.path), ledgerSnapshotName)
 	tmp := snapPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// 1) 写临时文件并 fsync，确保内容真正落盘而不是只在页缓存里
+	tf, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		apiKeys.degraded.Store(true)
-		log.Printf("[账本] 警告=快照写入失败 原因=%v", err)
+		log.Printf("[账本] 警告=快照临时文件创建失败 原因=%v", err)
 		return
 	}
+	if _, err = tf.Write(data); err == nil {
+		err = tf.Sync()
+	}
+	cerr := tf.Close()
+	if err == nil {
+		err = cerr
+	}
+	if err != nil {
+		apiKeys.degraded.Store(true)
+		_ = os.Remove(tmp)
+		log.Printf("[账本] 警告=快照写入失败 原因=%v（WAL 保持不变，可重放）", err)
+		return
+	}
+	// 2) 原子重命名 + 目录 fsync：目录项落盘后才算快照提交完成
 	if err := os.Rename(tmp, snapPath); err != nil {
 		apiKeys.degraded.Store(true)
-		log.Printf("[账本] 警告=快照替换失败 原因=%v", err)
+		log.Printf("[账本] 警告=快照替换失败 原因=%v（WAL 保持不变，可重放）", err)
 		return
 	}
-	// 快照已包含全部条目：截断 WAL。即使此刻崩溃，重放也会按 lastSeq 跳过旧条目。
+	syncDir(filepath.Dir(snapPath))
+	// 3) 快照提交成功，才允许截断 WAL；先 Sync 保证已提交的行不再丢失
 	if ledger.file != nil {
+		_ = ledger.file.Sync()
 		if err := ledger.file.Truncate(0); err == nil {
 			_, _ = ledger.file.Seek(0, 0)
+			_ = ledger.file.Sync()
 		} else {
-			log.Printf("[账本] 警告=WAL 截断失败 原因=%v（不影响正确性，只影响文件大小）", err)
+			log.Printf("[账本] 警告=WAL 截断失败 原因=%v（不影响正确性，重放会按 lastSeq 跳过旧条目）", err)
 		}
 	}
 	ledger.pending = 0
@@ -402,5 +457,67 @@ func ledgerStats() map[string]any {
 		"pending":  pending,
 		"writable": ledger.writable,
 		"degraded": apiKeys.degraded.Load(),
+	}
+}
+// keysEverConfigured 报告这个进程是否已经配置过任何鉴权手段（受管 Key 或鉴权开关）。
+// 用于区分"首次初始化"与"账本文件被误删"：后者绝不能当成零消费重新开始。
+func keysEverConfigured() bool {
+	if authSwitchEnabled() {
+		return true
+	}
+	apiKeys.mu.RLock()
+	defer apiKeys.mu.RUnlock()
+	for _, k := range apiKeys.byID {
+		if !k.legacy {
+			return true
+		}
+	}
+	return apiKeys.requireAuth
+}
+// syncDir 把目录项刷到磁盘（Linux/ext4 上重命名后必须做，否则断电可能丢新名字）。
+// 非 Unix 平台打开目录会失败，这里按"尽力而为"处理，不把它当成账本错误。
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = d.Sync()
+}
+
+// archiveMergeSettlement 把一笔已删除 Key 的结算并入匿名归档（重启与压缩后仍保留）。
+func archiveMergeSettlement(e ledgerEntry, at time.Time) {
+	apiKeys.mu.Lock()
+	defer apiKeys.mu.Unlock()
+	if apiKeys.archive == nil {
+		apiKeys.archive = map[string]*apiKeyUsage{}
+	}
+	u := apiKeys.archive[e.Key]
+	if u == nil {
+		u = &apiKeyUsage{DayKey: keyDayKey(at), MonthKey: keyMonthKey(at)}
+		apiKeys.archive[e.Key] = u
+	}
+	if e.Known && e.Credit > 0 {
+		u.Total += e.Credit
+		u.Lifetime += e.Credit
+		if e.DayKey == keyDayKey(at) {
+			u.Daily += e.Credit
+		}
+		if e.MonthKey == keyMonthKey(at) {
+			u.Monthly += e.Credit
+		}
+	}
+	if e.Zero {
+		u.ZeroCost++
+	}
+	if e.Unknown {
+		u.Unknown++
+	}
+	u.Requests++
+	u.Input += e.InDelta
+	u.Output += e.OutDelta
+	u.Cached += e.CachedDelta
+	if e.At > u.LastUsedAt {
+		u.LastUsedAt = e.At
 	}
 }
