@@ -15,6 +15,7 @@
     activeTab: "overview",
     lastStatus: null,
     lastModels: null,
+    creditOpen: Object.create(null),
     timer: null,
     refreshPending: false,
     settings: null,
@@ -936,11 +937,12 @@
     var tb = $("accountsTable").querySelector("tbody");
     var focusTarget = focusedPolicyTarget(tb);
     if (!list.length) {
-      tb.innerHTML = '<tr><td colspan="16" class="empty">' +
+      tb.innerHTML = '<tr><td colspan="17" class="empty">' +
         (onlyUsable ? "没有符合条件的可用账号，取消勾选可查看全部账号。" : "暂无账号数据（服务是否已写入状态快照？）") + '</td></tr>';
       return;
     }
-    tb.innerHTML = list.map(function (a, i) {
+    var rows = [];
+    list.forEach(function (a, i) {
       var st = STATE_TEXT[a.state] || a.state || "-";
       var cls = STATE_CLASS[a.state] || "";
       if (a.schedulingEnabled === false) {
@@ -948,7 +950,7 @@
         cls = "warn";
       }
       var site = a.edition === "intl" ? "国际站" : "国内站";
-      return "<tr>" +
+      rows.push("<tr>" +
         "<td>" + (i + 1) + "</td>" +
         "<td>" + policySwitch("account", a.path, a.schedulingEnabled !== false, a.schedulingReason) + "</td>" +
         "<td class='mono'>" + esc(a.path) + "</td>" +
@@ -959,6 +961,7 @@
         "<td>" + esc(quotaAmount(a, "total")) + "</td>" +
         "<td>" + esc(quotaAmount(a, "used")) + "</td>" +
         "<td>" + esc(quotaAmount(a, "remaining")) + "</td>" +
+        "<td>" + creditCell(a) + "</td>" +
         "<td>" + esc((a.planLabel || "-") + (a.planStale ? "（待刷新）" : "")) + "</td>" +
         "<td>" + esc(count(a.freeModels)) + "</td>" +
         "<td>" + esc(count(a.modelCooldowns)) + "</td>" +
@@ -966,9 +969,164 @@
         "<td>" + esc(count(a.refreshFailCount)) + "</td>" +
         "<td><button class=\"ghost danger\" type=\"button\" data-account-delete=\"" +
         esc(a.path) + "\">删除</button></td>" +
-        "</tr>";
-    }).join("");
+        "</tr>");
+      if (state.creditOpen[a.path]) {
+        rows.push(creditDetailRow(a));
+      }
+    });
+    tb.innerHTML = rows.join("");
     restorePolicyFocus(tb, focusTarget);
+  }
+
+  // ---- 积分包展示 --------------------------------------------------------
+  // 后端只用 DeductionEndTime（积分作废时刻）算到期；前端只按这个时间做展示与分级，
+  // 不参与任何调度判断，也不把套餐周期边界当成积分到期。
+  var CREDIT_LONG_DAYS = 365;
+  var CREDIT_MAX_LIST = 60;
+
+  function creditDate(unix) {
+    if (!unix) return "—";
+    var d = new Date(unix * 1000);
+    if (isNaN(d.getTime())) return "—";
+    var m = d.getMonth() + 1, day = d.getDate();
+    return d.getFullYear() + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
+  }
+
+  function creditNum(value) {
+    var v = Number(value);
+    if (!isFinite(v)) return "0";
+    if (Math.abs(v - Math.round(v)) < 0.005) return String(Math.round(v));
+    return v.toFixed(2);
+  }
+
+  function creditKnownAmount(account) {
+    var sum = 0;
+    (account.creditPackages || []).forEach(function (p) {
+      if (p.expiryKnown === false) return;
+      var r = Number(p.remain);
+      if (isFinite(r) && r > 0) sum += r;
+    });
+    return sum;
+  }
+
+  // 分级：≤1 天 / ≤3 天 / ≤7 天为提醒，>365 天视为长期有效。
+  function creditInfo(account) {
+    if (account.creditKnown !== true) {
+      return {
+        kind: "unknown", text: account.creditError ? "采集失败" : "未采集", cls: "", amount: 0,
+        tip: account.creditError || "尚未采集积分包（等待下一次额度扫描）"
+      };
+    }
+    var packages = account.creditPackages || [];
+    if (!packages.length) {
+      return {kind: "none", text: "无积分包", cls: "", amount: 0, tip: "上游未返回任何积分包"};
+    }
+    var amount = creditKnownAmount(account);
+    var soonest = Number(account.creditSoonestAt || 0);
+    if (!soonest || !(Number(account.creditSoonestAmt) > 0)) {
+      if (account.creditUnknownExpiry) {
+        return {kind: "unknown-expiry", text: "到期未知", cls: "", amount: 0,
+                tip: "有剩余积分，但上游没有给出 DeductionEndTime，无法判断作废时间"};
+      }
+      return {kind: "none", text: "无剩余", cls: "", amount: 0, tip: "积分包已用完或已过期"};
+    }
+    var days = (soonest * 1000 - Date.now()) / 86400000;
+    var tip = "最近一笔：" + fmtTime(soonest) + " 作废（" + creditNum(account.creditSoonestAmt) +
+              " 分），剩余天数 " + (days > 0 ? days.toFixed(1) : "0") + " 天";
+    var base = {amount: Number(account.creditSoonestAmt), soonest: soonest, tip: tip};
+    if (days < 0) {
+      base.kind = "expired"; base.text = "已过期"; base.cls = "";
+      base.tip = "最近一笔已于 " + fmtTime(soonest) + " 作废";
+      return base;
+    }
+    if (days <= 1) { base.kind = "d1"; base.text = "≤1 天"; base.cls = "danger"; return base; }
+    if (days <= 3) { base.kind = "d3"; base.text = "≤3 天"; base.cls = "danger"; return base; }
+    if (days <= 7) { base.kind = "d7"; base.text = "≤7 天"; base.cls = "warn"; return base; }
+    if (days > CREDIT_LONG_DAYS) { base.kind = "long"; base.text = "长期"; base.cls = "ok"; return base; }
+    base.kind = "ok"; base.text = "剩 " + Math.ceil(days) + " 天"; base.cls = "ok";
+    return base;
+  }
+
+  function creditCell(account) {
+    var info = creditInfo(account);
+    var hasAmount = info.kind !== "unknown" && info.kind !== "none" && info.kind !== "expired" && info.kind !== "unknown-expiry";
+    var main = hasAmount
+      ? "<b>" + esc(creditNum(info.amount)) + "</b><span class='credit-unit'>分</span>"
+      : "<span class='credit-dim'>—</span>";
+    var open = !!state.creditOpen[account.path];
+    var count = (account.creditPackages || []).length;
+    var button = "<button type='button' class='credit-toggle' data-credit-toggle=\"" +
+      esc(account.path) + "\" aria-expanded='" + open + "'>" + (open ? "收起" : "明细" + (count ? "(" + count + ")" : "")) + "</button>";
+    return "<div class='credit-cell' title=\"" + esc(info.tip) + "\">" +
+      "<div class='credit-main'>" + main + "</div>" +
+      "<div class='credit-meta'><span class='badge " + info.cls + "'>" + esc(info.text) + "</span>" + button + "</div>" +
+      "</div>";
+  }
+
+  function creditRowState(pkg) {
+    var known = pkg.expiryKnown !== false && Number(pkg.expiresAt) > 0;
+    if (!known) return {text: "到期未知", cls: ""};
+    var ms = Number(pkg.expiresAt) * 1000 - Date.now();
+    var days = ms / 86400000;
+    if (ms < 0) return {text: "已过期", cls: ""};
+    if (days <= 1) {
+      var hours = Math.max(1, Math.ceil(ms / 3600000));
+      return {text: "剩 " + (hours >= 24 ? "1 天" : hours + " 小时"), cls: "danger"};
+    }
+    if (days <= 3) return {text: "剩 " + Math.floor(days) + " 天", cls: "danger"};
+    if (days <= 7) return {text: "剩 " + Math.floor(days) + " 天", cls: "warn"};
+    if (days > CREDIT_LONG_DAYS) return {text: "长期有效", cls: "ok"};
+    return {text: "剩 " + Math.floor(days) + " 天", cls: "ok"};
+  }
+
+  function creditDetailRow(account) {
+    var packages = (account.creditPackages || []).slice();
+    packages.sort(function (x, y) {
+      var kx = x.expiryKnown === false ? 1 : 0;
+      var ky = y.expiryKnown === false ? 1 : 0;
+      if (kx !== ky) return kx - ky;
+      return Number(x.expiresAt || 0) - Number(y.expiresAt || 0);
+    });
+    var shown = packages.slice(0, CREDIT_MAX_LIST);
+    var total = creditKnownAmount(account);
+    var items = shown.map(function (p) {
+      var st = creditRowState(p);
+      var date = p.expiryKnown === false ? "—" : creditDate(p.expiresAt);
+      return "<div class='credit-item'>" +
+        "<span class='credit-name' title=\"" + esc(p.name || "") + "\">" + esc(p.name || "未命名积分包") + "</span>" +
+        "<span class='credit-amount'>" + esc(creditNum(p.remain)) + " 分</span>" +
+        "<span class='credit-date'>" + esc(date) + "</span>" +
+        "<span class='badge " + st.cls + "'>" + esc(st.text) + "</span>" +
+        "</div>";
+    }).join("");
+    var more = packages.length > shown.length
+      ? "<p class='hint'>还有 " + (packages.length - shown.length) + " 个包未显示。</p>" : "";
+    var head = "积分包明细 · 共 " + packages.length + " 个 · 合计剩余 " + creditNum(total) + " 分";
+    if (account.creditFetchedAt) {
+      head += " · 采集于 " + fmtTime(account.creditFetchedAt);
+    }
+    var note = "<span class='credit-dim'>到期时间取自上游 DeductionEndTime（积分作废时刻），不是套餐周期结束时间。</span>";
+    return "<tr class='credit-detail'><td colspan='17'>" +
+      "<div class='credit-detail-box'>" +
+      "<div class='credit-detail-head'>" + esc(head) + " " + note + "</div>" +
+      (items ? "<div class='credit-list'>" + items + "</div>" : "<p class='hint'>没有可展示的积分包。</p>") +
+      more +
+      "</div></td></tr>";
+  }
+
+  function creditRowToggle(event) {
+    var target = event && event.target;
+    if (!target || typeof target.closest !== "function") return;
+    var button = target.closest("[data-credit-toggle]");
+    if (!button) return;
+    var name = button.getAttribute("data-credit-toggle");
+    if (!name) return;
+    if (state.creditOpen[name]) {
+      delete state.creditOpen[name];
+    } else {
+      state.creditOpen[name] = true;
+    }
+    renderAccounts((state.lastStatus && state.lastStatus.accounts) || []);
   }
 
   function quotaAmount(account, kind) {
@@ -1677,6 +1835,7 @@
     });
     $("accountsTable").addEventListener("click", togglePolicy);
     $("accountsTable").addEventListener("click", accountRowActions);
+    $("accountsTable").addEventListener("click", creditRowToggle);
     $("addAccountBtn").addEventListener("click", openAddAccount);
     $("addStart").addEventListener("click", startAddAccount);
     $("addCancel").addEventListener("click", closeAddAccount);
