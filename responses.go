@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -760,6 +761,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	}
 
 	seq := 0
+	var eventBuf []byte
 	emit := func(eventType string, data map[string]any) {
 		data["type"] = eventType
 		data["sequence_number"] = seq
@@ -768,7 +770,12 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if err != nil {
 			return
 		}
-		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, b)
+		eventBuf = append(eventBuf[:0], "event: "...)
+		eventBuf = append(eventBuf, eventType...)
+		eventBuf = append(eventBuf, "\ndata: "...)
+		eventBuf = append(eventBuf, b...)
+		eventBuf = append(eventBuf, '\n', '\n')
+		_, _ = w.Write(eventBuf)
 		flusher.Flush()
 	}
 
@@ -843,22 +850,96 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	defer finishFirstToken(r, modelName, reqID, body)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	mode := fastPathMode.Load()
+	var view respChunkView
+	var usageRaw []byte
+	var msgRaw, reasoningRaw []byte
+	var textPrefix, reasoningPrefix []byte
+	toolPrefix := map[int][]byte{}
+	deltaBuf := make([]byte, 0, 512)
 	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
-		if data == "" {
+		data := stripDataPrefixBytes(scanner.Bytes())
+		if len(data) == 0 {
 			continue
 		}
-		if data == "[DONE]" {
+		if bytes.Equal(data, doneMarker) {
 			sawDone = true
 			continue
 		}
+		if mode == int32(fastPathOn) && parseResponsesChunk(data, &view) {
+			// 快路径：结构扫描 + 直接拼装事件（见 responsesfast.go）
+			if view.firstTok {
+				observeFirstTokenFlag(body)
+			}
+			if len(view.usage) > 0 {
+				usageRaw = append(usageRaw[:0], view.usage...)
+			}
+			if view.finish != "" && finishReason == "" {
+				finishReason = view.finish
+			}
+			for c := 0; c < view.nChoices; c++ {
+				if raw := view.reasoning[c]; len(raw) > 0 {
+					openReasoning()
+					if reasoningPrefix == nil {
+						reasoningPrefix = respReasoningDeltaPrefix(make([]byte, 0, 192), reasoningItemID, reasoningIndex)
+					}
+					reasoningRaw = append(reasoningRaw, raw...)
+					emitRawDelta(w, flusher, &deltaBuf, reasoningPrefix, raw, &seq)
+				}
+				if raw := view.content[c]; len(raw) > 0 {
+					openMessage()
+					if textPrefix == nil {
+						textPrefix = respTextDeltaPrefix(make([]byte, 0, 192), msgItemID, msgIndex)
+					}
+					msgRaw = append(msgRaw, raw...)
+					emitRawDelta(w, flusher, &deltaBuf, textPrefix, raw, &seq)
+				}
+				if n := view.toolCnt[c]; n > 0 {
+					before := len(toolOrder)
+					for t := 0; t < n; t++ {
+						applyToolCallView(toolCalls, &toolOrder, &view.tools[view.toolOff[c]+t])
+					}
+					for i := before; i < len(toolOrder); i++ {
+						idx := toolOrder[i]
+						st := toolCalls[idx]
+						if st.ID == "" {
+							st.ID = "call_" + compactUUID()
+						}
+						tcItemID[idx] = "fc_" + compactUUID()
+						tcIndex[idx] = nextIndex
+						nextIndex++
+						emit("response.output_item.added", map[string]any{
+							"output_index": tcIndex[idx],
+							"item": map[string]any{
+								"id": tcItemID[idx], "type": "function_call", "status": "in_progress",
+								"call_id": st.ID, "name": st.Name, "arguments": "",
+							},
+						})
+					}
+					for t := 0; t < n; t++ {
+						tv := &view.tools[view.toolOff[c]+t]
+						if len(tv.args) == 0 {
+							continue
+						}
+						p := toolPrefix[tv.index]
+						if p == nil {
+							p = respToolDeltaPrefix(make([]byte, 0, 192), tcItemID[tv.index], tcIndex[tv.index])
+							toolPrefix[tv.index] = p
+						}
+						emitRawDelta(w, flusher, &deltaBuf, p, tv.args, &seq)
+					}
+				}
+			}
+			continue
+		}
 		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
+		if json.Unmarshal(data, &chunk) != nil {
 			continue
 		}
 		observeFirstToken(body, chunk)
 		if u, ok := chunk["usage"].(map[string]any); ok {
 			usage = u
+			usageRaw = usageRaw[:0]
 		}
 		finishReason = noteFinishReason(finishReason, chunk)
 		choices, _ := chunk["choices"].([]any)
@@ -936,6 +1017,20 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	}
 	scanErr := scanner.Err()
 	completeTokenStream(body, scanErr == nil && finishReason != "")
+	if len(usageRaw) > 0 {
+		var u map[string]any
+		if json.Unmarshal(usageRaw, &u) == nil {
+			usage = u
+		}
+	}
+	messageText := msgSB.String()
+	reasoningText := reasoningSB.String()
+	messageChars, reasoningChars := msgSB.Len(), reasoningSB.Len()
+	if mode == int32(fastPathOn) {
+		messageText = decodeJSONBody(msgRaw)
+		reasoningText = decodeJSONBody(reasoningRaw)
+		messageChars, reasoningChars = len(messageText), len(reasoningText)
+	}
 	statsObserveUsage(r, usage, scanErr == nil && finishReason != "")
 	if scanErr != nil {
 		debugEvent(r, "error", "stream_response_failed", map[string]any{
@@ -964,8 +1059,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			"error_type":      "stream_closed_without_finish",
 			"finish_reason":   "",
 			"saw_done":        sawDone,
-			"reasoning_chars": reasoningSB.Len(),
-			"message_chars":   msgSB.Len(),
+			"reasoning_chars": reasoningChars,
+			"message_chars":   messageChars,
 			"tool_call_count": len(toolOrder),
 			"business_impact": "上游干净结束但没有 finish_reason，已拒绝 response.completed，改为小的 response.failed",
 		})
@@ -977,7 +1072,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		emit("response.failed", map[string]any{"response": failed})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=Responses收尾 账号=%s 结果=拒绝当成成功 原因=上游干净结束但没有 finish_reason 是否看到DONE=%t 已收到推理字符数=%d 已收到正文字符数=%d 工具调用数=%d 业务影响=不下发 output_item.done 和 response.completed，客户端收到 response.failed 是否已处理=是",
-			debugTraceID(r), reqID, acc.Path, sawDone, reasoningSB.Len(), msgSB.Len(), len(toolOrder))
+			debugTraceID(r), reqID, acc.Path, sawDone, reasoningChars, messageChars, len(toolOrder))
 		recordModelLatency(modelName, time.Since(startTime))
 		return
 	}
@@ -989,7 +1084,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	// 收尾：reasoning
 	if reasoningOpen {
-		text := reasoningSB.String()
+		text := reasoningText
 		emit("response.reasoning_summary_text.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "text": text})
 		emit("response.reasoning_summary_part.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
 		item := map[string]any{"id": reasoningItemID, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": text}}}
@@ -999,7 +1094,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	// 收尾：message
 	if msgOpen {
-		text := msgSB.String()
+		text := messageText
 		emit("response.output_text.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "text": text})
 		emit("response.content_part.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "annotations": []any{}, "text": text}})
 		item := map[string]any{"id": msgItemID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "annotations": []any{}, "text": text}}}

@@ -3842,31 +3842,97 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var usage map[string]any
+	var usageRaw []byte
+	meta := chunkMeta{usage: make([]byte, 0, 256)}
+	frame := make([]byte, 0, 8*1024)
+	mode := fastPathMode.Load()
 	finishReason := ""
 	sawDone := false
 	for scanner.Scan() {
-		cleanData := stripDataPrefix(scanner.Text())
-		if cleanData == "" {
+		cleanData := stripDataPrefixBytes(scanner.Bytes())
+		if len(cleanData) == 0 {
 			continue
 		}
-		if cleanData == "[DONE]" {
+		if bytes.Equal(cleanData, doneMarker) {
 			// 先记住，等确认有真实 finish_reason 再转发。
 			// 没有结束原因时转发 [DONE]，等于告诉客户端这次是正常结束。
 			sawDone = true
 			break
 		}
-		var chunk map[string]any
-		if json.Unmarshal([]byte(cleanData), &chunk) == nil {
-			observeFirstToken(body, chunk)
-			if u, ok := chunk["usage"].(map[string]any); ok {
-				usage = u
+
+		if mode == int32(fastPathShadow) {
+			// 影子模式：额外跑一遍快路径并与原实现比对，输出仍走原实现。
+			if shadowOut := shadowClean(cleanData); shadowOut != nil {
+				shadowChecked.Add(1)
+				if oldStr := cleanChunkJSON(string(cleanData)); !shadowCompare(oldStr, shadowOut) {
+					if shadowMismatch.Add(1) <= 3 {
+						log.Printf("[快路径影子] 不一致 原=%s 快=%s", truncate(oldStr, 300), truncate(string(shadowOut), 300))
+					}
+				}
 			}
-			finishReason = noteFinishReason(finishReason, chunk)
 		}
-		if cleanedChunk := cleanChunkJSON(cleanData); cleanedChunk != "" {
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", cleanedChunk)
-			flusher.Flush()
+
+		if mode == int32(fastPathOn) {
+			frame = append(frame[:0], "data: "...)
+			var fastOK bool
+			frame, fastOK = cleanChunkInto(frame, cleanData, &meta)
+			if fastOK {
+				if meta.firstToken {
+					observeFirstTokenFlag(body)
+				}
+				if meta.finish != "" && finishReason == "" {
+					finishReason = meta.finish
+				}
+				if len(meta.usage) > 0 {
+					usageRaw = append(usageRaw[:0], meta.usage...)
+				}
+			} else {
+				// 形状不可识别：回退到原实现，语义不变。
+				cleanedChunk := cleanChunkJSON(string(cleanData))
+				if cleanedChunk == "" {
+					continue
+				}
+				frame = append(frame[:0], "data: "...)
+				frame = append(frame, cleanedChunk...)
+				var chunk map[string]any
+				if json.Unmarshal(cleanData, &chunk) == nil {
+					observeFirstToken(body, chunk)
+					if u, ok := chunk["usage"].(map[string]any); ok {
+						usage = u
+						usageRaw = usageRaw[:0]
+					}
+					finishReason = noteFinishReason(finishReason, chunk)
+				}
+			}
+		} else {
+			// 原路径（WBG_FASTPATH=off 或 shadow）
+			var chunk map[string]any
+			if json.Unmarshal(cleanData, &chunk) == nil {
+				observeFirstToken(body, chunk)
+				if u, ok := chunk["usage"].(map[string]any); ok {
+					usage = u
+				}
+				finishReason = noteFinishReason(finishReason, chunk)
+			}
+			cleanedChunk := cleanChunkJSON(string(cleanData))
+			if cleanedChunk == "" {
+				continue
+			}
+			frame = append(frame[:0], "data: "...)
+			frame = append(frame, cleanedChunk...)
 		}
+		frame = append(frame, '\n', '\n')
+		_, _ = w.Write(frame)
+		flusher.Flush()
+	}
+	if len(usageRaw) > 0 {
+		var u map[string]any
+		if json.Unmarshal(usageRaw, &u) == nil {
+			usage = u
+		}
+	}
+	if mode == int32(fastPathShadow) {
+		shadowReport()
 	}
 	scanErr := scanner.Err()
 	completeTokenStream(body, scanErr == nil && finishReason != "")
