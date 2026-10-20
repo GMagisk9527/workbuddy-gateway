@@ -35,6 +35,7 @@
     "mode": "hybrid",
     "ttlSeconds": 1800,
     "capacity": 4096,
-    "prefixHeadBytes": 65536
+    "prefixHeadBytes": 65536,
+    "maxAccountShare": 0.6
   }
 }

@@ -562,3 +562,95 @@ func TestAffinityKeyUsesContextDigest(t *testing.T) {
 		t.Fatal("有结构化摘要时应优先使用它，而不是重新扫描请求体")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 摘要计算只在需要时发生
+// ---------------------------------------------------------------------------
+
+func TestDigestSkippedWhenAffinityDisabled(t *testing.T) {
+	silenceLogs(t)
+	enableAffinity(t, false, affinityModePrefix)
+	req, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.RemoteAddr = "192.0.2.9:1"
+	got := withAffinityDigestIfEnabled(req, map[string]any{"messages": []any{map[string]any{"role": "system", "content": "x"}}}, "m")
+	if d := prefixDigestFromContext(got); d != "" {
+		t.Fatalf("关闭亲和时不应计算摘要，实际 %q", d)
+	}
+}
+
+func TestDigestSkippedInSessionMode(t *testing.T) {
+	silenceLogs(t)
+	enableAffinity(t, true, affinityModeSession)
+	req, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	got := withAffinityDigestIfEnabled(req, map[string]any{"messages": []any{map[string]any{"role": "system", "content": "x"}}}, "m")
+	if d := prefixDigestFromContext(got); d != "" {
+		t.Fatalf("session 模式不需要前缀摘要，实际计算了 %q", d)
+	}
+}
+
+func TestDigestComputedInPrefixMode(t *testing.T) {
+	silenceLogs(t)
+	enableAffinity(t, true, affinityModePrefix)
+	req, _ := http.NewRequest(http.MethodPost, "/v1/responses", nil)
+	got := withAffinityDigestIfEnabled(req, map[string]any{"messages": []any{map[string]any{"role": "system", "content": "x"}}}, "m")
+	if d := prefixDigestFromContext(got); d == "" {
+		t.Fatal("prefix 模式应计算摘要")
+	}
+}
+
+// 相同 system prompt、不同首个用户消息 → 不同键（避免不同会话挤到同一账号）。
+func TestDigestDistinguishesConversationsWithSameSystem(t *testing.T) {
+	system := strings.Repeat("统一的系统提示词。", 100)
+	a := map[string]any{
+		"model":    "m",
+		"tools":    []any{map[string]any{"name": "Bash"}},
+		"messages": []any{map[string]any{"role": "system", "content": system}, map[string]any{"role": "user", "content": "任务甲"}},
+	}
+	b := map[string]any{
+		"model":    "m",
+		"tools":    []any{map[string]any{"name": "Bash"}},
+		"messages": []any{map[string]any{"role": "system", "content": system}, map[string]any{"role": "user", "content": "任务乙"}},
+	}
+	if digestFromRequestObject(a, "m", 64<<10) == digestFromRequestObject(b, "m", 64<<10) {
+		t.Fatal("相同 system 不同会话必须得到不同摘要")
+	}
+}
+
+// 账号过载保护：新键不再钉到已占多数份额的账号，老键仍可刷新。
+func TestAffinityOverloadGuard(t *testing.T) {
+	silenceLogs(t)
+	t.Cleanup(func() { enableAffinity(t, true, affinityModeHybrid) })
+	enableAffinity(t, true, affinityModeSession)
+	setAffinityMaxShare(0.6)
+	affinityMetrics.reset()
+
+	for i := 0; i < 12; i++ {
+		affinityRemember("key-"+string(rune('a'+i)), "hot.json")
+	}
+	affinityStoreMu.RLock()
+	store := affinityStore
+	store.mu.Lock()
+	share, total := store.shareOf("hot.json")
+	store.mu.Unlock()
+	affinityStoreMu.RUnlock()
+	if total < affinityShareMinSamples || share <= 0.6 {
+		t.Fatalf("前提不成立: total=%d share=%.2f", total, share)
+	}
+
+	before := affinityMetrics.spread.Load()
+	affinityRemember("brand-new-key", "hot.json")
+	if affinityMetrics.spread.Load() == before {
+		t.Fatal("新键钉到过载账号时应被拒绝并计数")
+	}
+	affinityStoreMu.RLock()
+	_, ok := affinityStore.items["brand-new-key"]
+	affinityStoreMu.RUnlock()
+	if ok {
+		t.Fatal("被拒绝的新键不应写入存储")
+	}
+
+	// 已存在的键仍可刷新（不能把老会话赶走）
+	if acc := affinityLookup("key-a"); acc != "hot.json" {
+		t.Fatalf("老键应仍然命中，实际 %q", acc)
+	}
+}

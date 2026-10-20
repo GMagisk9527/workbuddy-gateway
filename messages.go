@@ -165,7 +165,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Get("X-Trace-ID"), reqID, modelName, isStream, len(upstreamBytes))
 
 	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
-	r = withPrefixDigest(r, digestFromRequestObject(chatReq, modelName, currentAffinitySettings().PrefixHeadByte))
+	r = withAffinityDigestIfEnabled(r, chatReq, modelName)
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
 		return
@@ -851,7 +851,7 @@ func anthropicSignature(s string) string {
 
 // scanUpstreamSSE 逐行扫描上游 SSE 并把每个 chunk 喂给状态机。
 // 返回 scanner 错误（nil 表示干净 EOF）。
-func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]byte)) error {
+func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]byte) bool) error {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -865,7 +865,9 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 		}
 		observeFirstToken(body, chunk)
 		if out := state.feed(chunk); sink != nil && len(out) > 0 {
-			sink(out)
+			if !sink(out) {
+				return nil // 下游写入失败：立即停止读取上游
+			}
 		}
 	}
 	err := scanner.Err()
@@ -886,18 +888,29 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "服务器不支持流式响应 Flush")
 		return
 	}
-	writeEvent := func(b []byte) {
+	writeFailed := false
+	writeEvent := func(b []byte) bool {
 		if len(b) == 0 {
-			return
+			return true
 		}
-		_, _ = w.Write(b)
+		if _, werr := w.Write(b); werr != nil {
+			// 客户端已断开：关闭响应体会取消上游请求，避免继续消耗额度。
+			_ = resp.Body.Close()
+			writeFailed = true
+			return false
+		}
 		flusher.Flush()
+		return true
 	}
 
 	state := newAnthropicStreamState(modelName, wantThinking)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	scanErr := scanUpstreamSSE(body, state, writeEvent)
+	if writeFailed {
+		log.Printf("[#%d] 下游写入失败，已终止 Messages 流 (账号 %s)", reqID, acc.Path)
+		return
+	}
 	statsObserveUsage(r, state.usage, scanErr == nil && state.finish != "")
 	if scanErr != nil {
 		debugEvent(r, "error", "stream_response_failed", map[string]any{

@@ -109,6 +109,8 @@ type runtimeFileConfig struct {
 		Capacity int `json:"capacity"`
 		// PrefixHeadBytes：前缀摘要取上游请求体前多少字节；<=0 用默认 64 KiB。
 		PrefixHeadBytes int `json:"prefixHeadBytes"`
+		// MaxAccountShare：单个账号最多承载多少比例的会话绑定；<=0 用默认 0.6，>=1 表示不限制。
+		MaxAccountShare float64 `json:"maxAccountShare"`
 	} `json:"affinity"`
 }
 

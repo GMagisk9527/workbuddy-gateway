@@ -3872,7 +3872,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
-	r = withPrefixDigest(r, digestFromRequestObject(reqObj, modelName, currentAffinitySettings().PrefixHeadByte))
+	r = withAffinityDigestIfEnabled(r, reqObj, modelName)
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
 		return

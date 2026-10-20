@@ -187,7 +187,7 @@ func TestAffinityDisabledProducesNoKey(t *testing.T) {
 func TestAffinityStoreTTL(t *testing.T) {
 	s := newAffinityStore(8, 30*time.Millisecond)
 	now := time.Now()
-	s.put("k", "acc-a", now)
+	s.put("k", "acc-a", now, 0)
 	if acc, ok := s.get("k", now); !ok || acc != "acc-a" {
 		t.Fatalf("未命中: %q %v", acc, ok)
 	}
@@ -202,9 +202,9 @@ func TestAffinityStoreTTL(t *testing.T) {
 func TestAffinityStoreLRU(t *testing.T) {
 	s := newAffinityStore(2, time.Hour)
 	now := time.Now()
-	s.put("a", "acc-a", now)
-	s.put("b", "acc-b", now)
-	s.put("c", "acc-c", now) // 淘汰 a
+	s.put("a", "acc-a", now, 0)
+	s.put("b", "acc-b", now, 0)
+	s.put("c", "acc-c", now, 0) // 淘汰 a
 	if _, ok := s.get("a", now); ok {
 		t.Fatal("最久未使用的条目应被淘汰")
 	}
@@ -219,12 +219,12 @@ func TestAffinityStoreLRU(t *testing.T) {
 func TestAffinityStoreTouchKeepsEntry(t *testing.T) {
 	s := newAffinityStore(2, time.Hour)
 	now := time.Now()
-	s.put("a", "acc-a", now)
-	s.put("b", "acc-b", now)
+	s.put("a", "acc-a", now, 0)
+	s.put("b", "acc-b", now, 0)
 	if _, ok := s.get("a", now); !ok { // 触碰 a，使其成为最近使用
 		t.Fatal("a 应命中")
 	}
-	s.put("c", "acc-c", now) // 应淘汰 b
+	s.put("c", "acc-c", now, 0) // 应淘汰 b
 	if _, ok := s.get("b", now); ok {
 		t.Fatal("b 应为最久未使用并被淘汰")
 	}
