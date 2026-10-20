@@ -3323,6 +3323,16 @@ func runServe() {
 	defer stopConfigReload()
 	loadModelsCache()
 	loadOptionalStats()
+	// 多 Key：先载入密钥表，再重放账本。任一失败都不能静默降级成"空表/空账本"。
+	if err := keyStoreLoad(); err != nil {
+		apiKeys.degraded.Store(true)
+		log.Printf("[APIKey] 严重=密钥表加载失败 原因=%v 业务影响=受管 Key 全部不可用，请检查 apikeys.json", err)
+	}
+	registerRuntimeKeys()
+	if err := ledgerLoad("."); err != nil {
+		apiKeys.degraded.Store(true)
+		log.Printf("[账本] 严重=账本加载失败 原因=%v 业务影响=有限额 Key 停止放行", err)
+	}
 	if err := loadAccounts(); err != nil {
 		fmt.Printf("警告: 未检测到有效凭据 (%v)。\n请先执行: workbuddy-gateway login 扫码登录，或确保凭据文件存在。\n\n", err)
 	} else {
@@ -3611,29 +3621,64 @@ func isAuthExemptPath(p string) bool {
 
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := currentAPIKey()
-		if apiKey != "" && !isAuthExemptPath(r.URL.Path) {
-			authHeader := r.Header.Get("Authorization")
-			token := strings.TrimPrefix(authHeader, "Bearer ")
-			// Anthropic 客户端（Claude Code 等）用 x-api-key 头携带密钥。
-			if token == "" {
-				token = r.Header.Get("x-api-key")
-			}
-			if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
-				debugEvent(r, "warn", "authentication_rejected", map[string]any{
-					"status_code":     http.StatusUnauthorized,
-					"reason":          "invalid_api_key",
-					"business_impact": "请求未进入业务逻辑",
-				})
-				log.Printf("[请求被拦截] traceId=%s 拦截层=API鉴权 结果=拒绝 原因=未提供有效API密钥 返回状态码=401 业务影响=请求未进入业务方法", w.Header().Get("X-Trace-ID"))
-				writeUpstreamError(w, r, http.StatusUnauthorized, "invalid_api_key", "未提供有效 API 密钥")
-				return
-			}
+		if isAuthExemptPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
 		}
-		debugEvent(r, "debug", "authentication_passed", map[string]any{"result": "allowed"})
-		log.Printf("[中间件-鉴权] traceId=%s 结果=通过", w.Header().Get("X-Trace-ID"))
-		next.ServeHTTP(w, r)
+		legacy := currentAPIKey()
+		authHeader := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		// Anthropic 客户端（Claude Code 等）用 x-api-key 头携带密钥。
+		if token == "" {
+			token = r.Header.Get("x-api-key")
+		}
+		// 1) 兼容旧 Key：定长比较，行为与升级前完全一致（不限额度、不限并发）。
+		if legacy != "" && subtle.ConstantTimeCompare([]byte(token), []byte(legacy)) == 1 {
+			r = withKeyIdentity(r, &keyIdentity{ID: legacyKeyID, Prefix: "config.apiKey", Legacy: true, Label: "兼容旧 Key"})
+			log.Printf("[中间件-鉴权] traceId=%s 结果=通过", w.Header().Get("X-Trace-ID"))
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 2) 受管 Key：前缀定位 + 哈希比较。禁用/过期也先放行到准入层，
+		//    以便 /v1/usage 能返回"我为什么不能用"。
+		if k := authenticateAPIKey(token); k != nil {
+			now := time.Now().UnixMilli()
+			k.mu.Lock()
+			if now > k.usage.LastUsedAt {
+				k.usage.LastUsedAt = now
+			}
+			k.mu.Unlock()
+			r = withKeyIdentity(r, &keyIdentity{ID: k.ID, Prefix: k.Prefix, Legacy: false, Label: k.Name})
+			log.Printf("[中间件-鉴权] traceId=%s 结果=通过", w.Header().Get("X-Trace-ID"))
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 3) 既没有旧 Key 也没有受管 Key：保持原有的"未配置鉴权=开放"语义。
+		if legacy == "" && !hasManagedAPIKeys() {
+			log.Printf("[中间件-鉴权] traceId=%s 结果=通过", w.Header().Get("X-Trace-ID"))
+			next.ServeHTTP(w, r)
+			return
+		}
+		debugEvent(r, "warn", "authentication_rejected", map[string]any{
+			"status_code":     http.StatusUnauthorized,
+			"reason":          "invalid_api_key",
+			"business_impact": "请求未进入业务逻辑",
+		})
+		log.Printf("[请求被拦截] traceId=%s 拦截层=API鉴权 结果=拒绝 原因=未提供有效API密钥 返回状态码=401 业务影响=请求未进入业务方法", w.Header().Get("X-Trace-ID"))
+		writeUpstreamError(w, r, http.StatusUnauthorized, "invalid_api_key", "未提供有效 API 密钥")
 	})
+}
+
+// hasManagedAPIKeys 报告是否存在受管密钥（不含兼容旧 Key）。
+func hasManagedAPIKeys() bool {
+	apiKeys.mu.RLock()
+	defer apiKeys.mu.RUnlock()
+	for _, k := range apiKeys.byID {
+		if !k.legacy && k.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 // -----------------------------------------------------------------------------
@@ -3958,6 +4003,9 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
+	if !keyModelAllowed(w, r, modelName) {
+		return
+	}
 	r = withAffinityDigestIfEnabled(r, reqObj, modelName)
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {
@@ -4187,6 +4235,16 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	modelIDs, source := mergedModelIDs()
+	// 模型列表与真实调用使用同一套允许判定：白名单外的模型不出现，
+	// 但全局禁用规则仍由 mergedModelIDs 先行生效，Key 白名单不能覆盖它。
+	allowed := keyAllowedModelFilter(r)
+	filtered := modelIDs[:0]
+	for _, id := range modelIDs {
+		if allowed(id) {
+			filtered = append(filtered, id)
+		}
+	}
+	modelIDs = filtered
 	modelsList := make([]map[string]any, 0, len(modelIDs))
 	for _, id := range modelIDs {
 		entry := map[string]any{

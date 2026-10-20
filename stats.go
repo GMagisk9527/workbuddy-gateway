@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+
+	"github.com/google/uuid"
 	"strings"
 	"sync"
 	"time"
@@ -283,14 +285,15 @@ func statsPersistenceLoop(ctx context.Context) {
 
 type statsRequestContextKey struct{}
 type statsAttempt struct {
-	id       string
-	account  statsAccount
-	model    string
-	started  time.Time
-	usage    map[string]any
-	ttft     *float64
-	complete bool
-	affinity string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
+	id        string
+	attemptID string // 本次上游尝试的幂等键，用于额度结算去重
+	account   statsAccount
+	model     string
+	started   time.Time
+	usage     map[string]any
+	ttft      *float64
+	complete  bool
+	affinity  string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
 }
 
 func statsAttemptFor(r *http.Request) *statsAttempt {
@@ -309,7 +312,7 @@ func statsSelectAccount(r *http.Request, acc *Account, model string) {
 	accountMu.Lock()
 	id, account := statsAccountIDLocked(acc)
 	accountMu.Unlock()
-	*p = statsAttempt{id: id, account: account, model: normalizeModelName(model), started: requestStartFor(r)}
+	*p = statsAttempt{id: id, attemptID: uuid.NewString(), account: account, model: normalizeModelName(model), started: requestStartFor(r)}
 }
 
 func statsObserveUsage(r *http.Request, usage map[string]any, complete bool) {
@@ -375,6 +378,18 @@ func statsFinishAttempt(r *http.Request, status int) {
 	}
 	if credit, ok := usageCredit(p.usage); ok && credit >= 0 && !math.IsNaN(credit) && !math.IsInf(credit, 0) {
 		row.Credit = &credit
+	}
+	// 额度结算：只有真正拿到 usage 的尝试才记账（换号失败的那次没有 usage，不计费）。
+	// 身份来自请求上下文，不依赖会被 statsSelectAccount 重置的 attempt。
+	if len(p.usage) > 0 && p.attemptID != "" {
+		if identity := keyIdentityFor(r); identity != nil {
+			if k := keyByID(identity.ID); k != nil {
+				outcome := keySettle(k, p.attemptID, p.usage, status)
+				debugEvent(r, "info", "api_key_settled", map[string]any{
+					"key_id": k.ID, "outcome": string(outcome),
+				})
+			}
+		}
 	}
 	requestStats.Lock()
 	if !requestStats.enabled {

@@ -18,12 +18,13 @@ func newAPIHandler() http.Handler {
 	mux.HandleFunc("/v1/messages", handleMessages)
 	mux.HandleFunc("/v1/messages/count_tokens", handleCountTokens)
 	mux.HandleFunc("/v1/models", handleModels)
+	mux.HandleFunc("/v1/usage", handleKeyUsage)
 	mux.HandleFunc("/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ping", handleHealth)
 	mux.HandleFunc("/admin/probe", handleAdminProbe)
 	mux.HandleFunc("/", handleIndex)
-	return requestAuditMiddleware(corsMiddleware(authMiddleware(mux)))
+	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(mux))))
 }
 
 func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {

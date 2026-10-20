@@ -16,6 +16,8 @@
     lastStatus: null,
     lastModels: null,
     creditOpen: Object.create(null),
+    keys: null,
+    keyEditing: null,
     timer: null,
     refreshPending: false,
     settings: null,
@@ -1640,6 +1642,185 @@
     }, function () { state.refreshPending = false; });
   }
 
+  // ---- API Key 管理 ------------------------------------------------------
+  function loadKeys() {
+    return api("/admin/api/keys").then(function (data) {
+      state.keys = data;
+      renderKeys(data);
+    }, function (err) {
+      $("keySummary").innerHTML = "";
+      $("keysTable").querySelector("tbody").innerHTML =
+        '<tr><td colspan="10" class="empty">加载失败：' + esc((err && err.detail) || "请检查管理 Key") + '</td></tr>';
+    });
+  }
+
+  function renderKeys(data) {
+    var items = (data && data.items) || [];
+    var s = (data && data.summary) || {};
+    $("keySummary").innerHTML = [
+      metricCard("Key 总数", count(s.total), ""),
+      metricCard("已启用", count(s.enabled), "ok"),
+      metricCard("累计消费", creditNum(s.allTimeCredits), ""),
+      metricCard("今日消费", creditNum(s.todayCredits), "")
+    ].join("");
+    var tb = $("keysTable").querySelector("tbody");
+    if (!items.length) {
+      tb.innerHTML = '<tr><td colspan="10" class="empty">还没有 API Key。点击右上角「新建 Key」创建第一把。</td></tr>';
+      return;
+    }
+    tb.innerHTML = items.map(function (k) {
+      var u = k.usage || {};
+      var statusCls = k.status === "active" ? "ok" : (k.status === "exhausted" ? "danger" : "warn");
+      var statusText = {active: "正常", disabled: "已停用", expired: "已过期", exhausted: "额度用尽", missing: "未知"}[k.status] || k.status;
+      var limit = k.quotaTotal > 0 ? creditNum(k.quotaTotal) : "不限";
+      var daily = k.quotaDaily > 0 ? creditNum(u.dailyUsed) + " / " + creditNum(k.quotaDaily) : creditNum(u.dailyUsed) + " / 不限";
+      var monthly = k.quotaMonthly > 0 ? creditNum(u.monthlyUsed) + " / " + creditNum(k.quotaMonthly) : creditNum(u.monthlyUsed) + " / 不限";
+      var expire = k.expiresAt ? fmtDate(k.expiresAt / 1000) : (k.legacy ? "—" : "永久");
+      var ops = k.legacy
+        ? '<span class="hint">兼容旧 Key，不可编辑</span>'
+        : '<button class="ghost" type="button" data-key-edit="' + esc(k.id) + '">编辑</button> ' +
+          '<button class="ghost" type="button" data-key-toggle="' + esc(k.id) + '" data-enabled="' + (k.enabled ? "0" : "1") + '">' + (k.enabled ? "停用" : "启用") + '</button> ' +
+          '<button class="ghost" type="button" data-key-rotate="' + esc(k.id) + '">重新生成</button> ' +
+          '<button class="ghost" type="button" data-key-reset="' + esc(k.id) + '">重置用量</button> ' +
+          '<button class="ghost danger" type="button" data-key-delete="' + esc(k.id) + '">删除</button>';
+      return "<tr>" +
+        "<td>" + esc(k.name) + (k.legacy ? ' <span class="badge">兼容旧 Key</span>' : "") + "</td>" +
+        "<td class='mono'>" + esc(k.masked) + "</td>" +
+        "<td><span class='badge " + statusCls + "'>" + esc(statusText) + "</span></td>" +
+        "<td>" + esc(creditNum(u.used)) + " / " + esc(limit) + "</td>" +
+        "<td>" + esc(daily) + "</td>" +
+        "<td>" + esc(monthly) + "</td>" +
+        "<td>" + esc(k.maxConcurrent || 1) + "</td>" +
+        "<td>" + esc(k.lastUsedAt ? fmtTime(Math.floor(k.lastUsedAt / 1000)) : "-") + "</td>" +
+        "<td>" + esc(expire) + "</td>" +
+        "<td>" + ops + "</td>" +
+        "</tr>";
+    }).join("");
+  }
+
+  function metricCard(label, value, cls) {
+    return '<div class="metric ' + (cls || "") + '"><div class="metric-label">' + esc(label) +
+      '</div><div class="metric-value">' + esc(value) + '</div></div>';
+  }
+
+  function keyById(id) {
+    var items = (state.keys && state.keys.items) || [];
+    for (var i = 0; i < items.length; i++) if (items[i].id === id) return items[i];
+    return null;
+  }
+
+  function fillKeyModels(selected) {
+    var sel = $("keyFormModels");
+    sel.innerHTML = "";
+    var ids = ((state.lastModels && state.lastModels.models) || []).map(function (m) { return m.id || m.name; });
+    var chosen = {};
+    (selected || []).forEach(function (m) { chosen[m] = true; });
+    ids.filter(Boolean).sort().forEach(function (id) {
+      var opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id;
+      if (chosen[id]) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function openKeyEditor(item) {
+    state.keyEditing = item || null;
+    $("keyFormCard").classList.remove("hidden");
+    $("keyRevealCard").classList.add("hidden");
+    $("keyFormTitle").textContent = item ? "编辑：" + item.name : "新建 API Key";
+    $("keyFormName").value = item ? item.name : "";
+    $("keyFormTotal").value = item ? item.quotaTotal : 0;
+    $("keyFormDaily").value = item ? item.quotaDaily : 0;
+    $("keyFormMonthly").value = item ? item.quotaMonthly : 0;
+    $("keyFormExpires").value = item && item.expiresAt ? fmtDateInput(item.expiresAt / 1000) : "";
+    $("keyFormConcurrent").value = item && item.maxConcurrent ? item.maxConcurrent : 1;
+    $("keyFormStatus").textContent = "";
+    if (!state.lastModels) {
+      api("/admin/api/models").then(function (d) { state.lastModels = d; fillKeyModels(item && item.models); },
+        function () { fillKeyModels(item && item.models); });
+    } else {
+      fillKeyModels(item && item.models);
+    }
+  }
+
+  function fmtDate(unix) {
+    if (!unix) return "-";
+    var d = new Date(unix * 1000);
+    if (isNaN(d.getTime())) return "-";
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+  }
+
+  function fmtDateInput(unix) { return fmtDate(unix); }
+
+  function submitKeyForm() {
+    var editing = state.keyEditing;
+    var models = Array.prototype.filter.call($("keyFormModels").options, function (o) { return o.selected; })
+      .map(function (o) { return o.value; });
+    var expiresText = $("keyFormExpires").value;
+    var body = {
+      action: editing ? "update" : "create",
+      id: editing ? editing.id : "",
+      name: $("keyFormName").value,
+      quotaTotal: Number($("keyFormTotal").value) || 0,
+      quotaDaily: Number($("keyFormDaily").value) || 0,
+      quotaMonthly: Number($("keyFormMonthly").value) || 0,
+      expiresAt: expiresText ? new Date(expiresText + "T23:59:59+08:00").getTime() : 0,
+      maxConcurrent: Number($("keyFormConcurrent").value) || 1,
+      models: models
+    };
+    $("keyFormStatus").textContent = "保存中…";
+    return api("/admin/api/keys", {method: "POST", body: body}).then(function (res) {
+      $("keyFormCard").classList.add("hidden");
+      if (res && res.key) showKeyReveal(res.key, res.notice);
+      return loadKeys();
+    }, function (err) {
+      $("keyFormStatus").textContent = "保存失败：" + ((err && err.detail) || "请重试");
+    });
+  }
+
+  function showKeyReveal(plain, notice) {
+    $("keyRevealCard").classList.remove("hidden");
+    $("keyRevealValue").value = plain;
+    if (notice) $("keyRevealCard").querySelector(".hint").textContent = notice;
+    $("keyRevealCard").scrollIntoView({block: "nearest"});
+  }
+
+  function keyRowAction(event) {
+    var target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    var edit = target.closest("[data-key-edit]");
+    if (edit) { openKeyEditor(keyById(edit.getAttribute("data-key-edit"))); return; }
+    var toggle = target.closest("[data-key-toggle]");
+    if (toggle) {
+      var enabled = toggle.getAttribute("data-enabled") === "1";
+      api("/admin/api/keys", {method: "POST", body: {action: "toggle", id: toggle.getAttribute("data-key-toggle"), enabled: enabled}})
+        .then(loadKeys, function (err) { alert("操作失败：" + ((err && err.detail) || "")); });
+      return;
+    }
+    var rotate = target.closest("[data-key-rotate]");
+    if (rotate) {
+      if (!window.confirm("重新生成后，旧密钥立即失效，正在使用它的客户端会全部 401。确定继续？")) return;
+      api("/admin/api/keys", {method: "POST", body: {action: "rotate", id: rotate.getAttribute("data-key-rotate"), confirm: true}})
+        .then(function (res) { if (res && res.key) showKeyReveal(res.key, res.notice); return loadKeys(); },
+          function (err) { alert("重新生成失败：" + ((err && err.detail) || "")); });
+      return;
+    }
+    var reset = target.closest("[data-key-reset]");
+    if (reset) {
+      if (!window.confirm("重置只清零额度累计，历史消费记录保留。确定继续？")) return;
+      api("/admin/api/keys", {method: "POST", body: {action: "reset", id: reset.getAttribute("data-key-reset"), confirm: true}})
+        .then(loadKeys, function (err) { alert("重置失败：" + ((err && err.detail) || "")); });
+      return;
+    }
+    var del = target.closest("[data-key-delete]");
+    if (del) {
+      if (!window.confirm("删除后该密钥立即失效。历史用量仍保留在账本中。确定删除？")) return;
+      api("/admin/api/keys", {method: "POST", body: {action: "delete", id: del.getAttribute("data-key-delete"), confirm: true}})
+        .then(loadKeys, function (err) { alert("删除失败：" + ((err && err.detail) || "")); });
+      return;
+    }
+  }
   function setTab(name) {
     if (name !== "config" && state.configMode !== "preview" && !exitConfigEdit()) return;
     if (name === "tasks") state.tasksLastPoll = 0;
@@ -1650,7 +1831,8 @@
     Array.prototype.forEach.call(document.querySelectorAll(".panel"), function (p) {
       p.classList.toggle("active", p.id === "panel-" + name);
     });
-    if (name === "logs") { loadLogs(true); loadLogSettings(); }
+    if (name === "keys") { loadKeys(); }
+    else if (name === "logs") { loadLogs(true); loadLogSettings(); }
     else if (name === "config") loadConfig();
     else if (name === "settings") loadSettings();
     else refreshActive();
@@ -1846,6 +2028,18 @@
     $("accountsTable").addEventListener("click", togglePolicy);
     $("accountsTable").addEventListener("click", accountRowActions);
     $("accountsTable").addEventListener("click", creditRowToggle);
+    $("keysTable").addEventListener("click", keyRowAction);
+    $("keyCreateBtn").addEventListener("click", function () { openKeyEditor(null); });
+    $("keyFormSubmit").addEventListener("click", submitKeyForm);
+    $("keyFormCancel").addEventListener("click", function () { $("keyFormCard").classList.add("hidden"); });
+    $("keyRevealClose").addEventListener("click", function () { $("keyRevealCard").classList.add("hidden"); $("keyRevealValue").value = ""; });
+    $("keyRevealCopy").addEventListener("click", function () {
+      var input = $("keyRevealValue");
+      input.select();
+      try { document.execCommand("copy"); $("keyRevealCopy").textContent = "已复制"; }
+      catch (e) { /* 选区复制不可用时仍可手动复制 */ }
+      setTimeout(function () { $("keyRevealCopy").textContent = "复制"; }, 1500);
+    });
     $("addAccountBtn").addEventListener("click", openAddAccount);
     $("addStart").addEventListener("click", startAddAccount);
     $("addCancel").addEventListener("click", closeAddAccount);

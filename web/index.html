@@ -29,7 +29,8 @@
 <nav class="tabs hidden" id="tabs">
   <button class="tab active" data-tab="overview" type="button">总览</button>
   <button class="tab" data-tab="accounts" type="button">账号池</button>
-  <button class="tab" data-tab="models" type="button">模型列表</button>
+  <button class="tab" data-tab="keys" type="button">API Key</button>
+        <button class="tab" data-tab="models" type="button">模型列表</button>
   <button class="tab" data-tab="logs" type="button">日志</button>
   <button class="tab" data-tab="config" type="button">配置</button>
   <button class="tab" data-tab="tasks" type="button">定时任务</button>
@@ -167,6 +168,57 @@
     </div>
   </section>
 
+  <section id="panel-keys" class="panel">
+    <div class="card">
+      <div class="card-title">
+        API Key 管理
+        <span class="filter"><button id="keyCreateBtn" type="button">新建 Key</button></span>
+      </div>
+      <p class="hint">每把 Key 独立计费与限额，共用同一账号池。完整密钥只在创建或重新生成时显示一次。兼容旧 Key（config.json 的 gateway.apiKey）继续有效且不限额度。</p>
+      <div class="cards" id="keySummary"></div>
+      <p id="keyAlert" class="alert hidden" role="status"></p>
+      <div class="table-wrap">
+        <table id="keysTable">
+          <thead>
+            <tr>
+              <th>名称</th><th>密钥</th><th>状态</th><th>已用 / 上限</th>
+              <th>今日</th><th>本月</th><th>并发</th><th>最近使用</th><th>到期</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card hidden" id="keyRevealCard">
+      <div class="card-title">请立即复制这把密钥</div>
+      <p class="hint">关闭后无法再次查看完整密钥；丢失只能重新生成（旧密钥会立即失效）。</p>
+      <div class="settings-row">
+        <input id="keyRevealValue" type="text" readonly class="mono">
+        <button id="keyRevealCopy" type="button" class="ghost">复制</button>
+        <button id="keyRevealClose" type="button" class="ghost">我已保存</button>
+      </div>
+    </div>
+
+    <div class="card hidden" id="keyFormCard">
+      <div class="card-title" id="keyFormTitle">新建 API Key</div>
+      <div class="settings-row"><label for="keyFormName">名称</label><input id="keyFormName" type="text" maxlength="64" placeholder="例如：笔记本 Codex"></div>
+      <div class="settings-row"><label for="keyFormTotal">总积分额度</label><input id="keyFormTotal" type="number" min="0" step="1" value="0"><span class="hint">0 = 不限额</span></div>
+      <div class="settings-row"><label for="keyFormDaily">每日额度</label><input id="keyFormDaily" type="number" min="0" step="1" value="0"><span class="hint">0 = 不限额，按北京时间 0 点重置</span></div>
+      <div class="settings-row"><label for="keyFormMonthly">每月额度</label><input id="keyFormMonthly" type="number" min="0" step="1" value="0"><span class="hint">0 = 不限额，按北京时间每月 1 日重置</span></div>
+      <div class="settings-row"><label for="keyFormExpires">有效期至</label><input id="keyFormExpires" type="date"><span class="hint">留空 = 永不过期</span></div>
+      <div class="settings-row"><label for="keyFormConcurrent">最大并发</label><input id="keyFormConcurrent" type="number" min="1" max="64" step="1" value="1"></div>
+      <div class="settings-row"><label for="keyFormModels">模型白名单</label>
+        <select id="keyFormModels" multiple size="6" class="key-models"></select>
+        <span class="hint">不选 = 允许全部模型；按住 Ctrl/⌘ 多选</span>
+      </div>
+      <div class="actions">
+        <button id="keyFormSubmit" type="button">保存</button>
+        <button id="keyFormCancel" type="button" class="ghost">取消</button>
+      </div>
+      <p id="keyFormStatus" class="hint action-result" role="status"></p>
+    </div>
+  </section>
   <section id="panel-models" class="panel">
     <div class="card">
       <div class="card-title">

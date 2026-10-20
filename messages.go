@@ -165,6 +165,9 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Get("X-Trace-ID"), reqID, modelName, isStream, len(upstreamBytes))
 
 	// 前缀摘要用已解析的请求对象计算：只涉及首条消息与 tools，不扫描历史。
+	if !keyModelAllowed(w, r, modelName) {
+		return
+	}
 	r = withAffinityDigestIfEnabled(r, chatReq, modelName)
 	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
 	if !ok {

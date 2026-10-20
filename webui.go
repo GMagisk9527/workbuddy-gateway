@@ -76,6 +76,7 @@ func registerWebUIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/account-add", handleWebUIAccountAdd)
 	mux.HandleFunc("/admin/api/account-cancel", handleWebUIAccountCancel)
 	mux.HandleFunc("/admin/api/account-delete", handleWebUIAccountDelete)
+	mux.HandleFunc("/admin/api/keys", handleAdminKeys)
 }
 
 // 只读日志视图：无额外调度器、任务状态文件或内存任务登记表。
