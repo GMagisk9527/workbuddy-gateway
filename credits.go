@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/google/uuid"
 	"sort"
 	"strconv"
 	"strings"
@@ -329,35 +331,69 @@ func parseFloatLoose(s string) (float64, bool) {
 	return f, true
 }
 
-// refreshCreditsForAccount 在额度刷新成功后顺带拉取积分包明细。
-// 失败只记录原因，不影响额度主流程；抓取关闭时直接跳过。
-func refreshCreditsForAccount(ctx context.Context, acc *Account, prof *upstreamProfile, headers func(*http.Request), packages []quotaPackage) {
-	if !currentCreditSettings().Fetch || ctx.Err() != nil {
+// refreshCreditsForAccount 抓取积分包明细。
+//
+// 关键约束：本函数**不持有 acc.lock**，也不在持有 accountMu 的情况下发请求。
+// 只读计费接口最长 4 秒，如果占着账号串行锁，正常模型请求会全部排队。
+func refreshCreditsForAccount(ctx context.Context, acc *Account) {
+	if !currentCreditSettings().Fetch || acc == nil {
 		return
 	}
-	codes := make([]string, 0, len(packages))
-	for _, p := range packages {
-		if c := strings.TrimSpace(p.PackageCode); c != "" {
-			codes = append(codes, c)
-		}
+	if ctx.Err() != nil {
+		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, creditFetchTimeoutS*time.Second)
+
+	// 拍快照：令牌、套餐编码、可见性判断都在锁内完成，出锁后不再读账号字段。
+	accountMu.Lock()
+	if acc.Auth == nil || acc.Disabled || acc.Auth.Auth.AccessToken == "" || len(acc.creditCodes) == 0 {
+		if acc.Disabled || acc.Auth == nil {
+			acc.credits.reset()
+			acc.creditCodes = nil
+		}
+		accountMu.Unlock()
+		return
+	}
+	auth := *acc.Auth
+	paid := acc.IsPaidUser
+	codes := append([]string(nil), acc.creditCodes...)
+	accountMu.Unlock()
+
+	prof := profileForEdition(auth.Edition)
+	traceID := uuid.NewString()
+	headers := func(r *http.Request) {
+		commonHeaders(r, prof)
+		r.Header.Set("Authorization", "Bearer "+auth.Auth.AccessToken)
+		r.Header.Set("X-Client-Platform", "web")
+		r.Header.Set("X-Trace-ID", traceID)
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, creditFetchTimeoutS*time.Second)
 	defer cancel()
-	info, err := fetchAccountCredits(ctx, prof, headers, codes, acc.IsPaidUser)
+	info, err := fetchAccountCredits(fetchCtx, prof, headers, codes, paid)
 	if err != nil {
 		info = &accountCredits{Known: false, FetchedAt: time.Now().Unix(), Err: "抓取失败"}
 	}
+
+	// 写回前再确认身份没变：热加载换了凭据/账号被禁用时，丢弃这次结果。
 	accountMu.Lock()
-	acc.credits = *info
+	stale := acc.Auth == nil || acc.Disabled || acc.Auth.Auth.AccessToken != auth.Auth.AccessToken
+	if !stale {
+		acc.credits = *info
+	}
+	path := acc.Path
 	accountMu.Unlock()
+	if stale {
+		return
+	}
+
 	if err != nil {
-		log.Printf("[积分包] 账号=%s 结果=抓取失败 原因=%v 业务影响=本次不参与临期优先，沿用原调度", acc.Path, err)
+		log.Printf("[积分包] 账号=%s 结果=抓取失败 原因=%v 业务影响=本次不参与临期优先，沿用原调度", path, err)
 		return
 	}
 	if info.Known && !info.SoonestAt.IsZero() {
 		log.Printf("[积分包] 账号=%s 包数=%d 最早作废=%s 剩余=%.2f 到期未知包=%t",
-			acc.Path, len(info.Packages), info.SoonestAt.Format("2006-01-02 15:04"), info.SoonestAmt, info.AnyUnknown)
+			path, len(info.Packages), info.SoonestAt.Format("2006-01-02 15:04"), info.SoonestAmt, info.AnyUnknown)
 	} else {
-		log.Printf("[积分包] 账号=%s 结果=无可用到期信息 包数=%d 业务影响=不参与临期优先", acc.Path, len(info.Packages))
+		log.Printf("[积分包] 账号=%s 结果=无可用到期信息 包数=%d 业务影响=不参与临期优先", path, len(info.Packages))
 	}
 }

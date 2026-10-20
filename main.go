@@ -417,6 +417,7 @@ type Account struct {
 	QuotaUnlimited bool                          // 企业版 limitNum=-1：分配额度不限，禁止按 0 余额阻断
 	ModelStates    map[string]*modelRuntimeState // 按模型隔离的成本、限流和额度阻断状态
 	credits        accountCredits                // 积分包明细与最早作废时间（受 accountMu 保护）
+	creditCodes    []string                      // 最近一次额度查询返回的套餐编码（受 accountMu 保护）
 	fingerprint    string                        // 凭据文件变更指纹（mtime+size，凭据热加载用）
 	lock           sync.Mutex                    // 单账号串行锁（防止同账号并发触发 11128）
 	// 续期失败计数（仅内存，重启清零）：单次失败可能是上游抖动，连续失败才判定登录态失效。
@@ -1181,6 +1182,10 @@ func reloadAccountsResult() (bool, error) {
 		existing.QuotaExhausted = false
 		existing.QuotaUnlimited = false
 		existing.ModelStates = nil
+		// 身份可能已经变了：旧积分包（含到期时间）必须丢弃，
+		// 否则新账号会继承上一个身份的"临期"判断。
+		existing.credits.reset()
+		existing.creditCodes = nil
 		existing.fingerprint = fp
 		clearDisabledMarker(p)
 		if recovered {
@@ -1514,6 +1519,8 @@ func disableAccount(acc *Account, reason string) {
 	acc.Disabled = true
 	acc.DisabledReason = reason
 	acc.CooldownUntil = time.Time{}
+	acc.credits.reset()
+	acc.creditCodes = nil
 	path := acc.Path
 	nickname := ""
 	uid := ""
@@ -1630,6 +1637,8 @@ func loadDisabledMarkers() {
 			}
 			a.Disabled = true
 			a.DisabledReason = m.Reason
+			a.credits.reset()
+			a.creditCodes = nil
 			if a.Nickname == "" {
 				a.Nickname = m.Nickname
 			}
@@ -2292,7 +2301,17 @@ func refreshAccountQuota(ctx context.Context, acc *Account) error {
 	var summary quotaSummaryData
 	_ = json.Unmarshal(data, &summary) // parseQuotaSummary 已校验。
 	now := time.Now()
-	refreshCreditsForAccount(ctx, acc, prof, headers, summary.Packages)
+	// 只记录套餐编码；真正的积分包抓取放到 acc.lock 之外，避免只读计费接口
+	// 占着账号串行锁，让正常模型请求排队。
+	accountMu.Lock()
+	codes := acc.creditCodes[:0]
+	for _, pkg := range summary.Packages {
+		if code := strings.TrimSpace(pkg.PackageCode); code != "" {
+			codes = append(codes, code)
+		}
+	}
+	acc.creditCodes = codes
+	accountMu.Unlock()
 	resources, planErr := fetchPlanResources(ctx, prof, headers, traceID, path, now)
 	if planErr == nil {
 		plan, planErr = identifyPlan(prof.Key, summary, resources, now)
@@ -2397,6 +2416,8 @@ func refreshAllAccountQuotas(ctx context.Context, done chan<- struct{}, schedule
 		accountCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := refreshAccountQuota(accountCtx, acc)
 		processed++
+		// acc.lock 已释放：积分包抓取不会阻塞模型请求
+		refreshCreditsForAccount(accountCtx, acc)
 		cancel()
 		if err != nil {
 			failed++

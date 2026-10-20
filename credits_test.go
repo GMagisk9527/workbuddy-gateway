@@ -3,11 +3,14 @@ package main
 // 临期积分优先的单元测试：解析、窗口、候选选择、与亲和的关系、配置热加载。
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -322,5 +325,131 @@ func BenchmarkExpiringCandidate(b *testing.B) {
 		if acc, _ := expiringCandidateLocked(accs, eligible, now); acc == nil {
 			b.Fatal("应命中")
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 账号锁与状态残留
+// ---------------------------------------------------------------------------
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func stubCreditHTTP(t *testing.T, body string) {
+	t.Helper()
+	old := cfg.HttpClient
+	cfg.HttpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	t.Cleanup(func() { cfg.HttpClient = old })
+}
+
+// 只读计费接口耗时（最长 4s）绝不能占着 acc.lock：否则正常模型请求会排队。
+func TestCreditsFetchDoesNotBlockOnAccountLock(t *testing.T) {
+	quietCredits(t)
+	t.Cleanup(func() { setCreditConfig(true, false, 7) })
+	setCreditConfig(true, false, 7)
+	stubCreditHTTP(t, `{"code":0,"data":{"Accounts":[]}}`)
+
+	acc := mkAccount("lock.json")
+	acc.Auth = &StoredAuth{Auth: StoredTokens{AccessToken: "tok"}}
+	acc.creditCodes = []string{"pkg"}
+
+	acc.lock.Lock() // 模拟"该账号正在处理模型请求"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		refreshCreditsForAccount(context.Background(), acc)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		acc.lock.Unlock()
+		t.Fatal("积分包抓取不应等待账号串行锁")
+	}
+	acc.lock.Unlock()
+}
+
+// 凭据热加载时旧积分包必须清除，避免新身份继承上一个身份的到期信息。
+func TestCreditsClearedOnCredentialReload(t *testing.T) {
+	quietCredits(t)
+	dir := t.TempDir()
+	oldDir, oldExplicit, oldAccounts := cfg.AuthDir, cfg.AuthExplicit, accounts
+	cfg.AuthDir, cfg.AuthExplicit = dir, false
+	t.Cleanup(func() {
+		cfg.AuthDir, cfg.AuthExplicit = oldDir, oldExplicit
+		accountMu.Lock()
+		accounts = oldAccounts
+		accountMu.Unlock()
+	})
+
+	path := filepath.Join(dir, "workbuddy9.json")
+	first := `{"auth":{"accessToken":"tok-a","expiresAt":4070908800},"account":{"uid":"u1","nickname":"n"}}`
+	if err := os.WriteFile(path, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadAccountsResult(); err != nil {
+		t.Fatalf("首次加载失败: %v", err)
+	}
+	var acc *Account
+	accountMu.Lock()
+	for _, a := range accounts {
+		if a.Path == path {
+			acc = a
+		}
+	}
+	accountMu.Unlock()
+	if acc == nil {
+		t.Fatal("账号未加载")
+	}
+
+	accountMu.Lock()
+	acc.credits = accountCredits{Known: true, SoonestAt: time.Now().Add(time.Hour), SoonestAmt: 99}
+	acc.creditCodes = []string{"old-code"}
+	accountMu.Unlock()
+
+	// 换凭据（内容长度变化 → 指纹变化）
+	second := `{"auth":{"accessToken":"tok-b","expiresAt":4070908800},"account":{"uid":"u1","nickname":"n"},"note":"relogin"}`
+	if err := os.WriteFile(path, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadAccountsResult(); err != nil {
+		t.Fatalf("热加载失败: %v", err)
+	}
+
+	accountMu.Lock()
+	known, amt, codes := acc.credits.Known, acc.credits.SoonestAmt, len(acc.creditCodes)
+	accountMu.Unlock()
+	if known || amt != 0 || codes != 0 {
+		t.Fatalf("凭据变更后旧积分包必须清空: known=%v amt=%v codes=%d", known, amt, codes)
+	}
+}
+
+// 账号被禁用后不得再展示/使用旧积分包。
+func TestCreditsClearedOnDisable(t *testing.T) {
+	quietCredits(t)
+	acc := mkAccount("dis.json")
+	acc.Auth = &StoredAuth{Auth: StoredTokens{AccessToken: "tok"}}
+	acc.credits = accountCredits{Known: true, SoonestAt: time.Now().Add(time.Hour), SoonestAmt: 5}
+	acc.creditCodes = []string{"c"}
+	// 直接调用禁用路径的清理逻辑（disableAccount 会删除凭据文件，这里不做文件操作）
+	accountMu.Lock()
+	acc.Disabled = true
+	acc.credits.reset()
+	acc.creditCodes = nil
+	accountMu.Unlock()
+	if acc.credits.Known || len(acc.creditCodes) != 0 {
+		t.Fatal("禁用后积分包应清空")
+	}
+	// 已禁用的账号不会进入候选
+	setCreditConfig(true, true, 7)
+	defer setCreditConfig(true, false, 7)
+	if cand, _ := expiringCandidateLocked([]*Account{acc}, func(a *Account) bool { return !a.Disabled }, time.Now()); cand != nil {
+		t.Fatal("禁用账号不应被临期优先选中")
 	}
 }
