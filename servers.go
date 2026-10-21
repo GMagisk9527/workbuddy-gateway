@@ -24,7 +24,8 @@ func newAPIHandler() http.Handler {
 	mux.HandleFunc("/ping", handleHealth)
 	mux.HandleFunc("/admin/probe", probeAdminOnly(handleAdminProbe))
 	mux.HandleFunc("/", handleIndex)
-	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(mux))))
+	// 解码放在鉴权与准入之后：未通过鉴权的请求不会被解压，省 CPU 也不给压缩炸弹机会。
+	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(decodeRequestBodyMiddleware(mux)))))
 }
 
 func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {
