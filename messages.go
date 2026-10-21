@@ -145,6 +145,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	if sanitizeMessages(chatReq) {
 		recordCompatibilityRule(r, "developer_to_system")
 	}
+	logSystemPromptPrefixCompatibility(r, chatReq)
 	prepareSystemPromptForUpstream(chatReq, r, reqID, w.Header().Get("X-Trace-ID"))
 	// 输出预算归一化：客户端未声明 max_tokens 时补模型输出上限，
 	// 避免上游默认预留 384000 导致长会话在远未到窗口上限时被 11133 拒绝

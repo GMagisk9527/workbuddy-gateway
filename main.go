@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	version = "1.14.20"
+	version = "1.14.21"
 
 	// 状态快照文件名：serve 后台周期写入，monitor 前台命令实时读取展示
 	statusSnapshotFile = "workbuddy-status.json"
@@ -4003,6 +4003,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if sanitizeMessages(reqObj) {
 		recordCompatibilityRule(r, "developer_to_system")
 	}
+	logSystemPromptPrefixCompatibility(r, reqObj)
 
 	// 会话结构归一化：保证首条消息为 system，修复部分非 harness 客户端
 	//（以 assistant / tool 续写或回传工具结果）触发的上游 11128 错误

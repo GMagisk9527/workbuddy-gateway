@@ -188,8 +188,9 @@ test("已知零值显示0，未知额度仍显示横线", () => {
   const f = fixture();
   f.review.renderAccounts([{path: "fixture.json", state: "active", quotaKnown: true}]);
   let row = cells(f.element("accountsTable").innerHTML);
-  for (const i of [7, 8, 9, 11, 12, 14]) assert.equal(row[i], "0");
-  assert.equal(row.length, 16, "账号表应为 16 列（已去掉刷新令牌到期）");
+  for (const i of [7, 8, 9, 12, 13, 15]) assert.equal(row[i], "0");
+  assert.equal(row.length, 17, "账号表应为 17 列（含积分包，已去掉刷新令牌到期）");
+  assert.match(row[10], /未采集/, "未知积分包不应伪装为零值");
   const accountsPage = fs.readFileSync(path.join(projectRoot, "web/index.html"), "utf8");
   assert(!accountsPage.includes("刷新令牌到期"), "表头不应保留已删除的列");
   f.review.renderAccounts([{path: "fixture.json", state: "active", quotaKnown: false}]);
@@ -208,7 +209,7 @@ test("企业不限量显示不限，已用保留小数；未知和有限额度�
   assert.equal(row[7], "不限");
   assert.equal(row[8], "12.5");
   assert.equal(row[9], "不限");
-  assert.equal(row[10], "企业版");
+  assert.equal(row[11], "企业版");
   f.review.renderAccounts([{path: "enterprise.json", state: "active", quotaKnown: false, quotaUnlimited: true}]);
   row = cells(f.element("accountsTable").innerHTML);
   for (const i of [7, 8, 9]) assert.equal(row[i], "-");
@@ -596,7 +597,8 @@ test("请求进行中切换筛选也会按最新勾选状态渲染，不额外�
   await pending;
   assert(f.element("modelsTable").innerHTML.includes("available"));
   assert(!f.element("modelsTable").innerHTML.includes("empty"));
-  assert.equal(calls.filter(c => c.route === "/admin/api/models").length, 1);
+  assert.equal(calls.filter(c => c.route === "/admin/api/models?range=5h").length, 1);
+  assert.equal(calls.filter(c => c.route.startsWith("/admin/api/models")).length, 1);
   audit("在途请求按最新筛选渲染通过", {additional_data_requests: 0});
 });
 

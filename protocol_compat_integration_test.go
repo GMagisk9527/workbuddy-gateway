@@ -564,6 +564,73 @@ func Test11128HonestErrorsDiagnosticsAndLedgerThroughHTTP(t *testing.T) {
 	}
 }
 
+// Only the exact DSH identity prefix is normalized; the following user instruction is preserved.
+func TestDSHIdentityPrefixCompatibilityThroughHTTP(t *testing.T) {
+	const identity = "You are an AI agent powered by DeepSeek Harness.\nKeep private-code-sentinel unchanged."
+	const normalized = "You are an AI agent powered by a large language model.\nKeep private-code-sentinel unchanged."
+	const userText = "You are an AI agent powered by DeepSeek Harness. private-user-sentinel"
+	const session = "private-session-sentinel"
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+		for _, blocks := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/blocks=%t", path, blocks), func(t *testing.T) {
+				h := newCompatHarness(t, "cn")
+				var debugLog compatLog
+				debugSinkMu.Lock()
+				oldSink := debugSink
+				debugSink = &debugJSONSink{writer: &debugLog}
+				debugSinkMu.Unlock()
+				t.Cleanup(func() {
+					debugSinkMu.Lock()
+					debugSink = oldSink
+					debugSinkMu.Unlock()
+				})
+				var content any = identity
+				if blocks {
+					content = []any{map[string]any{"type": "text", "text": identity}}
+				}
+				body := map[string]any{"model": compatModel, "stream": false, "max_tokens": 64,
+					"messages": []any{map[string]any{"role": "developer", "content": content}, map[string]any{"role": "user", "content": userText}}}
+				if path == "/v1/responses" {
+					body["input"], body["store"] = body["messages"], false
+					delete(body, "messages")
+				} else if path == "/v1/messages" {
+					body["system"] = content
+					body["messages"] = []any{map[string]any{"role": "user", "content": userText}}
+				}
+				for _, rejected := range []bool{false, true} {
+					if rejected {
+						h.reply.Store(&compatReply{400, `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`})
+					}
+					status, out := h.send(t, path, body, map[string]string{"session_id": session}, 0)
+					assertCompatMessages(t, h.take(t).body, []compatWantMessage{{Role: "system", Text: normalized}, {Role: "user", Text: userText}})
+					if rejected {
+						if status != 400 || !bytes.Contains(out, []byte("11128")) || !bytes.Contains(out, []byte("unapproved channel")) {
+							t.Fatalf("channel rejection changed: HTTP %d %s", status, out)
+						}
+					} else if status != 200 {
+						t.Fatalf("success HTTP %d: %s", status, out)
+					}
+				}
+				if h.calls.Load() != 2 {
+					t.Fatal("channel rejection retried")
+				}
+				if !strings.Contains(h.logs.String(), "dsh_system_identity_prefix") {
+					t.Fatal("prefix compatibility rule was not diagnosed")
+				}
+				if !strings.Contains(debugLog.String(), "request_body_read_completed") {
+					t.Fatal("debug logging was not exercised")
+				}
+				logs := debugLog.String() + h.logs.String()
+				for _, secret := range []string{identity, normalized, "private-code-sentinel", "private-user-sentinel", session, h.keys[0], "synthetic-upstream-"} {
+					if strings.Contains(logs, secret) {
+						t.Fatalf("diagnostics leaked %q", secret)
+					}
+				}
+			})
+		}
+	}
+}
+
 func Test11128ClassificationAndRulesIdempotence(t *testing.T) {
 	for _, sample := range []struct{ msg, tips, category string }{
 		{"first message is not system prompt", "channel verification", "message_structure"},

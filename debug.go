@@ -109,7 +109,6 @@ type runtimeFileConfig struct {
 		Capacity int `json:"capacity"`
 		// PrefixHeadBytes：前缀摘要取上游请求体前多少字节；<=0 用默认 64 KiB。
 		PrefixHeadBytes int `json:"prefixHeadBytes"`
-
 	} `json:"affinity"`
 	// Credits 段可选：临期积分优先。默认只抓取展示（fetch=true），不改变调度。
 	Credits struct {
@@ -548,8 +547,12 @@ func debugEvent(r *http.Request, level, event string, fields map[string]any) {
 		return
 	}
 	sink.mu.Lock()
-	_, _ = sink.writer.Write(append(data, '\n'))
+	n, writeErr := sink.writer.Write(append(data, '\n'))
 	sink.mu.Unlock()
+	if writeErr != nil || n != len(data)+1 {
+		log.Printf("[调试日志] traceId=%s 事件=%s 结果=写入失败 错误类型=%T 业务影响=本条诊断记录可能不完整，不中断模型请求",
+			traceID, event, writeErr)
+	}
 }
 
 func debugBodyReadStarted(r *http.Request) time.Time {
