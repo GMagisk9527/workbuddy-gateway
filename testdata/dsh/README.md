@@ -38,5 +38,6 @@ https://github.com/deepseek-ai/deepseek-harness/tree/main/packages/context/harne
 原许可证随样本保存在 [LICENSE.harness-dev-context](LICENSE.harness-dev-context)。
 UTF-8 长度 1006 字节，SHA-256 为
 `7496863f7f81a12cad97ff5c643339f8ddf344b6525c191c29ab086bec5a400a`。
-网关仅对完整模板首句做中性环境描述转换，后续 GUI、构建和服务管理指令保持原样。
+该摘要用于验证样本来源，不作为运行时整段匹配条件。网关对 system/assistant
+文本中已确认的两句开头做中性环境描述转换，后续 GUI、构建和服务管理指令保持原样。
 匹配边界和线上验证范围见 [专项说明](../../docs/11128-dsh-gui-context.md)。

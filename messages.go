@@ -138,6 +138,19 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize text parts before the converter joins assistant/system blocks;
+	// afterwards a fingerprint at the start of a later part is no longer visible.
+	compatMessages, _ := msgReq["messages"].([]any)
+	var systemMessage map[string]any
+	if system, exists := msgReq["system"]; exists {
+		systemMessage = map[string]any{"role": "system", "content": system}
+		compatMessages = append([]any{systemMessage}, compatMessages...)
+	}
+	logSystemPromptPrefixCompatibility(r, map[string]any{"messages": compatMessages})
+	if systemMessage != nil {
+		msgReq["system"] = systemMessage["content"]
+	}
+
 	chatReq, err := anthropicToChatRequest(msgReq, modelName)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
