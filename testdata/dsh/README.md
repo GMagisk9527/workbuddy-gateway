@@ -1,12 +1,12 @@
 # DSH 请求样本来源
 
-这些是**依据源码重建的离线合成样本**，不是用户会话抓包，也不代表真实 DSH 联调成功。
-所有消息、代码、工具参数、结果和会话 ID 都是专门为测试生成的虚构值。
+`requests.json` 中的请求是**依据源码重建的离线合成样本**，不是用户会话抓包，
+也不代表真实 DSH 联调成功。其中的消息、代码、工具参数、结果和会话 ID 都是虚构值。
 
 调查对象为本机已安装的 DeepSeek Harness 0.2.1-rc.2，其中打包
 MIT 授权的 `@earendil-works/pi-ai` 1.1.0。
 上游项目：https://github.com/earendil-works/pi ，`packages/ai`。
-只读取了适配器、压缩逻辑及配置中的 provider 类型；未读取用户会话历史。
+重建 `requests.json` 时只读取了适配器、压缩逻辑及配置中的 provider 类型；未读取用户会话历史。
 
 | 安装包中的源码 | SHA-256 | 样本依据 |
 | --- | --- | --- |
@@ -28,3 +28,15 @@ sendSessionAffinityHeaders 后的形状，不声称通用 Chat 默认会发送�
 
 样本覆盖单轮、工具调用/结果、摘要请求、摘要恢复及子会话。测试分别经过国内/国际
 profile、流式/聚合 HTTP 链路，检查正文与工具参数原样保留。实际网络只连接 httptest。
+
+## GUI 环境说明模板
+
+`gui_context.txt` 是 MIT 授权的 `@deepseek-ai/dsh-harness-dev-context`
+0.2.1-rc.2 的完整内置 `WEB_SURFACE_PROMPT`，取自安装包静态源码/README，
+不是用户会话正文。其源码项目为
+https://github.com/deepseek-ai/deepseek-harness/tree/main/packages/context/harness-dev-context 。
+原许可证随样本保存在 [LICENSE.harness-dev-context](LICENSE.harness-dev-context)。
+UTF-8 长度 1006 字节，SHA-256 为
+`7496863f7f81a12cad97ff5c643339f8ddf344b6525c191c29ab086bec5a400a`。
+网关仅对完整模板首句做中性环境描述转换，后续 GUI、构建和服务管理指令保持原样。
+匹配边界和线上验证范围见 [专项说明](../../docs/11128-dsh-gui-context.md)。
