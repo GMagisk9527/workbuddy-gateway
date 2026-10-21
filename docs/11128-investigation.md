@@ -138,3 +138,36 @@ Windows 测试把 TEMP/TMP/GOCACHE 指向仓库外的任务临时目录，避免
 - 不需要修改生产配置。现有亲和开关仍遵循原配置；启用亲和时这些修复才改善账号
   亲和命中。没有更改账号调度算法、现有 API Key 数据、账本、端口或 OpenRC。
 - 没有部署、重启服务、替换生产二进制或发送诊断收费模型请求。
+
+## 部署后复查：Nginx 的会话头转发
+
+用户随后授权部署，并回报原会话仍有 11128。对应脱敏日志确认：请求经过 Responses、
+国内站、流式入口；developer_to_system 已执行，但 session_supplied=false，
+实际使用 session_id_generated。运行进程的二进制校验和与提交 36410b6 的构建一致，
+因此不能归因于仍运行旧二进制，也不能声称客户端会话头已经成功穿过整条链路。
+
+反代使用 Nginx，现有配置未启用 underscores_in_headers。使用服务器上相同 Nginx
+二进制、隔离的临时配置、合成请求头及本地假上游进行 A/B 检查：默认配置丢弃
+session_id，但保留 X-Session-ID；启用后两者均能到达假上游。测试没有访问真实模型，
+也未改变生产监听或生产配置。该行为与
+https://nginx.org/en/docs/http/ngx_http_core_module.html#underscores_in_headers 一致。
+
+DSH 默认 Responses 适配器使用下划线拼写，因此在使用 Nginx 时，还应在此网关专用
+server 块启用：
+
+```nginx
+server {
+    underscores_in_headers on;
+    # 保留原来的 listen、TLS、鉴权和 proxy_pass 等设置。
+}
+```
+
+只在专用 server 块加这一行即可，无需全局关闭无效请求头检查。应先备份、执行
+nginx -t，再平滑 reload。调查时准备的单行候选配置已通过 nginx -t；实际应用生产
+配置需要用户另行授权，因为最初任务明确禁止修改生产配置。
+
+这是可确认的会话元数据传递缺陷；缺少这项设置并不能独立证明上游 11128 的根因。
+修复后仍应根据真实客户端下一次请求的脱敏诊断判断：session_supplied 是否为 true，
+是否命中 session_id_normalized，以及上游是否继续明确返回渠道拒绝。不能把反代头
+兼容修复称为官方渠道授权，也不应通过修改正文或身份伪装继续尝试绕过。
+生产当时的亲和模式为 prefix，传递会话头本身不改变这一既有调度设置。
