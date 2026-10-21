@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,6 +64,44 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+const (
+	// 单次探测最多 5 个模型、最多 10 次上游调用：这是"看得见的成本上限"，
+	// 防止显式传入上千个模型把账号积分一次性烧掉。
+	probeMaxModels        = 5
+	probeMaxUpstreamCalls = 10
+)
+
+// probeAdminOnly 是 /admin/probe 的独立鉴权：只认管理密钥 + 回环来源。
+// 普通 wbk_ Key 与旧 gateway.apiKey 一律无效——它们能通过普通 API 鉴权，
+// 但探测接口会直接打上游、不走额度结算，绝不能复用那条链。
+func probeAdminOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		admin := currentAdminKey()
+		if admin == "" {
+			// 没有配置管理密钥时坚决关闭，不回退到普通 Key，也不允许匿名。
+			writeOpenAIError(w, http.StatusServiceUnavailable, "admin_key_not_configured",
+				"未配置管理密钥，探测接口已关闭；请在 config.json 设置 gateway.adminKey 后重试")
+			return
+		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get("x-api-key")
+		}
+		if subtle.ConstantTimeCompare([]byte(token), []byte(admin)) != 1 {
+			log.Printf("[Probe] 拒绝：管理密钥无效 来源=%s 说明=探测接口不接受普通 API Key", r.RemoteAddr)
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_admin_key", "探测接口仅接受管理密钥")
+			return
+		}
+		// 第二层防护：即使持有管理密钥，也只允许本机回环调用。
+		if !isLoopbackRequest(r) {
+			log.Printf("[Probe] 拒绝：非回环来源 来源=%s", r.RemoteAddr)
+			writeOpenAIError(w, http.StatusForbidden, "probe_local_only", "探测接口仅允许本机回环地址调用")
+			return
+		}
+		next(w, r)
+	}
+}
+
 func handleAdminProbe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeOpenAIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "仅支持 POST 请求")
@@ -83,10 +122,35 @@ func handleAdminProbe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Limit <= 0 {
-		req.Limit = 5
+		req.Limit = probeMaxModels
 	}
-	if req.Limit > 50 {
-		req.Limit = 50
+	if req.Limit > probeMaxModels {
+		writeOpenAIError(w, http.StatusBadRequest, "probe_limit_too_large",
+			fmt.Sprintf("单次探测最多 %d 个模型，请拆分请求", probeMaxModels))
+		return
+	}
+	// 显式模型列表：去重 + 上限，绝不接受"传 1000 个"这种变相放大消耗。
+	if len(req.Models) > 0 {
+		seen := make(map[string]bool, len(req.Models))
+		deduped := make([]string, 0, len(req.Models))
+		for _, m := range req.Models {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			key := normalizeModelName(m)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			deduped = append(deduped, m)
+		}
+		if len(deduped) > probeMaxModels {
+			writeOpenAIError(w, http.StatusBadRequest, "probe_too_many_models",
+				fmt.Sprintf("单次探测最多 %d 个模型（去重后 %d 个），请拆分请求", probeMaxModels, len(deduped)))
+			return
+		}
+		req.Models = deduped
 	}
 
 	accountMu.Lock()
@@ -115,6 +179,14 @@ func handleAdminProbe(w http.ResponseWriter, r *http.Request) {
 			all = all[:req.Limit]
 		}
 		models = all
+	}
+
+	// 账号数 × 模型数 = 实际上游调用次数，必须受总上限约束。
+	if len(targets)*len(models) > probeMaxUpstreamCalls {
+		writeOpenAIError(w, http.StatusBadRequest, "probe_too_many_calls",
+			fmt.Sprintf("本次探测将产生 %d 次上游调用，超过单次上限 %d；请减少账号范围或模型数量",
+				len(targets)*len(models), probeMaxUpstreamCalls))
+		return
 	}
 
 	log.Printf("[Probe] 开始探测：账号数=%d，模型数=%d，账号=%s，模型=%s",
@@ -338,9 +410,14 @@ func runProbe() {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if key := currentAPIKey(); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	admin := currentAdminKey()
+	if admin == "" {
+		fmt.Println("未配置管理密钥：探测接口只接受 gateway.adminKey。")
+		fmt.Println("请在 config.json 的 gateway.adminKey 填入随机字符串（保存后约 1 秒生效），再重试。")
+		return
 	}
+	// 探测接口只认管理密钥；普通 API Key 会被 401 拒绝。
+	req.Header.Set("Authorization", "Bearer "+admin)
 	fmt.Printf("正在请求 %s（账号=%s，模型=%s）...\n", url, ifEmpty(reqBody.Auth, "全部"), ifEmpty(strings.Join(reqBody.Models, ","), "目录前若干"))
 
 	resp, err := (&http.Client{Timeout: 15 * time.Minute}).Do(req)

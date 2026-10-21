@@ -22,7 +22,7 @@ func newAPIHandler() http.Handler {
 	mux.HandleFunc("/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ping", handleHealth)
-	mux.HandleFunc("/admin/probe", handleAdminProbe)
+	mux.HandleFunc("/admin/probe", probeAdminOnly(handleAdminProbe))
 	mux.HandleFunc("/", handleIndex)
 	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(mux))))
 }

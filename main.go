@@ -3633,6 +3633,12 @@ func authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/admin/probe" {
+			// 探测接口有独立的管理员鉴权（probeAdminOnly），不参与普通 Key 鉴权：
+			// 普通 wbk_ Key 与旧 gateway.apiKey 都必须在这里被拒，而不是被接受。
+			next.ServeHTTP(w, r)
+			return
+		}
 		legacy := currentAPIKey()
 		authHeader := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(authHeader, "Bearer ")
