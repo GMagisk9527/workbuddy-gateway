@@ -24,7 +24,13 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map())
     if (!elements.has(id)) {
       const node = {innerHTML: "", textContent: "", className: "", value: "", checked: false, disabled: false,
             style: {}, querySelector() { return this; }, querySelectorAll() { return []; },
+            options: [], appendChild(child) { this.options.push(child); },
             addEventListener() {}, focus() {}, removeAttribute() {}, setAttribute() {}};
+      let html = "";
+      Object.defineProperty(node, "innerHTML", {
+        get() { return html; },
+        set(value) { html = value; node.options = []; },
+      });
       node.classList = {
         add(name) { node.className += " " + name; },
         remove(name) { node.className = node.className.split(/\s+/).filter(v => v !== name).join(" "); },
@@ -42,7 +48,8 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map())
   }
   const storage = map => ({getItem: k => map.get(k) || null, setItem: (k, v) => map.set(k, v), removeItem: k => map.delete(k)});
   const context = {
-    document: {readyState: "loading", addEventListener() {}, getElementById: element, querySelectorAll: () => []},
+    document: {readyState: "loading", addEventListener() {}, getElementById: element, querySelectorAll: () => [],
+      createElement: () => ({value: "", textContent: "", selected: false})},
     sessionStorage: storage(session), localStorage: storage(local),
     window: {alert: message => alerts.push(message), confirm: () => true, addEventListener() {}, location: {protocol: "http:", reload() {}}},
     TextEncoder, fetch: fetchImpl, setInterval: () => 1,
@@ -68,6 +75,7 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map())
     , renderStats, loadStats, changeStatsFilter, statsLineChart, statsComboChart, statsDuration, statsNumber, statsCredit
     , openAddAccount, startAddAccount, pollAddAccount, closeAddAccount, accountRowActions
     , initStatsFilter, writeStatsFilterCookie, readStatsFilterCookie
+    , openKeyEditor, closeKeyEditor, submitKeyForm
   };})();`);
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -77,6 +85,115 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map())
 function cells(html) {
   return [...html.matchAll(/<td(?: [^>]*)?>(.*?)<\/td>/g)].map(m => m[1]);
 }
+
+function keyEditorFixture(catalogFetch) {
+  const posts = [];
+  const f = fixture(async (route, options) => {
+    if (route === "/admin/api/client-events") return response(204, {});
+    if (route === "/admin/api/models") return catalogFetch();
+    if (route === "/admin/api/keys") {
+      if (options.method === "POST") posts.push(JSON.parse(options.body));
+      return response(200, {items: []});
+    }
+    throw new Error("unexpected route: " + route);
+  });
+  f.review.state.apiKey = "synthetic-admin";
+  return {...f, posts};
+}
+
+function keyModelOptions(f) {
+  return f.element("keyFormModels").options.map(o => ({value: o.value, selected: o.selected}));
+}
+
+test("编辑 Key 合并目录与已保存白名单，修改名称不会丢掉旧模型", async () => {
+  const f = keyEditorFixture(() => { throw new Error("cached catalog should be used"); });
+  f.review.state.lastModels = {models: [{id: "current"}, {id: "available"}, {id: "current"}]};
+  await f.review.openKeyEditor({id: "key-1", name: "旧名称", models: ["retired", "current"]});
+  assert.deepEqual(keyModelOptions(f), [
+    {value: "available", selected: false}, {value: "current", selected: true}, {value: "retired", selected: true},
+  ]);
+  f.element("keyFormName").value = "新名称";
+  await f.review.submitKeyForm();
+  assert.deepEqual(f.posts[0].models, ["current", "retired"]);
+  assert.equal(f.posts[0].id, "key-1");
+  assert.equal(f.posts[0].action, "update");
+  assert.equal(f.posts[0].name, "新名称");
+});
+
+test("模型目录加载中不能提交，响应到达后仍保留目录外白名单", async () => {
+  let release;
+  const f = keyEditorFixture(() => new Promise(resolve => { release = resolve; }));
+  const loading = f.review.openKeyEditor({id: "key-1", name: "旧名称", models: ["retired"]});
+  assert.equal(f.element("keyFormModels").disabled, true);
+  assert.equal(f.element("keyFormSubmit").disabled, true);
+  assert.deepEqual(keyModelOptions(f), [{value: "retired", selected: true}]);
+  await f.review.submitKeyForm();
+  assert.equal(f.posts.length, 0, "直接触发保存函数也不能绕过加载检查");
+  release(response(200, {models: [{id: "current"}]}));
+  await loading;
+  assert.equal(f.element("keyFormSubmit").disabled, false);
+  await f.review.submitKeyForm();
+  assert.deepEqual(f.posts[0].models, ["retired"]);
+});
+
+test("模型目录失败时保存其他字段保持白名单，手动取消全部才能放开", async () => {
+  const f = keyEditorFixture(async () => response(503, {error: "catalog unavailable"}));
+  const key = {id: "key-1", name: "restricted", models: ["retired", "current"]};
+  await f.review.openKeyEditor(key);
+  assert.equal(f.element("keyFormSubmit").disabled, false);
+  assert.match(f.element("keyFormStatus").textContent, /已保留原有白名单/);
+  f.element("keyFormName").value = "renamed";
+  await f.review.submitKeyForm();
+  assert.deepEqual(f.posts[0].models, ["current", "retired"]);
+  await f.review.openKeyEditor(key);
+  f.element("keyFormModels").options.forEach(option => { option.selected = false; });
+  await f.review.submitKeyForm();
+  assert.deepEqual(f.posts[1].models, [], "明确取消全部选择应仍能去掉白名单限制");
+});
+
+test("切换编辑 Key 后迟到模型响应不能覆盖当前白名单或用户选择", async () => {
+  const pending = [];
+  const f = keyEditorFixture(() => new Promise(resolve => { pending.push(resolve); }));
+  const first = f.review.openKeyEditor({id: "key-a", name: "A", models: ["old-a"]});
+  const second = f.review.openKeyEditor({id: "key-b", name: "B", models: ["old-b"]});
+  pending[1](response(200, {models: [{id: "catalog-b"}]}));
+  await second;
+  f.element("keyFormModels").options[0].selected = true;
+  const current = keyModelOptions(f);
+  pending[0](response(200, {models: [{id: "catalog-a"}]}));
+  await first;
+  assert.deepEqual(keyModelOptions(f), current);
+  assert.equal(f.review.state.lastModels.models[0].id, "catalog-b");
+  await f.review.submitKeyForm();
+  assert.equal(f.posts[0].id, "key-b");
+  assert.deepEqual(f.posts[0].models, ["catalog-b", "old-b"]);
+});
+
+test("关闭编辑器后迟到模型响应不修改后续状态", async () => {
+  let release;
+  const f = keyEditorFixture(() => new Promise(resolve => { release = resolve; }));
+  const loading = f.review.openKeyEditor({id: "key-a", name: "A", models: ["old-a"]});
+  f.review.closeKeyEditor();
+  release(response(200, {models: [{id: "catalog-a"}]}));
+  await loading;
+  assert.equal(f.review.state.lastModels, null);
+  assert.equal(f.element("keyFormCard").classList.contains("hidden"), true);
+});
+
+test("新建 Key 仍可选择目录模型，也可明确保留不限制模型的默认值", async () => {
+  const f = keyEditorFixture(async () => response(200, {models: [{id: "current"}]}));
+  await f.review.openKeyEditor(null);
+  assert.deepEqual(keyModelOptions(f), [{value: "current", selected: false}]);
+  f.element("keyFormName").value = "selected";
+  f.element("keyFormModels").options[0].selected = true;
+  await f.review.submitKeyForm();
+  assert.equal(f.posts[0].action, "create");
+  assert.deepEqual(f.posts[0].models, ["current"]);
+  await f.review.openKeyEditor(null);
+  f.element("keyFormName").value = "unrestricted";
+  await f.review.submitKeyForm();
+  assert.deepEqual(f.posts[1].models, []);
+});
 
 test("运行状态只展示健康度，无账号和过旧快照不能显示100%", () => {
   const f = fixture();

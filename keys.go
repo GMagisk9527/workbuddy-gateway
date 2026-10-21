@@ -10,9 +10,9 @@ package main
 //     无法保证单个已在途请求不超支，这里不假装能硬封顶。
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"context"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -50,21 +50,26 @@ var (
 
 // apiKeyUsage 是账本里的可持久化累计值。DayKey/MonthKey 用于北京时间窗口滚动。
 type apiKeyUsage struct {
-	Total      float64 `json:"total"`
-	Daily      float64 `json:"daily"`
-	Monthly    float64 `json:"monthly"`
-	DayKey     string  `json:"dayKey,omitempty"`
-	MonthKey   string  `json:"monthKey,omitempty"`
-	Requests   int64   `json:"requests"`
-	Input      int64   `json:"inputTokens"`
-	Output     int64   `json:"outputTokens"`
-	Cached     int64   `json:"cachedTokens"`
-	Unknown    int64   `json:"unknownSettlements"`
-	ZeroCost   int64   `json:"zeroCostSettlements"`
+	Total    float64 `json:"total"`
+	Daily    float64 `json:"daily"`
+	Monthly  float64 `json:"monthly"`
+	DayKey   string  `json:"dayKey,omitempty"`
+	MonthKey string  `json:"monthKey,omitempty"`
+	Requests int64   `json:"requests"`
+	Input    int64   `json:"inputTokens"`
+	Output   int64   `json:"outputTokens"`
+	Cached   int64   `json:"cachedTokens"`
+	Unknown  int64   `json:"unknownSettlements"`
+	ZeroCost int64   `json:"zeroCostSettlements"`
 	// Lifetime 是生命周期累计，管理员的"重置用量"不会清除它；
 	// 用于区分"当前准入额度"和"历史真实消费"。
 	Lifetime float64 `json:"lifetime,omitempty"`
-	LastUsedAt int64   `json:"lastUsedAt,omitempty"`
+	// SpentToday is factual daily consumption, independent of quota resets.
+	// An absent SpentDayKey denotes an older snapshot; only its existing Daily
+	// value can be migrated, since earlier resets may have discarded details.
+	SpentToday  float64 `json:"spentToday,omitempty"`
+	SpentDayKey string  `json:"spentDayKey,omitempty"`
+	LastUsedAt  int64   `json:"lastUsedAt,omitempty"`
 }
 
 // apiKey 是一把受管密钥。持久化字段与运行时字段分开标注。
@@ -131,8 +136,8 @@ type keyStoreData struct {
 
 // keyStore 管理全部受管密钥。
 type keyStore struct {
-	mu       sync.RWMutex
-	byID     map[string]*apiKey
+	mu          sync.RWMutex
+	byID        map[string]*apiKey
 	byPrefix    map[string]*apiKey
 	archive     map[string]*apiKeyUsage
 	path        string
@@ -157,6 +162,7 @@ func keyMonthKey(now time.Time) string { return now.In(keyCST).Format("2006-01")
 // rollWindowLocked 在窗口变化时把日/月累计清零（历史事实在 WAL 里，不删除）。
 func (k *apiKey) rollWindowLocked(now time.Time) {
 	day, month := keyDayKey(now), keyMonthKey(now)
+	rollUsageHistory(&k.usage, day)
 	if k.usage.DayKey != day {
 		k.usage.Daily = 0
 		k.usage.DayKey = day
@@ -164,6 +170,15 @@ func (k *apiKey) rollWindowLocked(now time.Time) {
 	if k.usage.MonthKey != month {
 		k.usage.Monthly = 0
 		k.usage.MonthKey = month
+	}
+}
+
+func rollUsageHistory(u *apiKeyUsage, day string) {
+	if u.SpentDayKey == "" {
+		u.SpentDayKey, u.SpentToday = u.DayKey, u.Daily
+	}
+	if u.SpentDayKey != day {
+		u.SpentDayKey, u.SpentToday = day, 0
 	}
 }
 
@@ -510,11 +525,13 @@ func keyResetUsage(id string) error {
 		return werr
 	}
 	k.mu.Lock()
+	k.rollWindowLocked(now)
 	keep := apiKeyUsage{
 		Lifetime: k.usage.Lifetime, Requests: k.usage.Requests,
 		Input: k.usage.Input, Output: k.usage.Output, Cached: k.usage.Cached,
 		LastUsedAt: k.usage.LastUsedAt,
-		DayKey:     keyDayKey(now), MonthKey: keyMonthKey(now),
+		SpentToday: k.usage.SpentToday, SpentDayKey: k.usage.SpentDayKey,
+		DayKey: keyDayKey(now), MonthKey: keyMonthKey(now),
 	}
 	k.usage = keep
 	k.lastReject = ""
@@ -525,6 +542,7 @@ func keyResetUsage(id string) error {
 	log.Printf("[APIKey] 结果=已重置用量 id=%s 说明=仅清零准入累计，Lifetime 与历史消费记录保留", id)
 	return nil
 }
+
 // ---------------------------------------------------------------------------
 // 鉴权
 // ---------------------------------------------------------------------------
@@ -792,6 +810,7 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 		k.usage.Daily += e.Credit
 		k.usage.Monthly += e.Credit
 		k.usage.Lifetime += e.Credit
+		k.usage.SpentToday += e.Credit
 	}
 	if e.Zero {
 		k.usage.ZeroCost++
@@ -976,6 +995,7 @@ func registerRuntimeKeys() {
 	apiKeys.byID[legacyKeyID] = legacyKey
 	apiKeys.mu.Unlock()
 }
+
 // archivedUsage 返回已删除 Key 的历史消费（匿名归档）。
 func archivedUsage(id string) *apiKeyUsage {
 	apiKeys.mu.RLock()
@@ -986,6 +1006,7 @@ func archivedUsage(id string) *apiKeyUsage {
 	}
 	return nil
 }
+
 // withSettlementKey 把准入通过的 Key 绑定到请求上。结算时优先用它，
 // 而不是重新查索引——否则管理员在请求在途时删除 Key，这笔真实消费会直接丢失。
 func withSettlementKey(r *http.Request, k *apiKey) {

@@ -676,10 +676,11 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 		return nil, err
 	}
 
-	var content, reasoning string
+	var content, reasoning, finishReason string
 	var toolCalls []any
 	if choices, ok := chat["choices"].([]any); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]any); ok {
+			finishReason, _ = choice["finish_reason"].(string)
 			if msg, ok := choice["message"].(map[string]any); ok {
 				content, _ = msg["content"].(string)
 				reasoning, _ = msg["reasoning_content"].(string)
@@ -687,13 +688,14 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 			}
 		}
 	}
+	status, incompleteDetails := responsesCompletionState(finishReason)
 
 	output := []any{}
 	if reasoning != "" {
 		output = append(output, map[string]any{
 			"id":      "rs_" + compactUUID(),
 			"type":    "reasoning",
-			"status":  "completed",
+			"status":  status,
 			"summary": []any{map[string]any{"type": "summary_text", "text": reasoning}},
 		})
 	}
@@ -701,7 +703,7 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 		output = append(output, map[string]any{
 			"id":     "msg_" + compactUUID(),
 			"type":   "message",
-			"status": "completed",
+			"status": status,
 			"role":   "assistant",
 			"content": []any{
 				map[string]any{"type": "output_text", "text": content, "annotations": []any{}},
@@ -722,7 +724,7 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 		output = append(output, map[string]any{
 			"id":        "fc_" + compactUUID(),
 			"type":      "function_call",
-			"status":    "completed",
+			"status":    status,
 			"call_id":   ifEmpty(callID, "call_"+compactUUID()),
 			"name":      name,
 			"arguments": args,
@@ -742,13 +744,29 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 	}
 
 	result := buildResponsesEnvelope(respID, modelName, created)
-	result["status"] = "completed"
+	result["status"] = status
+	result["incomplete_details"] = incompleteDetails
 	result["output"] = output
-	result["completed_at"] = now
+	if status == "completed" {
+		result["completed_at"] = now
+	}
 	if usage, ok := chat["usage"].(map[string]any); ok {
 		result["usage"] = toResponsesUsage(usage)
 	}
 	return json.Marshal(result)
+}
+
+// A clean upstream EOF can still carry truncated output. Keep that distinction
+// in both Responses exits, including tool calls whose arguments may be partial.
+func responsesCompletionState(finishReason string) (string, any) {
+	switch finishReason {
+	case "length":
+		return "incomplete", map[string]any{"reason": "max_output_tokens"}
+	case "content_filter":
+		return "incomplete", map[string]any{"reason": "content_filter"}
+	default:
+		return "completed", nil
+	}
 }
 
 // buildResponsesEnvelope 构造 Responses 响应骨架（含规范要求的常见字段）。
@@ -1179,13 +1197,14 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	if !reasoningOpen && !msgOpen && len(toolOrder) == 0 {
 		openMessage()
 	}
+	status, incompleteDetails := responsesCompletionState(finishReason)
 
 	// 收尾：reasoning
 	if reasoningOpen {
 		text := reasoningText
 		emit("response.reasoning_summary_text.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "text": text})
 		emit("response.reasoning_summary_part.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
-		item := map[string]any{"id": reasoningItemID, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": text}}}
+		item := map[string]any{"id": reasoningItemID, "type": "reasoning", "status": status, "summary": []any{map[string]any{"type": "summary_text", "text": text}}}
 		emit("response.output_item.done", map[string]any{"output_index": reasoningIndex, "item": item})
 		idxToItem[reasoningIndex] = item
 	}
@@ -1195,7 +1214,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		text := messageText
 		emit("response.output_text.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "text": text})
 		emit("response.content_part.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "annotations": []any{}, "text": text}})
-		item := map[string]any{"id": msgItemID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "annotations": []any{}, "text": text}}}
+		item := map[string]any{"id": msgItemID, "type": "message", "status": status, "role": "assistant", "content": []any{map[string]any{"type": "output_text", "annotations": []any{}, "text": text}}}
 		emit("response.output_item.done", map[string]any{"output_index": msgIndex, "item": item})
 		idxToItem[msgIndex] = item
 	}
@@ -1205,7 +1224,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		st := toolCalls[idx]
 		args := st.Args.String()
 		emit("response.function_call_arguments.done", map[string]any{"item_id": tcItemID[idx], "output_index": tcIndex[idx], "name": st.Name, "arguments": args})
-		item := map[string]any{"id": tcItemID[idx], "type": "function_call", "status": "completed", "call_id": st.ID, "name": st.Name, "arguments": args}
+		item := map[string]any{"id": tcItemID[idx], "type": "function_call", "status": status, "call_id": st.ID, "name": st.Name, "arguments": args}
 		emit("response.output_item.done", map[string]any{"output_index": tcIndex[idx], "item": item})
 		idxToItem[tcIndex[idx]] = item
 	}
@@ -1218,15 +1237,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	}
 
 	final := buildResponsesEnvelope(respID, modelName, created)
-	final["status"] = "completed"
+	final["status"] = status
+	final["incomplete_details"] = incompleteDetails
 	final["output"] = output
-	final["completed_at"] = time.Now().Unix()
+	if status == "completed" {
+		final["completed_at"] = time.Now().Unix()
+	}
 	if usage != nil {
 		final["usage"] = toResponsesUsage(usage)
 	}
 	observeModelCredit(acc, modelName, usage, reqID)
 	recordModelTokens(modelName, usage, reqID)
-	emit("response.completed", map[string]any{"response": final})
+	emit("response."+status, map[string]any{"response": final})
 
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()

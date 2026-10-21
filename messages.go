@@ -343,8 +343,8 @@ func convertAnthropicMessage(msg map[string]any) []any {
 // user：tool_result 块 -> 独立 tool 消息（必须紧跟 assistant 的 tool_calls），
 // 其余文本/图片合并为一条 user 消息放在 tool 消息之后；tool_result 里嵌的
 // 图片提升到这条 user 消息（tool 消息的 content 只能是字符串，图片无处安放）。
-// assistant：text 块合并为 content，tool_use 块 -> tool_calls；thinking /
-// redacted_thinking 历史块不上传（上游自行管理思维链）。
+// assistant：text 块合并为 content，tool_use 块 -> tool_calls；thinking 明文
+// 回放为 reasoning_content，redacted_thinking 和签名不是推理正文，不上传。
 func convertAnthropicBlocks(role string, blocks []any) []any {
 	switch role {
 	case "user":
@@ -400,7 +400,7 @@ func convertAnthropicBlocks(role string, blocks []any) []any {
 		}
 		return out
 	case "assistant":
-		var texts []string
+		var texts, thoughts []string
 		var toolCalls []any
 		for _, bAny := range blocks {
 			blk, ok := bAny.(map[string]any)
@@ -408,6 +408,10 @@ func convertAnthropicBlocks(role string, blocks []any) []any {
 				continue
 			}
 			switch blk["type"] {
+			case "thinking":
+				if thought, ok := blk["thinking"].(string); ok {
+					thoughts = append(thoughts, thought)
+				}
 			case "text":
 				if t := strOf(blk["text"]); t != "" {
 					texts = append(texts, t)
@@ -428,6 +432,9 @@ func convertAnthropicBlocks(role string, blocks []any) []any {
 			}
 		}
 		m := map[string]any{"role": "assistant", "content": strings.Join(texts, "")}
+		if len(thoughts) > 0 {
+			m["reasoning_content"] = strings.Join(thoughts, "\n\n")
+		}
 		if len(toolCalls) > 0 {
 			m["tool_calls"] = toolCalls
 		}
@@ -844,9 +851,8 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 	}
 }
 
-// anthropicSignature 生成 thinking 块的回传签名。请求侧不上传 thinking
-// 历史（上游自行管理思维链），签名只为满足严格客户端的协议校验，
-// 取推理正文的哈希即可，可确定复现。
+// anthropicSignature 为网关生成的 thinking 块提供稳定的本地回传标记。
+// 请求侧只回放 thinking 明文；这个标记不是厂商签名，也不作为上游推理内容。
 func anthropicSignature(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return base64.StdEncoding.EncodeToString(sum[:])

@@ -18,6 +18,8 @@
     creditOpen: Object.create(null),
     keys: null,
     keyEditing: null,
+    keyEditorVersion: 0,
+    keyModelsPending: false,
     timer: null,
     refreshPending: false,
     settings: null,
@@ -122,6 +124,7 @@
 
   function lockDashboard() {
     resetConfigEditor();
+    closeKeyEditor();
     state.tasksLastPoll = 0;
     $("tabs").classList.add("hidden");
     $("dashboard").classList.add("hidden");
@@ -1713,9 +1716,14 @@
     var sel = $("keyFormModels");
     sel.innerHTML = "";
     var ids = ((state.lastModels && state.lastModels.models) || []).map(function (m) { return m.id || m.name; });
-    var chosen = {};
+    var chosen = Object.create(null), seen = Object.create(null);
     (selected || []).forEach(function (m) { chosen[m] = true; });
-    ids.filter(Boolean).sort().forEach(function (id) {
+    // 已保存的模型可能暂时不在当前目录中，编辑其他字段不能因此放开白名单。
+    ids.concat(selected || []).filter(function (id) {
+      if (!id || seen[id]) return false;
+      seen[id] = true;
+      return true;
+    }).sort().forEach(function (id) {
       var opt = document.createElement("option");
       opt.value = id;
       opt.textContent = id;
@@ -1725,6 +1733,8 @@
   }
 
   function openKeyEditor(item) {
+    var version = ++state.keyEditorVersion;
+    var selected = item && item.models ? item.models.slice() : [];
     state.keyEditing = item || null;
     $("keyFormCard").classList.remove("hidden");
     $("keyRevealCard").classList.add("hidden");
@@ -1736,12 +1746,38 @@
     $("keyFormExpires").value = item && item.expiresAt ? fmtDateInput(item.expiresAt / 1000) : "";
     $("keyFormConcurrent").value = item && item.maxConcurrent ? item.maxConcurrent : 1;
     $("keyFormStatus").textContent = "";
+    fillKeyModels(selected);
+    state.keyModelsPending = !state.lastModels;
+    $("keyFormModels").disabled = state.keyModelsPending;
+    $("keyFormSubmit").disabled = state.keyModelsPending;
     if (!state.lastModels) {
-      api("/admin/api/models").then(function (d) { state.lastModels = d; fillKeyModels(item && item.models); },
-        function () { fillKeyModels(item && item.models); });
-    } else {
-      fillKeyModels(item && item.models);
+      $("keyFormStatus").textContent = "正在加载模型目录，原有白名单已保留…";
+      return api("/admin/api/models").then(function (d) {
+        if (version !== state.keyEditorVersion) return;
+        state.lastModels = d;
+        fillKeyModels(selected);
+        state.keyModelsPending = false;
+        $("keyFormModels").disabled = false;
+        $("keyFormSubmit").disabled = false;
+        $("keyFormStatus").textContent = "";
+      }, function () {
+        if (version !== state.keyEditorVersion) return;
+        state.keyModelsPending = false;
+        $("keyFormModels").disabled = false;
+        $("keyFormSubmit").disabled = false;
+        $("keyFormStatus").textContent = selected.length
+          ? "模型目录加载失败，已保留原有白名单；可保存其他设置或手动调整现有选择。重新打开可重试加载。"
+          : "模型目录加载失败，当前未设置模型白名单。重新打开可重试加载。";
+      });
     }
+    return Promise.resolve();
+  }
+
+  function closeKeyEditor() {
+    state.keyEditorVersion++;
+    state.keyEditing = null;
+    state.keyModelsPending = false;
+    $("keyFormCard").classList.add("hidden");
   }
 
   function fmtDate(unix) {
@@ -1754,6 +1790,11 @@
   function fmtDateInput(unix) { return fmtDate(unix); }
 
   function submitKeyForm() {
+    if (state.keyModelsPending) {
+      $("keyFormStatus").textContent = "模型目录仍在加载，请稍候保存；原有白名单已保留。";
+      return Promise.resolve();
+    }
+    var version = state.keyEditorVersion;
     var editing = state.keyEditing;
     var models = Array.prototype.filter.call($("keyFormModels").options, function (o) { return o.selected; })
       .map(function (o) { return o.value; });
@@ -1771,10 +1812,13 @@
     };
     $("keyFormStatus").textContent = "保存中…";
     return api("/admin/api/keys", {method: "POST", body: body}).then(function (res) {
-      $("keyFormCard").classList.add("hidden");
-      if (res && res.key) showKeyReveal(res.key, res.notice);
+      if (version === state.keyEditorVersion) {
+        closeKeyEditor();
+        if (res && res.key) showKeyReveal(res.key, res.notice);
+      }
       return loadKeys();
     }, function (err) {
+      if (version !== state.keyEditorVersion) return;
       $("keyFormStatus").textContent = "保存失败：" + ((err && err.detail) || "请重试");
     });
   }
@@ -2031,7 +2075,7 @@
     $("keysTable").addEventListener("click", keyRowAction);
     $("keyCreateBtn").addEventListener("click", function () { openKeyEditor(null); });
     $("keyFormSubmit").addEventListener("click", submitKeyForm);
-    $("keyFormCancel").addEventListener("click", function () { $("keyFormCard").classList.add("hidden"); });
+    $("keyFormCancel").addEventListener("click", closeKeyEditor);
     $("keyRevealClose").addEventListener("click", function () { $("keyRevealCard").classList.add("hidden"); $("keyRevealValue").value = ""; });
     $("keyRevealCopy").addEventListener("click", function () {
       var input = $("keyRevealValue");

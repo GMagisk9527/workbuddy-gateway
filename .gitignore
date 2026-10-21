@@ -10,6 +10,9 @@ wb-models-cache.json
 wb-models-cache.json.tmp
 config.json
 stats.json
+keyledger.snapshot.json
+keyledger.wal
+keyledger.state.json
 .env
 .env.*
 !.env.example

@@ -272,7 +272,13 @@ func handleAdminKeys(w http.ResponseWriter, r *http.Request) {
 
 // keyAdminListPayload 组装列表 + 概览。
 func keyAdminListPayload() map[string]any {
-	items := keyList()
+	// Capture membership and archives together, so a concurrent deletion cannot
+	// make the same costs appear in both collections (or neither collection).
+	apiKeys.mu.RLock()
+	items := make([]*apiKey, 0, len(apiKeys.byID))
+	for _, k := range apiKeys.byID {
+		items = append(items, k)
+	}
 	views := make([]keyAdminView, 0, len(items))
 	var totalAll, todayAll float64
 	enabledCount := 0
@@ -283,11 +289,21 @@ func keyAdminListPayload() map[string]any {
 			enabledCount++
 		}
 		totalAll += v.Usage.Lifetime // 历史累计：重置额度不应让面板上的历史消费消失
-		if v.Usage.DayKey == today {
-			todayAll += v.Usage.DailyUsed
-		}
+		k.mu.Lock()
+		todayAll += k.usage.SpentToday
+		k.mu.Unlock()
 		views = append(views, v)
 	}
+	for _, usage := range apiKeys.archive {
+		if usage == nil {
+			continue
+		}
+		u := *usage
+		rollUsageHistory(&u, today)
+		totalAll += u.Lifetime
+		todayAll += u.SpentToday
+	}
+	apiKeys.mu.RUnlock()
 	sort.SliceStable(views, func(i, j int) bool {
 		if views[i].Legacy != views[j].Legacy {
 			return views[i].Legacy

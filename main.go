@@ -1271,6 +1271,12 @@ func modelStateLocked(acc *Account, model string) *modelRuntimeState {
 }
 
 func usableForModelLocked(acc *Account, model string, now time.Time) (accountSelectionKind, bool) {
+	return usableForModelReservationLocked(acc, model, now, false)
+}
+
+// A queued probe owns the reservation made by nextAccountForModelPrefer. It
+// must still pass all other checks when it finally acquires the account lock.
+func usableForModelReservationLocked(acc *Account, model string, now time.Time, reservedProbe bool) (accountSelectionKind, bool) {
 	if acc.Disabled || acc.CooldownUntil.After(now) {
 		return "", false
 	}
@@ -1294,7 +1300,7 @@ func usableForModelLocked(acc *Account, model string, now time.Time) (accountSel
 	if state.CostClass == modelCostFree && !state.QuotaBlocked {
 		return selectionFreeExhausted, true
 	}
-	if state.CostClass == modelCostPaid || now.Before(state.NextProbeAt) {
+	if state.CostClass == modelCostPaid || (!reservedProbe && now.Before(state.NextProbeAt)) {
 		return "", false
 	}
 	return selectionProbeExhausted, true
@@ -1760,6 +1766,16 @@ func isQuotaExhausted(statusCode int, body string) bool {
 // ensureValidTokenFor 对指定账号检查并刷新令牌（多账号版）。
 // 失效账号（Disabled 或 Auth 为 nil）直接跳过，不参与调度。
 func ensureValidTokenFor(acc *Account) error {
+	return ensureValidTokenForContext(context.Background(), acc)
+}
+
+func ensureValidTokenForContext(ctx context.Context, acc *Account) error {
+	return ensureValidTokenWithRefresh(ctx, acc, func(a *Account) error {
+		return refreshAccountTokenWithContext(ctx, a, "按需续期")
+	})
+}
+
+func ensureValidTokenWithRefresh(ctx context.Context, acc *Account, refresh func(*Account) error) error {
 	if acc == nil {
 		return nil
 	}
@@ -1777,7 +1793,10 @@ func ensureValidTokenFor(acc *Account) error {
 	now := time.Now()
 	if now.Unix() > expiresAt-900 {
 		log.Printf("[Auth] 账号 %s Token 需要续期，当前过期时间=%s，刷新阈值=过期前15分钟，开始调用上游刷新接口", acc.Path, time.Unix(expiresAt, 0).Format("2006-01-02 15:04:05"))
-		if err := doRefreshTokenFor(acc); err != nil {
+		if err := refresh(acc); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			accountMu.Lock()
 			isDisabled := acc.Disabled
 			accountMu.Unlock()
@@ -1828,14 +1847,24 @@ func doRefreshTokenFor(acc *Account) error {
 // 达到 refreshDisableThreshold 次，才禁用账号；普通网络错误、5xx 以及未命中标志的
 // 401/403 只累计计数并保留原凭据，避免一次抖动就删掉用户凭据。
 func refreshAccountToken(acc *Account, reason string) error {
+	return refreshAccountTokenWithContext(context.Background(), acc, reason)
+}
+
+func refreshAccountTokenWithContext(ctx context.Context, acc *Account, reason string) error {
 	if acc == nil {
 		return fmt.Errorf("无法刷新：账号缺少 RefreshToken 或已失效")
 	}
 
 	// 与该账号的上游请求串行，避免刷新过程中请求读到一半更新的 Token。
-	acc.lock.Lock()
+	if !lockAccountWithContext(ctx, &acc.lock) {
+		return ctx.Err()
+	}
 	defer acc.lock.Unlock()
+	return refreshAccountTokenLocked(acc, reason)
+}
 
+// The caller owns acc.lock, including when refreshing after a long model queue.
+func refreshAccountTokenLocked(acc *Account, reason string) error {
 	accountMu.Lock()
 	if acc.Disabled || acc.Auth == nil || acc.Auth.Auth.RefreshToken == "" {
 		accountMu.Unlock()
@@ -2385,7 +2414,14 @@ func lockAccountWithContext(ctx context.Context, mu *sync.Mutex) bool {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if ctx.Err() != nil {
+			return false
+		}
 		if mu.TryLock() {
+			if ctx.Err() != nil {
+				mu.Unlock()
+				return false
+			}
 			return true
 		}
 		select {
@@ -3799,19 +3835,6 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		case selectionProbeExhausted:
 			log.Printf("[ModelProbe] requestId=%d 账号 %s 付费余额已耗尽，但模型 %s 收费属性未知；执行一次受控探测，5分钟内不重复探测", reqID, acc.Path, modelName)
 		}
-		if err := ensureValidTokenFor(acc); err != nil {
-			lastAuthErr = err.Error()
-			continue
-		}
-		// 令牌刷新时若发现授权失效会禁用账号；若被禁用则跳过换下一个
-		accountMu.Lock()
-		disabled := acc.Disabled
-		accountMu.Unlock()
-		if disabled {
-			lastAuthErr = acc.DisabledReason
-			continue
-		}
-
 		// 按账号所属站点（国内站/国际站）路由上游与指纹 Header
 		prof := acc.Profile()
 
@@ -3822,11 +3845,39 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		})
 		// 注入 CodeBuddy 凭据与指纹 Header
 		// 限制同一账号向腾讯上游的请求严格单并发串行排队，防止并发双发触发腾讯风控
-		acc.lock.Lock()
+		if !lockAccountWithContext(r.Context(), &acc.lock) {
+			recordModelFailure(modelName, "请求已取消")
+			writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "等待账号时请求已取消或超时")
+			return nil, nil, nil, false
+		}
+		// 排队期间冷却、配额、名单和账号池都可能变化，须重新检查选号资格。
+		accountMu.Lock()
+		currentSelection, usable := queuedAccountUsableLocked(acc, modelName, selection, time.Now())
+		accountMu.Unlock()
+		if !usable {
+			acc.lock.Unlock()
+			continue
+		}
+		selection = currentSelection
+		// A long preceding stream can outlast the token checked at selection time.
+		// Refresh under the already-owned lock, without recursively locking it.
+		if err := ensureValidTokenWithRefresh(r.Context(), acc, func(a *Account) error {
+			return refreshAccountTokenLocked(a, "按需续期")
+		}); err != nil {
+			acc.lock.Unlock()
+			if r.Context().Err() != nil {
+				recordModelFailure(modelName, "请求已取消")
+				writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "账号续期时请求已取消或超时")
+				return nil, nil, nil, false
+			}
+			lastAuthErr = err.Error()
+			continue
+		}
+		prof = acc.Profile()
 		statsSelectAccount(r, acc, modelName)
 		resp, upstreamCancel, err := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
-		acc.lock.Unlock()
 		if err != nil {
+			acc.lock.Unlock()
 			debugEvent(r, "error", "upstream_request_failed", map[string]any{
 				"upstream_host": prof.Base,
 				"error_type":    debugErrorType(err),
@@ -3841,78 +3892,86 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 
 		// 上游非 200 响应处理
 		if resp.StatusCode >= 400 {
-			statsFinishAttempt(r, resp.StatusCode)
-			errBody, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			upstreamCancel()
-			errStr := string(errBody)
-			rejection := classifyUpstreamRejection(errBody)
-			logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
-			debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
-				"upstream_host": prof.Base,
-				"status_code":   resp.StatusCode,
-				"error_code":    modelStatusFromError(resp.StatusCode, errStr),
-			})
-			log.Printf("[#%d] 账号 %s [%s] 上游返回 HTTP %d，业务码=%s 类别=%s (耗时 %v)", reqID, acc.Path, prof.Label, resp.StatusCode, rejection.Code, rejection.Category, time.Since(startTime))
-			log.Printf("[外部接口] traceId=%s requestId=%d 上游=%s 状态码=%d 结果=失败 账号=%s", traceID, reqID, prof.Base, resp.StatusCode, acc.Path)
-			if rejection.Code == "11128" {
-				// 渠道/结构拒绝并不证明凭据失效或余额耗尽。不得换号重放、
-				// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方。
-				recordModelFailure(modelName, rejection.Code)
-				writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
-				return nil, nil, nil, false
-			}
-
-			if isQuotaExhausted(resp.StatusCode, errStr) {
-				markModelQuotaBlocked(acc, modelName, errStr)
-				if selection == selectionProbeExhausted {
-					msg := fmt.Sprintf("当前模型 %s 已在余额耗尽账号 %s 上完成受控探测并确认需要付费额度，本次不再探测其他耗尽账号", modelName, acc.Path)
-					log.Printf("[#%d] %s", reqID, msg)
-					recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
-					writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_requires_quota", msg)
-					return nil, nil, nil, false
+			retry := func() bool {
+				// Keep queued requests behind the rejection's cooldown/disable update.
+				defer acc.lock.Unlock()
+				statsFinishAttempt(r, resp.StatusCode)
+				errBody, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				upstreamCancel()
+				errStr := string(errBody)
+				rejection := classifyUpstreamRejection(errBody)
+				logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
+				debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
+					"upstream_host": prof.Base,
+					"status_code":   resp.StatusCode,
+					"error_code":    modelStatusFromError(resp.StatusCode, errStr),
+				})
+				log.Printf("[#%d] 账号 %s [%s] 上游返回 HTTP %d，业务码=%s 类别=%s (耗时 %v)", reqID, acc.Path, prof.Label, resp.StatusCode, rejection.Code, rejection.Category, time.Since(startTime))
+				log.Printf("[外部接口] traceId=%s requestId=%d 上游=%s 状态码=%d 结果=失败 账号=%s", traceID, reqID, prof.Base, resp.StatusCode, acc.Path)
+				if rejection.Code == "11128" {
+					// 渠道/结构拒绝并不证明凭据失效或余额耗尽。不得换号重放、
+					// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方。
+					recordModelFailure(modelName, rejection.Code)
+					writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
+					return false
 				}
-				lastRateErr = errStr
+
+				if isQuotaExhausted(resp.StatusCode, errStr) {
+					markModelQuotaBlocked(acc, modelName, errStr)
+					if selection == selectionProbeExhausted {
+						msg := fmt.Sprintf("当前模型 %s 已在余额耗尽账号 %s 上完成受控探测并确认需要付费额度，本次不再探测其他耗尽账号", modelName, acc.Path)
+						log.Printf("[#%d] %s", reqID, msg)
+						recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
+						writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_requires_quota", msg)
+						return false
+					}
+					lastRateErr = errStr
+					return true
+				}
+
+				if isModelRateLimited(errStr) {
+					until, ok := parseResetTime(errStr)
+					if !ok {
+						until = time.Now().Add(60 * time.Second)
+					}
+					markModelCooldown(acc, modelName, until, errStr)
+					if selection == selectionProbeExhausted {
+						msg := fmt.Sprintf("当前模型 %s 在余额耗尽账号 %s 的受控探测中触发模型级限流，本次不再探测其他耗尽账号", modelName, acc.Path)
+						recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
+						writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_rate_limited", msg)
+						return false
+					}
+					lastRateErr = errStr
+					return true
+				}
+
+				if isRateLimited(resp.StatusCode, errStr) {
+					// 429 频率限制：解析重置时间并屏蔽该账号，交由其他账号代偿
+					until, ok := parseResetTime(errStr)
+					if !ok {
+						until = time.Now().Add(60 * time.Second) // 无法解析时默认冷却 60 秒
+					}
+					markCooldown(acc, until, errStr)
+					lastRateErr = errStr
+					return true // 尝试下一个账号
+				}
+
+				if isAuthFailure(resp.StatusCode, errStr) {
+					// 授权失效（401/403 / token 无效 / 登录过期）：禁用该账号并删除凭据文件，
+					// 自动改用下一个可用账号，控制台提示用户重新登录
+					disableAccount(acc, fmt.Sprintf("上游鉴权失败 (HTTP %d): %s", resp.StatusCode, truncate(errStr, 200)))
+					lastAuthErr = errStr
+					return true // 尝试下一个账号
+				}
+
+				recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
+				writeUpstreamError(w, r, resp.StatusCode, "upstream_error", fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
+				return false
+			}()
+			if retry {
 				continue
 			}
-
-			if isModelRateLimited(errStr) {
-				until, ok := parseResetTime(errStr)
-				if !ok {
-					until = time.Now().Add(60 * time.Second)
-				}
-				markModelCooldown(acc, modelName, until, errStr)
-				if selection == selectionProbeExhausted {
-					msg := fmt.Sprintf("当前模型 %s 在余额耗尽账号 %s 的受控探测中触发模型级限流，本次不再探测其他耗尽账号", modelName, acc.Path)
-					recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
-					writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_rate_limited", msg)
-					return nil, nil, nil, false
-				}
-				lastRateErr = errStr
-				continue
-			}
-
-			if isRateLimited(resp.StatusCode, errStr) {
-				// 429 频率限制：解析重置时间并屏蔽该账号，交由其他账号代偿
-				until, ok := parseResetTime(errStr)
-				if !ok {
-					until = time.Now().Add(60 * time.Second) // 无法解析时默认冷却 60 秒
-				}
-				markCooldown(acc, until, errStr)
-				lastRateErr = errStr
-				continue // 尝试下一个账号
-			}
-
-			if isAuthFailure(resp.StatusCode, errStr) {
-				// 授权失效（401/403 / token 无效 / 登录过期）：禁用该账号并删除凭据文件，
-				// 自动改用下一个可用账号，控制台提示用户重新登录
-				disableAccount(acc, fmt.Sprintf("上游鉴权失败 (HTTP %d): %s", resp.StatusCode, truncate(errStr, 200)))
-				lastAuthErr = errStr
-				continue // 尝试下一个账号
-			}
-
-			recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
-			writeUpstreamError(w, r, resp.StatusCode, "upstream_error", fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
 			return nil, nil, nil, false
 		}
 
@@ -3924,7 +3983,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		recordModelSuccess(modelName)
 		// 用空闲看门狗包装响应体：持续有数据就永不超时，超过 upstreamIdleTimeout 无数据才中断。
 		// 关闭响应体时会一并取消上游 context，完成清理。
-		resp.Body = newIdleReadCloser(resp.Body, currentIdleTimeout(), upstreamCancel)
+		resp.Body = newIdleReadCloser(newAccountStreamBody(resp.Body, acc.lock.Unlock), currentIdleTimeout(), upstreamCancel)
 		if affKey != "" {
 			if preferPath != "" && acc.Path != preferPath {
 				affinityForget(affKey)
@@ -3971,6 +4030,11 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_json", "无效的 JSON 请求体")
+		return
+	}
+	if reqObj == nil {
+		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, true, nil)
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "请求体必须是 JSON 对象")
 		return
 	}
 
