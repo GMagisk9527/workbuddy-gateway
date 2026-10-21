@@ -116,3 +116,10 @@ func decodeCompressedBody(encoding string, raw []byte) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// withRequestBodyDecode 把解码中间件套在单个协议处理函数上：
+// 只有这些路由会读取并解压请求体，免鉴权路径与探测接口的鉴权前阶段都不碰 body。
+func withRequestBodyDecode(h http.HandlerFunc) http.HandlerFunc {
+	decoded := decodeRequestBodyMiddleware(http.HandlerFunc(h))
+	return func(w http.ResponseWriter, r *http.Request) { decoded.ServeHTTP(w, r) }
+}

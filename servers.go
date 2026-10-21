@@ -11,21 +11,24 @@ import (
 
 func newAPIHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chat/completions", handleChatCompletions)
-	mux.HandleFunc("/chat/completions", handleChatCompletions)
-	mux.HandleFunc("/v1/responses", handleResponses)
-	mux.HandleFunc("/responses", handleResponses)
-	mux.HandleFunc("/v1/messages", handleMessages)
-	mux.HandleFunc("/v1/messages/count_tokens", handleCountTokens)
+	// 请求体解码只挂在真正消费 JSON body 的协议路由上。不能包住整个 mux：
+	// /health、/ping、/ 免鉴权，/admin/probe 的鉴权在 mux 内部，若在这一层解码，
+	// 匿名请求就能先触发一次大体积解压（压缩炸弹）。
+	mux.HandleFunc("/v1/chat/completions", withRequestBodyDecode(handleChatCompletions))
+	mux.HandleFunc("/chat/completions", withRequestBodyDecode(handleChatCompletions))
+	mux.HandleFunc("/v1/responses", withRequestBodyDecode(handleResponses))
+	mux.HandleFunc("/responses", withRequestBodyDecode(handleResponses))
+	mux.HandleFunc("/v1/messages", withRequestBodyDecode(handleMessages))
+	mux.HandleFunc("/v1/messages/count_tokens", withRequestBodyDecode(handleCountTokens))
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/v1/usage", handleKeyUsage)
 	mux.HandleFunc("/models", handleModels)
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ping", handleHealth)
-	mux.HandleFunc("/admin/probe", probeAdminOnly(handleAdminProbe))
+	// 探测接口：先过管理员鉴权与回环检查，再解码请求体。
+	mux.HandleFunc("/admin/probe", probeAdminOnly(withRequestBodyDecode(handleAdminProbe)))
 	mux.HandleFunc("/", handleIndex)
-	// 解码放在鉴权与准入之后：未通过鉴权的请求不会被解压，省 CPU 也不给压缩炸弹机会。
-	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(decodeRequestBodyMiddleware(mux)))))
+	return requestAuditMiddleware(corsMiddleware(authMiddleware(keyAdmissionMiddleware(mux))))
 }
 
 func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {
