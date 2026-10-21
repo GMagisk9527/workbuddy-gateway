@@ -22,6 +22,7 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 	copied, changed := 0, 0
 	var fence byte
 	fenceLength := 0
+	codeTicks := 0
 	for start := 0; start < len(text); {
 		end := start + strings.IndexByte(text[start:], '\n')
 		if end < start {
@@ -34,7 +35,7 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 		}
 		trimmed := strings.TrimLeft(line, " ")
 		isFence := false
-		if len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
+		if codeTicks == 0 && len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
 			n := 1
 			for n < len(trimmed) && trimmed[n] == trimmed[0] {
 				n++
@@ -48,8 +49,8 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 			}
 		}
 		indentedCode := len(line)-len(trimmed) >= 4 || strings.HasPrefix(line, "\t")
-		if !isFence && fence == 0 && !indentedCode {
-			if normalized, n := normalizeDSHGUIContextLine(line); n > 0 {
+		if !isFence && fence == 0 && (!indentedCode || codeTicks > 0) {
+			if normalized, n := normalizeDSHGUIContextLine(line, &codeTicks); n > 0 {
 				out.WriteString(text[copied:start])
 				out.WriteString(normalized)
 				if len(line) != end-start {
@@ -67,25 +68,25 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 	return out.String(), changed
 }
 
-// Backtick code spans remain literal, including spans with multiple backticks.
-func normalizeDSHGUIContextLine(line string) (string, int) {
+// The delimiter state belongs to the whole text: code spans can cross lines.
+func normalizeDSHGUIContextLine(line string, codeTicks *int) (string, int) {
 	var out strings.Builder
-	copied, changed, codeTicks := 0, 0, 0
+	copied, changed := 0, 0
 	for pos := 0; pos < len(line); {
 		if line[pos] == '`' {
 			n := 1
 			for pos+n < len(line) && line[pos+n] == '`' {
 				n++
 			}
-			if codeTicks == 0 {
-				codeTicks = n
-			} else if codeTicks == n {
-				codeTicks = 0
+			if *codeTicks == 0 {
+				*codeTicks = n
+			} else if *codeTicks == n {
+				*codeTicks = 0
 			}
 			pos += n
 			continue
 		}
-		if codeTicks == 0 && strings.HasPrefix(line[pos:], dshGUIContextOpening) {
+		if *codeTicks == 0 && strings.HasPrefix(line[pos:], dshGUIContextOpening) {
 			out.WriteString(line[copied:pos])
 			out.WriteString(dshGUIContextNeutral)
 			out.WriteString(dshGUIContextOpening[len(dshGUIContextSentence):])
