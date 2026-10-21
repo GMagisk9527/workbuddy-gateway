@@ -62,4 +62,7 @@ func logSystemPromptPrefixCompatibility(r *http.Request, obj map[string]any) {
 	if sanitizeSystemPromptPrefixes(obj) > 0 {
 		recordCompatibilityRule(r, "dsh_system_identity_prefix")
 	}
+	if normalizeDSHGUIContexts(obj) > 0 {
+		recordCompatibilityRule(r, "dsh_gui_context_identity")
+	}
 }
