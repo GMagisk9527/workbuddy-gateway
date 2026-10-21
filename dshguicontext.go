@@ -1,41 +1,28 @@
 package main
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
-)
+import "strings"
 
 const (
 	dshGUIContextSentence = "You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names."
 	dshGUIContextNeutral  = "You are interacting with the user through a Web GUI whose URL the runtime context names."
-	// Exact WEB_SURFACE_PROMPT from @deepseek-ai/dsh-harness-dev-context
-	// 0.2.1-rc.2. Unknown or customized templates are deliberately unchanged.
-	dshGUIContextBytes  = 1006
-	dshGUIContextSHA256 = "7496863f7f81a12cad97ff5c643339f8ddf344b6525c191c29ab086bec5a400a"
+	// The known two-sentence opening also occurs in historical messages and in
+	// longer/customized prompt sections. Their surrounding instructions are not
+	// part of the match and must be retained byte for byte.
+	dshGUIContextOpening = dshGUIContextSentence + " When the user refers to \"this page\", \"this GUI\", or \"this app\" without naming another target, they mean this GUI."
 )
 
-func hasDSHSystemIdentity(text string) bool {
-	for _, prefix := range []string{blockedSystemPromptPrefix, replacementSystemPromptPrefix} {
-		if len(text) >= len(prefix) && strings.EqualFold(text[:len(prefix)], prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// normalizeDSHGUIContextText changes only the environment sentence of the exact
-// shipped paragraph, outside fenced code. All GUI/build instructions and every
-// other byte are retained. This is not a general product-name replacement.
+// normalizeDSHGUIContextText changes only the environment sentence of the known
+// two-sentence opening, outside code. All surrounding instructions are retained.
+// It does not require an exact version of the whole paragraph or a DSH header.
 func normalizeDSHGUIContextText(text string) (string, int) {
-	if !strings.Contains(text, dshGUIContextSentence) {
+	if !strings.Contains(text, dshGUIContextOpening) {
 		return text, 0
 	}
 	var out strings.Builder
 	copied, changed := 0, 0
 	var fence byte
 	fenceLength := 0
-	previousBlank := true
+	codeTicks := 0
 	for start := 0; start < len(text); {
 		end := start + strings.IndexByte(text[start:], '\n')
 		if end < start {
@@ -46,10 +33,9 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 		if next < len(text) {
 			next++
 		}
-		followingBlank := next == len(text) || text[next] == '\n' || strings.HasPrefix(text[next:], "\r\n")
 		trimmed := strings.TrimLeft(line, " ")
 		isFence := false
-		if len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
+		if codeTicks == 0 && len(line)-len(trimmed) <= 3 && len(trimmed) >= 3 && (trimmed[0] == '`' || trimmed[0] == '~') {
 			n := 1
 			for n < len(trimmed) && trimmed[n] == trimmed[0] {
 				n++
@@ -62,16 +48,17 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 				}
 			}
 		}
-		if !isFence && fence == 0 && previousBlank && followingBlank && len(line) == dshGUIContextBytes && strings.HasPrefix(line, dshGUIContextSentence) {
-			digest := sha256.Sum256([]byte(line))
-			if hex.EncodeToString(digest[:]) == dshGUIContextSHA256 {
+		indentedCode := len(line)-len(trimmed) >= 4 || strings.HasPrefix(line, "\t")
+		if !isFence && fence == 0 && (!indentedCode || codeTicks > 0) {
+			if normalized, n := normalizeDSHGUIContextLine(line, &codeTicks); n > 0 {
 				out.WriteString(text[copied:start])
-				out.WriteString(dshGUIContextNeutral)
-				out.WriteString(text[start+len(dshGUIContextSentence) : end])
-				copied, changed = end, changed+1
+				out.WriteString(normalized)
+				if len(line) != end-start {
+					out.WriteByte('\r')
+				}
+				copied, changed = end, changed+n
 			}
 		}
-		previousBlank = strings.TrimSpace(line) == ""
 		start = next
 	}
 	if changed == 0 {
@@ -81,38 +68,57 @@ func normalizeDSHGUIContextText(text string) (string, int) {
 	return out.String(), changed
 }
 
+// The delimiter state belongs to the whole text: code spans can cross lines.
+func normalizeDSHGUIContextLine(line string, codeTicks *int) (string, int) {
+	var out strings.Builder
+	copied, changed := 0, 0
+	for pos := 0; pos < len(line); {
+		if line[pos] == '`' {
+			n := 1
+			for pos+n < len(line) && line[pos+n] == '`' {
+				n++
+			}
+			if *codeTicks == 0 {
+				*codeTicks = n
+			} else if *codeTicks == n {
+				*codeTicks = 0
+			}
+			pos += n
+			continue
+		}
+		if *codeTicks == 0 && strings.HasPrefix(line[pos:], dshGUIContextOpening) {
+			out.WriteString(line[copied:pos])
+			out.WriteString(dshGUIContextNeutral)
+			out.WriteString(dshGUIContextOpening[len(dshGUIContextSentence):])
+			pos += len(dshGUIContextOpening)
+			copied, changed = pos, changed+1
+		} else {
+			pos++
+		}
+	}
+	if changed == 0 {
+		return line, 0
+	}
+	out.WriteString(line[copied:])
+	return out.String(), changed
+}
+
 func normalizeDSHGUIContexts(obj map[string]any) int {
 	messages, _ := obj["messages"].([]any)
 	changed := 0
 	for _, raw := range messages {
 		message, ok := raw.(map[string]any)
-		if !ok || roleOfMessage(message) != "system" {
+		if !ok || (roleOfMessage(message) != "system" && roleOfMessage(message) != "assistant") {
 			continue
 		}
 		switch content := message["content"].(type) {
 		case string:
-			if hasDSHSystemIdentity(content) {
-				normalized, n := normalizeDSHGUIContextText(content)
-				if n > 0 {
-					message["content"] = normalized
-					changed += n
-				}
+			normalized, n := normalizeDSHGUIContextText(content)
+			if n > 0 {
+				message["content"] = normalized
+				changed += n
 			}
 		case []any:
-			isDSH := false
-			for _, rawBlock := range content {
-				block, _ := rawBlock.(map[string]any)
-				if block["type"] != "text" {
-					continue
-				}
-				if text, ok := block["text"].(string); ok {
-					isDSH = hasDSHSystemIdentity(text)
-					break
-				}
-			}
-			if !isDSH {
-				continue
-			}
 			for _, rawBlock := range content {
 				block, _ := rawBlock.(map[string]any)
 				if block["type"] != "text" {

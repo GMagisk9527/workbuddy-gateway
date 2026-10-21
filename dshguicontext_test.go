@@ -17,8 +17,11 @@ var dshGUIContextFixture string
 
 func TestDSHGUIContextExactTemplateAndBoundaries(t *testing.T) {
 	digest := sha256.Sum256([]byte(dshGUIContextFixture))
-	if len(dshGUIContextFixture) != dshGUIContextBytes || hex.EncodeToString(digest[:]) != dshGUIContextSHA256 {
+	if len(dshGUIContextFixture) != 1006 || hex.EncodeToString(digest[:]) != "7496863f7f81a12cad97ff5c643339f8ddf344b6525c191c29ab086bec5a400a" {
 		t.Fatal("fixture must match the documented shipped template")
+	}
+	if len(dshGUIContextOpening) != 221 || !strings.HasPrefix(dshGUIContextFixture, dshGUIContextOpening) {
+		t.Fatal("known opening must match the first two shipped sentences")
 	}
 	neutral := dshGUIContextNeutral + dshGUIContextFixture[len(dshGUIContextSentence):]
 	for _, tc := range []struct {
@@ -28,9 +31,15 @@ func TestDSHGUIContextExactTemplateAndBoundaries(t *testing.T) {
 		{"paragraph", dshGUIContextFixture, neutral, 1},
 		{"instruction tails", "Keep instructions.\n\n" + dshGUIContextFixture + "\n\nKeep code.", "Keep instructions.\n\n" + neutral + "\n\nKeep code.", 1},
 		{"windows newlines", "Keep.\r\n\r\n" + dshGUIContextFixture + "\r\n\r\nKeep.", "Keep.\r\n\r\n" + neutral + "\r\n\r\nKeep.", 1},
-		{"unknown template", strings.Replace(dshGUIContextFixture, "The browser", "Our browser", 1), strings.Replace(dshGUIContextFixture, "The browser", "Our browser", 1), 0},
-		{"inline quote", "Example: " + dshGUIContextFixture, "Example: " + dshGUIContextFixture, 0},
-		{"appended instructions", dshGUIContextFixture + " Extra instructions.", dshGUIContextFixture + " Extra instructions.", 0},
+		{"changed functional tail", strings.Replace(dshGUIContextFixture, "The browser", "Our browser", 1), strings.Replace(neutral, "The browser", "Our browser", 1), 1},
+		{"middle of text", "Context: " + dshGUIContextFixture, "Context: " + neutral, 1},
+		{"appended instructions", dshGUIContextFixture + " Extra instructions.", neutral + " Extra instructions.", 1},
+		{"unknown opening", strings.Replace(dshGUIContextFixture, "they mean this GUI", "they mean the GUI", 1), strings.Replace(dshGUIContextFixture, "they mean this GUI", "they mean the GUI", 1), 0},
+		{"single sentence", dshGUIContextSentence, dshGUIContextSentence, 0},
+		{"inline code", "``" + dshGUIContextFixture + "``", "``" + dshGUIContextFixture + "``", 0},
+		{"indented code", "    " + dshGUIContextFixture, "    " + dshGUIContextFixture, 0},
+		{"tabbed code", "\t" + dshGUIContextFixture, "\t" + dshGUIContextFixture, 0},
+		{"two occurrences", dshGUIContextOpening + "\n" + dshGUIContextOpening, strings.ReplaceAll(dshGUIContextOpening, dshGUIContextSentence, dshGUIContextNeutral) + "\n" + strings.ReplaceAll(dshGUIContextOpening, dshGUIContextSentence, dshGUIContextNeutral), 2},
 		{"backtick code", "```text\n\n" + dshGUIContextFixture + "\n\n```", "```text\n\n" + dshGUIContextFixture + "\n\n```", 0},
 		{"tilde code", "~~~text\n\n" + dshGUIContextFixture + "\n\n~~~", "~~~text\n\n" + dshGUIContextFixture + "\n\n~~~", 0},
 		{"after code", "```text\nexample\n```\n\n" + dshGUIContextFixture, "```text\nexample\n```\n\n" + neutral, 1},
@@ -64,7 +73,7 @@ func TestDSHGUIContextRoleAndProvenanceScope(t *testing.T) {
 					message := map[string]any{"role": role, "content": content}
 					obj := map[string]any{"messages": []any{message}}
 					want := 0
-					if role == "system" && identified {
+					if role == "system" || role == "assistant" {
 						want = 1
 					}
 					if n := normalizeDSHGUIContexts(obj); n != want {

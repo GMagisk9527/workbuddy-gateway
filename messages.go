@@ -138,6 +138,19 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalize text parts before the converter joins assistant/system blocks;
+	// afterwards a fingerprint at the start of a later part is no longer visible.
+	compatMessages, _ := msgReq["messages"].([]any)
+	var systemMessage map[string]any
+	if system, exists := msgReq["system"]; exists {
+		systemMessage = map[string]any{"role": "system", "content": system}
+		compatMessages = append([]any{systemMessage}, compatMessages...)
+	}
+	logSystemPromptPrefixCompatibility(r, map[string]any{"messages": compatMessages})
+	if systemMessage != nil {
+		msgReq["system"] = systemMessage["content"]
+	}
+
 	chatReq, err := anthropicToChatRequest(msgReq, modelName)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -150,8 +163,8 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	if sanitizeMessages(chatReq) {
 		recordCompatibilityRule(r, "developer_to_system")
 	}
-	logSystemPromptPrefixCompatibility(r, chatReq)
 	prepareSystemPromptForUpstream(chatReq, r, reqID, w.Header().Get("X-Trace-ID"))
+	logSystemPromptPrefixCompatibility(r, chatReq)
 	// 输出预算归一化：客户端未声明 max_tokens 时补模型输出上限，
 	// 避免上游默认预留 384000 导致长会话在远未到窗口上限时被 11133 拒绝
 	ensureUpstreamMaxTokens(chatReq, r, reqID, w.Header().Get("X-Trace-ID"), modelName)
