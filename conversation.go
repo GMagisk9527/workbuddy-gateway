@@ -21,10 +21,11 @@ const (
 type conversationContextKey struct{}
 
 type conversationHeaders struct {
-	ID        string
-	RequestID string
-	MessageID string
-	Source    string
+	ID         string
+	RequestID  string
+	MessageID  string
+	Source     string
+	diagnostic requestCompatibility
 }
 
 // 非 UUID 的客户端会话键规范化为 UUIDv5，不直接发送或记录任意客户端文本。
@@ -46,6 +47,10 @@ func usableConversationSeed(value string) string {
 
 func normalizedConversationID(value, kind, caller string) string {
 	if id, err := uuid.Parse(value); err == nil && id != uuid.Nil {
+		if kind == "conversation" && caller != "" {
+			// 客户端 UUID 也按 API 调用方隔离，避免两把 Key 共享上游会话身份。
+			return uuid.NewSHA1(conversationNamespace, []byte(caller+"\x00"+kind+"\x00"+id.String())).String()
+		}
 		// 保留官方主路径所用的 32 位无连字符格式；其他 UUID 表示规范为标准格式。
 		if len(value) == 32 {
 			return strings.ToLower(value)
@@ -73,6 +78,7 @@ func prepareConversationContext(r *http.Request, body map[string]any) *conversat
 	h := &conversationHeaders{
 		ID: uuid.NewString(), RequestID: uuid.NewString(),
 		MessageID: strings.ReplaceAll(uuid.NewString(), "-", ""), Source: "独立生成",
+		diagnostic: inspectRequestCompatibility(r, body),
 	}
 	if r == nil {
 		return h
@@ -95,7 +101,16 @@ func prepareConversationContext(r *http.Request, body map[string]any) *conversat
 	seed := usableConversationSeed(r.Header.Get(conversationIDHeader))
 	if seed != "" {
 		h.Source = "客户端会话头"
+	} else if seed = usableConversationSeed(r.Header.Get("thread-id")); seed != "" {
+		// Codex 当前版本把线程和客户端进程会话分别放在 thread-id/session-id。
+		// 子代理拥有不同 thread-id；不能被共享的 session-id 合并到父线程。
+		h.Source = "客户端线程头"
 	} else if seed = usableConversationSeed(r.Header.Get("X-Session-ID")); seed != "" {
+		h.Source = "客户端Session头"
+	} else if seed = usableConversationSeed(r.Header.Get("session-id")); seed != "" {
+		h.Source = "客户端Session头"
+	} else if seed = usableConversationSeed(r.Header.Get("session_id")); seed != "" {
+		// DSH/pi-ai 的 OpenAI Responses 适配器（包括压缩请求）使用下划线拼写。
 		h.Source = "客户端Session头"
 	} else if seed = bodyValue(body, "conversation_id", "conversationId", "session_id", "sessionId"); seed != "" {
 		h.Source = "请求会话字段"
@@ -104,6 +119,9 @@ func prepareConversationContext(r *http.Request, body map[string]any) *conversat
 	}
 	if seed != "" {
 		h.ID = normalizedConversationID(seed, "conversation", caller)
+		h.diagnostic.rules = append(h.diagnostic.rules, "session_id_normalized")
+	} else {
+		h.diagnostic.rules = append(h.diagnostic.rules, "session_id_generated")
 	}
 	for _, field := range []struct {
 		header string

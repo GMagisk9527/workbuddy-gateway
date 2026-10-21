@@ -113,7 +113,7 @@ func TestConversationSessionSeedsAreStableIsolatedAndValidated(t *testing.T) {
 	// Valid explicit conversation header wins over a conflicting metadata session.
 	explicit := uuid.NewString()
 	h := makeRequest("caller-a", conversationIDHeader, explicit, body)
-	if h.ID != explicit {
+	if h.ID != normalizedConversationID(explicit, "conversation", apiKeyFingerprint("Bearer caller-a")) {
 		t.Fatal("client conversation header must have priority")
 	}
 }

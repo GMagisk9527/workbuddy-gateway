@@ -86,9 +86,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatReq["stream"] = true // 上游强制流式，非流式由网关本地聚合
+	recordCompatibilityRule(r, "responses_to_chat")
 
 	applyThinkingRules(chatReq, modelName)
-	sanitizeMessages(chatReq)
+	if sanitizeMessages(chatReq) {
+		recordCompatibilityRule(r, "developer_to_system")
+	}
 	prepareSystemPromptForUpstream(chatReq, r, reqID, w.Header().Get("X-Trace-ID"))
 	// 输出预算归一化：客户端未声明 max_tokens 时补模型输出上限，
 	// 避免上游默认预留 384000 导致长会话在远未到窗口上限时被 11133 拒绝
@@ -125,6 +128,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 // responsesToChatRequest 将 Responses 请求体转换为上游 Chat Completions 请求体。
 func responsesToChatRequest(respReq map[string]any, modelName string) (map[string]any, error) {
+	if err := validateResponsesReplay(respReq); err != nil {
+		return nil, err
+	}
 	chat := map[string]any{"model": modelName}
 
 	messages := []any{}
@@ -213,11 +219,52 @@ func responsesToChatRequest(respReq map[string]any, modelName string) (map[strin
 	if v, ok := respReq["max_output_tokens"]; ok && v != nil {
 		chat["max_tokens"] = v
 	}
+	for _, key := range []string{"parallel_tool_calls", "service_tier", "prompt_cache_key", "prompt_cache_retention", "safety_identifier", "user"} {
+		if v, ok := respReq[key]; ok && v != nil {
+			chat[key] = v
+		}
+	}
+	if text, ok := respReq["text"].(map[string]any); ok {
+		if format, ok := text["format"].(map[string]any); ok {
+			if format["type"] == "json_schema" {
+				schema := map[string]any{}
+				for _, key := range []string{"name", "description", "schema", "strict"} {
+					if v, ok := format[key]; ok {
+						schema[key] = v
+					}
+				}
+				chat["response_format"] = map[string]any{"type": "json_schema", "json_schema": schema}
+			} else {
+				chat["response_format"] = format
+			}
+		}
+		if v, ok := text["verbosity"]; ok && v != nil {
+			chat["verbosity"] = v
+		}
+	}
 	if tools := convertResponsesTools(respReq["tools"]); len(tools) > 0 {
 		chat["tools"] = tools
 	}
 	if tc := convertResponsesToolChoice(respReq["tool_choice"]); tc != nil {
 		chat["tool_choice"] = tc
+		if named, ok := tc.(map[string]any); ok {
+			// 本项目的 Chat 上游只接受字符串 tool_choice。与 Messages 入口一致，
+			// 保留命名工具的 schema/strict，并只向上游暴露选中的函数。
+			fn, _ := named["function"].(map[string]any)
+			tools, _ := chat["tools"].([]any)
+			var selected []any
+			for _, raw := range tools {
+				tool, _ := raw.(map[string]any)
+				candidate, _ := tool["function"].(map[string]any)
+				if candidate["name"] == fn["name"] {
+					selected = append(selected, tool)
+				}
+			}
+			if len(selected) == 0 {
+				return nil, fmt.Errorf("tool_choice 指定的工具未在 tools 中定义")
+			}
+			chat["tools"], chat["tool_choice"] = selected, "required"
+		}
 	}
 	if reasoning, ok := respReq["reasoning"].(map[string]any); ok {
 		if effort, ok := reasoning["effort"].(string); ok && effort != "" && effort != "none" {
@@ -394,7 +441,11 @@ func convertResponsesContent(content any) any {
 			case "input_image":
 				url, _ := p["image_url"].(string)
 				if url != "" {
-					parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+					image := map[string]any{"url": url}
+					if detail, ok := p["detail"]; ok {
+						image["detail"] = detail
+					}
+					parts = append(parts, map[string]any{"type": "image_url", "image_url": image})
 				}
 			}
 		}
@@ -523,12 +574,14 @@ func convertResponsesTools(toolsAny any) []any {
 		name, _ := t["name"].(string)
 		desc, _ := t["description"].(string)
 		params := t["parameters"]
+		strict, hasStrict := t["strict"]
 		if name == "" {
 			// 兼容旧式嵌套 {type:"function", function:{...}}
 			if fn, ok := t["function"].(map[string]any); ok {
 				name, _ = fn["name"].(string)
 				desc, _ = fn["description"].(string)
 				params = fn["parameters"]
+				strict, hasStrict = fn["strict"]
 			}
 		}
 		if name == "" {
@@ -540,6 +593,9 @@ func convertResponsesTools(toolsAny any) []any {
 		}
 		if params != nil {
 			fn["parameters"] = params
+		}
+		if hasStrict {
+			fn["strict"] = strict
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
@@ -576,6 +632,9 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+			return
+		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),
@@ -708,7 +767,7 @@ func buildResponsesEnvelope(id, model string, createdAt int64) map[string]any {
 		"parallel_tool_calls":  true,
 		"previous_response_id": nil,
 		"reasoning":            map[string]any{"effort": nil, "summary": nil},
-		"store":                true,
+		"store":                false, // 网关不保存可由 previous_response_id 查询的响应。
 		"temperature":          1.0,
 		"text":                 map[string]any{"format": map[string]any{"type": "text"}},
 		"tool_choice":          "auto",
@@ -864,6 +923,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	var textPrefix, reasoningPrefix []byte
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
+	var streamRejection *upstreamStreamRejection
 	for scanner.Scan() {
 		if sseWriteErr != nil {
 			break
@@ -875,6 +935,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if bytes.Equal(data, doneMarker) {
 			sawDone = true
 			continue
+		}
+		if streamRejection = detectUpstreamStreamRejection(data); streamRejection != nil {
+			break
 		}
 		if mode == int32(fastPathOn) && parseResponsesChunk(data, &view) {
 			// 快路径：结构扫描 + 直接拼装事件（见 responsesfast.go）
@@ -1047,6 +1110,10 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 	scanErr := scanner.Err()
+	if streamRejection != nil {
+		scanErr = streamRejection
+		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+	}
 	completeTokenStream(body, scanErr == nil && finishReason != "")
 	if len(usageRaw) > 0 {
 		var u map[string]any
@@ -1066,12 +1133,16 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		// 上游流中断时不能伪造 response.completed 与 [DONE]：那会让下游把残缺输出
 		// 当成完整结果。改为下发一个 failed 事件并直接返回，明确告知本次响应不完整。
 		reason := "上游流式响应中断，本次回复不完整"
+		code := "stream_interrupted"
+		if streamRejection != nil {
+			reason, code = streamRejection.clientMessage(), streamRejection.info.Code
+		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", upstreamIdleTimeout)
 		}
 		failed := buildResponsesEnvelope(respID, modelName, created)
 		failed["status"] = "failed"
-		failed["error"] = map[string]any{"code": "stream_interrupted", "message": reason}
+		failed["error"] = map[string]any{"code": code, "message": reason}
 		emit("response.failed", map[string]any{"response": failed})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流式读取 账号=%s 异常=%v 业务影响=本次响应不完整，已下发 response.failed 而非伪造完成", debugTraceID(r), reqID, acc.Path, scanErr)
 		recordModelLatency(modelName, time.Since(startTime))

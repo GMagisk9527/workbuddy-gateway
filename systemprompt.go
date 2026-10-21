@@ -47,7 +47,17 @@ func configuredFallbackSystemPrompt() string {
 // 不删除、不覆盖客户端原有 system。content 数组保留原来的内容块顺序，
 // 强制文本作为最后一个内容块追加在数组末尾。
 func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, requestID uint64, traceID string) {
+	before, _ := obj["messages"].([]any)
+	leadingRole := ""
+	if len(before) > 0 {
+		leadingRole = roleOfMessage(before[0])
+	}
 	injected := ensureLeadingSystemMessage(obj)
+	if injected {
+		recordCompatibilityRule(r, "leading_system_injected")
+	} else if leadingRole != "system" {
+		recordCompatibilityRule(r, "leading_system_normalized")
+	}
 	settings := configuredSystemPrompts()
 	force := settings.force
 	forced := strings.TrimSpace(force) != ""
@@ -61,11 +71,16 @@ func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, request
 				kind = "字符串"
 				if content == "" {
 					first["content"] = force
-				} else {
+				} else if content != force && !strings.HasSuffix(content, "\n\n"+force) {
 					first["content"] = content + "\n\n" + force
 				}
 			case []any:
 				kind = "内容块数组"
+				if len(content) > 0 {
+					if last, ok := content[len(content)-1].(map[string]any); ok && last["type"] == "text" && last["text"] == force {
+						break // 重复执行兼容规则时不重复追加同一配置指令。
+					}
+				}
 				blocks := make([]any, 0, len(content)+1)
 				blocks = append(blocks, content...)
 				blocks = append(blocks, map[string]any{"type": "text", "text": force})
@@ -79,6 +94,9 @@ func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, request
 				kind = "未支持的内容类型，已跳过强制后置"
 			}
 		}
+	}
+	if forced {
+		recordCompatibilityRule(r, "configured_system_appended")
 	}
 	fallbackSource := "未使用（客户端提供system）"
 	if injected {

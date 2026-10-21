@@ -139,9 +139,12 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chatReq["stream"] = true // 上游强制流式，非流式由网关本地聚合
+	recordCompatibilityRule(r, "messages_to_chat")
 
 	applyThinkingRules(chatReq, modelName)
-	sanitizeMessages(chatReq)
+	if sanitizeMessages(chatReq) {
+		recordCompatibilityRule(r, "developer_to_system")
+	}
 	prepareSystemPromptForUpstream(chatReq, r, reqID, w.Header().Get("X-Trace-ID"))
 	// 输出预算归一化：客户端未声明 max_tokens 时补模型输出上限，
 	// 避免上游默认预留 384000 导致长会话在远未到窗口上限时被 11133 拒绝
@@ -862,6 +865,9 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 		if data == "" || data == "[DONE]" {
 			continue
 		}
+		if rejection := detectUpstreamStreamRejection([]byte(data)); rejection != nil {
+			return rejection
+		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(data), &chunk) != nil {
 			continue
@@ -923,11 +929,15 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		// 上游流中断时不能伪造 message_stop：那会让客户端把残缺输出当成完整
 		// 结果。改为下发 error 事件并直接返回，明确告知本次响应不完整。
 		reason := "上游流式响应中断，本次回复不完整"
+		code := "stream_interrupted"
+		if rejection := reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr); rejection != nil {
+			reason, code = rejection.clientMessage(), rejection.info.Code
+		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", currentIdleTimeout())
 		}
 		writeEvent(state.emit("error", map[string]any{
-			"error": map[string]any{"type": "api_error", "message": reason},
+			"error": map[string]any{"type": "api_error", "code": code, "message": reason},
 		}))
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流式读取 账号=%s 异常=%v 业务影响=本次响应不完整，已下发 error 事件而非伪造完成", debugTraceID(r), reqID, acc.Path, scanErr)
 		recordModelLatency(modelName, time.Since(startTime))
@@ -964,6 +974,9 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	if err := scanUpstreamSSE(body, state, nil); err != nil {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+			return
+		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),

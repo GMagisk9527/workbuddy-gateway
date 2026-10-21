@@ -313,6 +313,7 @@ func logToolSequenceRepair(r *http.Request, traceID string, requestID uint64, mo
 	result := "unchanged"
 	if report.changed() {
 		result = "repaired"
+		recordCompatibilityRule(r, "tool_sequence_repaired")
 		log.Printf("[ToolSequenceRepair] traceId=%s requestId=%d 模型=%s 结果=已修复 原消息=%d 修复后=%d 并行批次=%d 移出插入消息=%d 合并调用消息=%d 删除无结果调用=%d 删除孤儿或重复结果=%d 业务影响=避免上游11148工具调用序列断裂",
 			traceID, requestID, model, report.OriginalMessages, report.FinalMessages, report.ParallelBatches,
 			report.MovedMessages, report.MergedCallMessages, report.DroppedCalls, report.DroppedOutputs)

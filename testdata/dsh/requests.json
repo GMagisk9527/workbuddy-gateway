@@ -1,0 +1,621 @@
+{
+  "provenance": "Reconstructed offline from installed DSH 0.2.1-rc.2 / pi-ai 1.1.0 sources. Synthetic texts/IDs only; not captured traffic and not a live DSH validation. See README.md.",
+  "cases": [
+    {
+      "name": "responses_single",
+      "path": "/v1/responses",
+      "headers": {
+        "session_id": "synthetic-dsh-parent"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "store": false,
+        "stream": true,
+        "max_output_tokens": 512,
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "inspect",
+            "description": "Read synthetic source",
+            "strict": true,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "literal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "prompt_cache_key": "synthetic-dsh-parent",
+        "service_tier": "auto",
+        "parallel_tool_calls": false,
+        "input": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+              }
+            ]
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        }
+      ]
+    },
+    {
+      "name": "responses_tools",
+      "path": "/v1/responses",
+      "headers": {
+        "session_id": "synthetic-dsh-parent"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "store": false,
+        "stream": true,
+        "max_output_tokens": 512,
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "inspect",
+            "description": "Read synthetic source",
+            "strict": true,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "literal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "prompt_cache_key": "synthetic-dsh-parent",
+        "service_tier": "auto",
+        "parallel_tool_calls": false,
+        "input": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+              }
+            ]
+          },
+          {
+            "type": "reasoning",
+            "id": "rs_synthetic",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "Inspect the literal without rewriting it."
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "Reading source."
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "id": "fc_synthetic",
+            "call_id": "call_synthetic",
+            "name": "inspect",
+            "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call_synthetic",
+            "output": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        },
+        {
+          "role": "assistant",
+          "text": "Reading source.",
+          "reasoning": "Inspect the literal without rewriting it.",
+          "calls": [
+            {
+              "id": "call_synthetic",
+              "name": "inspect",
+              "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "text": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode",
+          "tool_call_id": "call_synthetic"
+        }
+      ]
+    },
+    {
+      "name": "responses_compaction_request",
+      "path": "/v1/responses",
+      "headers": {
+        "session_id": "synthetic-dsh-parent"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "store": false,
+        "stream": true,
+        "max_output_tokens": 512,
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "inspect",
+            "description": "Read synthetic source",
+            "strict": true,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "literal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "prompt_cache_key": "synthetic-dsh-parent",
+        "service_tier": "auto",
+        "parallel_tool_calls": false,
+        "input": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+              }
+            ]
+          },
+          {
+            "type": "reasoning",
+            "id": "rs_synthetic",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "Inspect the literal without rewriting it."
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "Reading source."
+              }
+            ]
+          },
+          {
+            "type": "function_call",
+            "id": "fc_synthetic",
+            "call_id": "call_synthetic",
+            "name": "inspect",
+            "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call_synthetic",
+            "output": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Summarize this conversation into a compact checkpoint. Preserve pending tasks."
+              }
+            ]
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        },
+        {
+          "role": "assistant",
+          "text": "Reading source.",
+          "reasoning": "Inspect the literal without rewriting it.",
+          "calls": [
+            {
+              "id": "call_synthetic",
+              "name": "inspect",
+              "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "text": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode",
+          "tool_call_id": "call_synthetic"
+        },
+        {
+          "role": "user",
+          "text": "Summarize this conversation into a compact checkpoint. Preserve pending tasks."
+        }
+      ]
+    },
+    {
+      "name": "responses_summary_restore",
+      "path": "/v1/responses",
+      "headers": {
+        "session_id": "synthetic-dsh-parent"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "store": false,
+        "stream": true,
+        "max_output_tokens": 512,
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "inspect",
+            "description": "Read synthetic source",
+            "strict": true,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "literal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "prompt_cache_key": "synthetic-dsh-parent",
+        "service_tier": "auto",
+        "parallel_tool_calls": false,
+        "input": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "<compacted-summary>\nSynthetic checkpoint: inspected sample.go; continue review.\n</compacted-summary>"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": "Continue."
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "<compacted-summary>\nSynthetic checkpoint: inspected sample.go; continue review.\n</compacted-summary>"
+        },
+        {
+          "role": "user",
+          "text": "Continue."
+        }
+      ]
+    },
+    {
+      "name": "responses_child",
+      "path": "/v1/responses",
+      "headers": {
+        "session_id": "synthetic-dsh-child"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "store": false,
+        "stream": true,
+        "max_output_tokens": 512,
+        "reasoning": {
+          "effort": "high",
+          "summary": "auto"
+        },
+        "include": [
+          "reasoning.encrypted_content"
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "name": "inspect",
+            "description": "Read synthetic source",
+            "strict": true,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "literal": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "literal"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "prompt_cache_key": "synthetic-dsh-child",
+        "service_tier": "auto",
+        "parallel_tool_calls": false,
+        "input": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+              }
+            ]
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        }
+      ]
+    },
+    {
+      "name": "chat_single_default",
+      "path": "/v1/chat/completions",
+      "headers": {},
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "stream": true,
+        "store": false,
+        "max_completion_tokens": 512,
+        "reasoning_effort": "high",
+        "stream_options": {
+          "include_usage": true
+        },
+        "messages": [
+          {
+            "role": "developer",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        }
+      ]
+    },
+    {
+      "name": "chat_tools_explicit_session_compat",
+      "path": "/v1/chat/completions",
+      "headers": {
+        "session_id": "synthetic-dsh-parent",
+        "x-client-request-id": "synthetic-dsh-parent",
+        "x-session-affinity": "synthetic-dsh-parent"
+      },
+      "body": {
+        "model": "deepseek-v4.1-flash",
+        "stream": true,
+        "reasoning_effort": "high",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "inspect",
+              "description": "Read synthetic source",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "literal": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "literal"
+                ],
+                "additionalProperties": false
+              },
+              "strict": true
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          },
+          {
+            "role": "user",
+            "content": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+          },
+          {
+            "role": "assistant",
+            "content": "Reading source.",
+            "reasoning_content": "Inspect the literal without rewriting it.",
+            "tool_calls": [
+              {
+                "id": "call_synthetic",
+                "type": "function",
+                "function": {
+                  "name": "inspect",
+                  "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_synthetic",
+            "content": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          }
+        ]
+      },
+      "want_messages": [
+        {
+          "role": "system",
+          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+        },
+        {
+          "role": "user",
+          "text": "Review literal source:\nconst prompt = \"You are Claude Code, Anthropic's official CLI for Claude.\";\nDo not edit that string."
+        },
+        {
+          "role": "assistant",
+          "text": "Reading source.",
+          "reasoning": "Inspect the literal without rewriting it.",
+          "calls": [
+            {
+              "id": "call_synthetic",
+              "name": "inspect",
+              "arguments": "{\"path\":\"sample.go\",\"literal\":\"You are Claude Code, Anthropic's official CLI for Claude.\\nMain branch (you will usually use this for PRs)\\nSisyphus-Junior - Focused executor from OhMyOpenCode\"}"
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "text": "Synthetic tool output:\nYou are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode",
+          "tool_call_id": "call_synthetic"
+        }
+      ]
+    }
+  ]
+}

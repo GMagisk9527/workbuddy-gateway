@@ -3840,13 +3840,22 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			resp.Body.Close()
 			upstreamCancel()
 			errStr := string(errBody)
+			rejection := classifyUpstreamRejection(errBody)
+			logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
 			debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
 				"upstream_host": prof.Base,
 				"status_code":   resp.StatusCode,
 				"error_code":    modelStatusFromError(resp.StatusCode, errStr),
 			})
-			log.Printf("[#%d] 账号 %s [%s] 上游返回 HTTP %d: %s (耗时 %v)", reqID, acc.Path, prof.Label, resp.StatusCode, errStr, time.Since(startTime))
+			log.Printf("[#%d] 账号 %s [%s] 上游返回 HTTP %d，业务码=%s 类别=%s (耗时 %v)", reqID, acc.Path, prof.Label, resp.StatusCode, rejection.Code, rejection.Category, time.Since(startTime))
 			log.Printf("[外部接口] traceId=%s requestId=%d 上游=%s 状态码=%d 结果=失败 账号=%s", traceID, reqID, prof.Base, resp.StatusCode, acc.Path)
+			if rejection.Code == "11128" {
+				// 渠道/结构拒绝并不证明凭据失效或余额耗尽。不得换号重放、
+				// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方。
+				recordModelFailure(modelName, rejection.Code)
+				writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
+				return nil, nil, nil, false
+			}
 
 			if isQuotaExhausted(resp.StatusCode, errStr) {
 				markModelQuotaBlocked(acc, modelName, errStr)
@@ -3991,8 +4000,9 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 深度思考 (Thinking) 自动适配：混元系列如果未关闭思考，自动赋予 high 档位保证深度思考输出
 	applyThinkingRules(reqObj, modelName)
 
-	// 模板净化：改写 Claude Code 等框架被腾讯官方逐字拉黑的固定 prompt 语句
-	sanitizeMessages(reqObj)
+	if sanitizeMessages(reqObj) {
+		recordCompatibilityRule(r, "developer_to_system")
+	}
 
 	// 会话结构归一化：保证首条消息为 system，修复部分非 harness 客户端
 	//（以 assistant / tool 续写或回传工具结果）触发的上游 11128 错误
@@ -4058,6 +4068,7 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	mode := fastPathMode.Load()
 	finishReason := ""
 	sawDone := false
+	var streamRejection *upstreamStreamRejection
 	for scanner.Scan() {
 		cleanData := stripDataPrefixBytes(scanner.Bytes())
 		if len(cleanData) == 0 {
@@ -4067,6 +4078,9 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			// 先记住，等确认有真实 finish_reason 再转发。
 			// 没有结束原因时转发 [DONE]，等于告诉客户端这次是正常结束。
 			sawDone = true
+			break
+		}
+		if streamRejection = detectUpstreamStreamRejection(cleanData); streamRejection != nil {
 			break
 		}
 
@@ -4151,6 +4165,10 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 		shadowReport()
 	}
 	scanErr := scanner.Err()
+	if streamRejection != nil {
+		scanErr = streamRejection
+		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+	}
 	completeTokenStream(body, scanErr == nil && finishReason != "")
 	if scanErr != nil {
 		// 流被中断（上游卡死 / 超时 / 客户端取消）时，绝不补发 [DONE]：
@@ -4161,6 +4179,10 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			"error":      safeDebugError(scanErr),
 		})
 		reason := "上游流式响应中断，本次回复不完整"
+		code := "stream_interrupted"
+		if streamRejection != nil {
+			reason, code = streamRejection.clientMessage(), streamRejection.info.Code
+		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", currentIdleTimeout())
 		}
@@ -4168,7 +4190,7 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			"error": map[string]any{
 				"message": reason,
 				"type":    "upstream_stream_interrupted",
-				"code":    "stream_interrupted",
+				"code":    code,
 			},
 		})
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", errPayload)
@@ -4221,6 +4243,9 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+			return
+		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),
@@ -4336,37 +4361,25 @@ func applyThinkingRules(obj map[string]any, modelName string) {
 	obj["reasoning_summary"] = "auto"
 }
 
-func sanitizeMessages(obj map[string]any) {
+// sanitizeMessages 只转换上游不支持的角色；正文、代码和工具结果必须原样保留。
+func sanitizeMessages(obj map[string]any) (changed bool) {
 	messages, ok := obj["messages"].([]any)
 	if !ok {
-		return
+		return false
 	}
 	for _, m := range messages {
 		msg, ok := m.(map[string]any)
 		if !ok {
 			continue
 		}
-		// OpenAI 新版 developer 角色（GPT-5 系客户端/Codex）不被腾讯上游接受，
-		// 会返回 11128 "Illegal API invocation from an unapproved channel"，
-		// 统一归一化为 system（语义等价）。
+		// Chat 上游使用 system 承载开发指令。保留正文和消息相对顺序。
+		// 渠道拒绝不能仅凭错误码归因于 developer。
 		if roleOfMessage(msg) == "developer" {
 			msg["role"] = "system"
-		}
-		switch c := msg["content"].(type) {
-		case string:
-			msg["content"] = sanitizeBlockedTemplates(c)
-		case []any:
-			for _, partAny := range c {
-				part, ok := partAny.(map[string]any)
-				if !ok {
-					continue
-				}
-				if t, ok := part["text"].(string); ok {
-					part["text"] = sanitizeBlockedTemplates(t)
-				}
-			}
+			changed = true
 		}
 	}
+	return changed
 }
 
 // ensureLeadingSystemMessage 保证 messages 的首条消息符合腾讯上游的会话结构校验。
@@ -4430,16 +4443,6 @@ func roleOfMessage(m any) string {
 	}
 	role, _ := msg["role"].(string)
 	return strings.ToLower(strings.TrimSpace(role))
-}
-
-func sanitizeBlockedTemplates(s string) string {
-	s = strings.ReplaceAll(s,
-		"You are Claude Code, Anthropic's official CLI for Claude.",
-		"You are Claude Code, Anthropic's official CLI tool for Claude.")
-	s = strings.ReplaceAll(s,
-		"Main branch (you will usually use this for PRs)",
-		"Default branch (you will usually use this for PRs)")
-	return s
 }
 
 // backendHeaders 设置 CodeBuddy 上游专用指纹与鉴权 Header（按站点 Profile 生成）
@@ -4615,6 +4618,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		data := stripDataPrefix(scanner.Text())
 		if data == "" || data == "[DONE]" {
 			continue
+		}
+		if rejection := detectUpstreamStreamRejection([]byte(data)); rejection != nil {
+			return nil, rejection
 		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(data), &chunk) != nil {
