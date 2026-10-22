@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"strings"
 )
 
 const (
@@ -16,10 +15,14 @@ var blockedSystemPromptPrefixes = []string{blockedSystemPromptPrefix}
 
 func sanitizeSystemPromptPrefix(text string) (string, bool) {
 	settings := identitySnapshot()
-	if !settings.enabled || len(text) < len(blockedSystemPromptPrefix) || !strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
+	if !settings.enabled {
 		return text, false
 	}
-	rewritten := settings.prefix + text[len(blockedSystemPromptPrefix):]
+	oldPrefix, newPrefix := identityPrefixReplacement(text, settings)
+	if oldPrefix == "" {
+		return text, false
+	}
+	rewritten := newPrefix + text[len(oldPrefix):]
 	return rewritten, rewritten != text
 }
 

@@ -782,6 +782,12 @@ systemctl restart workbuddy-gateway
   不会根据提示词、用户名或模型名猜测会话归属；需要跨轮稳定会话时请显式提供会话键。
 - 仅生成或规范化请求头，不记录原始会话键、请求正文或令牌；不向登录、续期、额度查询接口添加这些头。
 
+Claude Code 的 `x-claude-code-session-id` 和 `x-claude-code-agent-id` 也作为会话来源，
+在既有显式会话头之后、body/metadata 字段之前读取。同一会话的不同子代理相互隔离，
+不会因为共享 session ID 合并到主代理。Messages 转换还会在合并 system 前消费
+已识别的首个独立 Anthropic 归因块，保留其他指令、正文和工具。
+详见[Claude Code 协议兼容](claude-code-session.md)。
+
 ## probe
 
 免费 / 收费属性按「账号（含站点）+ 模型」学习，只有该账号真正请求过该模型才会写入账本。默认调度优先使用有余额账号，**余额耗尽的账号几乎不会被选中，也就学不到属性**。`probe` 用于主动补课。

@@ -66,7 +66,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -171,7 +171,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -302,7 +302,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -400,7 +400,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -477,7 +477,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -512,7 +512,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",
@@ -592,7 +592,7 @@
       "want_messages": [
         {
           "role": "system",
-          "text": "You are Claude Code, Anthropic's official CLI for Claude.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
+          "text": "You are an AI coding assistant.\nMain branch (you will usually use this for PRs)\nSisyphus-Junior - Focused executor from OhMyOpenCode"
         },
         {
           "role": "user",

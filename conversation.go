@@ -45,6 +45,20 @@ func usableConversationSeed(value string) string {
 	return value
 }
 
+func claudeCodeConversationSeed(headers http.Header) string {
+	session := usableConversationSeed(headers.Get("x-claude-code-session-id"))
+	if session == "" {
+		return ""
+	}
+	if agent := usableConversationSeed(headers.Get("x-claude-code-agent-id")); agent != "" {
+		// Both fields are individually validated. The internal tuple cannot
+		// collide with a plain session or another session/agent boundary; it
+		// is hashed below and is never forwarded or logged as client text.
+		return session + "\x00claude-code-agent\x00" + agent
+	}
+	return session
+}
+
 func normalizedConversationID(value, kind, caller string) string {
 	if id, err := uuid.Parse(value); err == nil && id != uuid.Nil {
 		if kind == "conversation" && caller != "" {
@@ -112,6 +126,8 @@ func prepareConversationContext(r *http.Request, body map[string]any) *conversat
 	} else if seed = usableConversationSeed(r.Header.Get("session_id")); seed != "" {
 		// DSH/pi-ai 的 OpenAI Responses 适配器（包括压缩请求）使用下划线拼写。
 		h.Source = "客户端Session头"
+	} else if seed = claudeCodeConversationSeed(r.Header); seed != "" {
+		h.Source = "客户端ClaudeCode会话头"
 	} else if seed = bodyValue(body, "conversation_id", "conversationId", "session_id", "sessionId"); seed != "" {
 		h.Source = "请求会话字段"
 	} else if seed = bodyValue(metadata, "conversation_id", "conversationId", "session_id", "sessionId"); seed != "" {
