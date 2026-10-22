@@ -37,6 +37,8 @@ func isolatedGatewayConfig(t *testing.T) {
 	oldSettings := gatewaySettings
 	gatewayConfigMu.Unlock()
 	oldPrompts := configuredSystemPrompts()
+	oldProfile := officialRequests.Load()
+	setRequestProfile("legacy")
 	oldWriter := log.Writer()
 	cfg = Config{Addr: "127.0.0.1", WebUI: true, AuthFile: "workbuddy.json"}
 	if err := applyGatewayConfig(gatewayFileConfig{}); err != nil {
@@ -50,6 +52,7 @@ func isolatedGatewayConfig(t *testing.T) {
 		cfg, gatewaySettings = oldCfg, oldSettings
 		gatewayConfigMu.Unlock()
 		setSystemPromptConfig(oldPrompts.fallback, oldPrompts.force)
+		officialRequests.Store(oldProfile)
 	})
 }
 

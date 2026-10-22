@@ -77,8 +77,10 @@ type runtimeFileConfig struct {
 	Logs struct {
 		RetentionDays int `json:"retentionDays"` // 0 保留全部；正数保留含今天在内的 N 个日历日。
 	} `json:"logs"`
-	// Upstream 段可选，用于按网络状况调整上游超时（单位秒，<=0 或省略表示用默认值）。
+	// Upstream 段可选，用于按网络状况调整上游超时和流式行为。
 	Upstream struct {
+		// RequestProfile: legacy（省略/空值）保留旧行为；official 使用已抓取的国内桌面兼容参数。
+		RequestProfile string `json:"requestProfile"`
 		// HeaderTimeoutSeconds：请求发送完成 → 收到响应头的等待上限。
 		HeaderTimeoutSeconds int `json:"headerTimeoutSeconds"`
 		// IdleTimeoutSeconds：流式响应体的空闲读超时（持续有数据则不超时）。
@@ -86,6 +88,11 @@ type runtimeFileConfig struct {
 		// TransientRetries：请求体发送阶段遇到瞬时网络错误的额外重试次数。
 		// 用指针区分「未配置」（用默认值）与「显式设为 0」（禁用重试）。
 		TransientRetries *int `json:"transientRetries"`
+		// StreamKeepaliveSeconds：等待上游首字节期间的 SSE 注释间隔；<=0 或省略用默认值。
+		StreamKeepaliveSeconds int `json:"streamKeepaliveSeconds"`
+		// EnableFirstByteRetry：是否允许首字节前对瞬时网络中断安全重放一次。
+		// 指针区分「未配置」（默认开启）与显式 false（关闭）。
+		EnableFirstByteRetry *bool `json:"enableFirstByteRetry"`
 	} `json:"upstream"`
 	// Models 段可选，用于按模型名做黑白名单控制（大小写不敏感）。
 	Models struct {

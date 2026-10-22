@@ -1,14 +1,16 @@
 package main
 
 import (
-	"strings"
-
+	"log"
 	"net/http"
+	"strings"
 )
 
 const (
 	blockedSystemPromptPrefix     = "You are an AI agent powered by DeepSeek Harness"
 	replacementSystemPromptPrefix = "You are an AI agent powered by a large language model"
+	// Keep the upstream name for its shared compatibility tests and callers.
+	blockedSystemPromptPrefixReplacement = replacementSystemPromptPrefix
 )
 
 // The upstream compatibility rule is limited to this exact identity prefix at
@@ -28,6 +30,10 @@ func sanitizeSystemPromptPrefixes(obj map[string]any) int {
 // selected role, without touching user/tool data, reasoning, or tool arguments.
 func sanitizeMessageIdentityPrefixes(obj map[string]any, role string) int {
 	return sanitizeMessageIdentityPrefixesForProtocol(obj, role, false)
+}
+
+func normalizeDSHIdentityPrefixes(obj map[string]any, role string) int {
+	return sanitizeMessageIdentityPrefixes(obj, role)
 }
 
 func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string, anthropic bool) int {
@@ -60,14 +66,40 @@ func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string,
 }
 
 func logSystemPromptPrefixCompatibility(r *http.Request, obj map[string]any) {
+	var requestID uint64
+	if r != nil {
+		requestID = requestIDFor(r)
+	}
+	logDSHPromptCompatibility(r, requestID, obj)
+}
+
+// The shared outbound chain retains the upstream count-only diagnostic event,
+// using the fork's message-level Markdown context before any text is merged.
+func logDSHPromptCompatibility(r *http.Request, requestID uint64, obj map[string]any) {
 	anthropic := r != nil && r.URL != nil && r.URL.Path == "/v1/messages"
-	if sanitizeMessageIdentityPrefixesForProtocol(obj, "system", anthropic) > 0 {
+	system := sanitizeMessageIdentityPrefixesForProtocol(obj, "system", anthropic)
+	assistant := sanitizeMessageIdentityPrefixesForProtocol(obj, "assistant", anthropic)
+	gui := normalizeDSHGUIContextsForProtocol(obj, anthropic)
+	if system > 0 {
 		recordCompatibilityRule(r, "dsh_system_identity_prefix")
 	}
-	if sanitizeMessageIdentityPrefixesForProtocol(obj, "assistant", anthropic) > 0 {
+	if assistant > 0 {
 		recordCompatibilityRule(r, "dsh_assistant_identity_prefix")
 	}
-	if normalizeDSHGUIContextsForProtocol(obj, anthropic) > 0 {
+	if gui > 0 {
 		recordCompatibilityRule(r, "dsh_gui_context_identity")
 	}
+	if system+assistant+gui == 0 {
+		return
+	}
+	trace := debugTraceID(r)
+	if trace == "" && r != nil {
+		trace = r.Header.Get("X-Trace-ID")
+	}
+	log.Printf("[DSH提示词兼容] traceId=%s requestId=%d system前缀=%d assistant前缀=%d GUI环境句=%d 结果=已改写为中性描述，未记录提示词正文",
+		trace, requestID, system, assistant, gui)
+	debugEvent(r, "info", "dsh_prompt_compatibility", map[string]any{
+		"system_prefix_parts": system, "assistant_prefix_parts": assistant,
+		"gui_context_matches": gui, "prompt_body_logged": false,
+	})
 }

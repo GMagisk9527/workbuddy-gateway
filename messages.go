@@ -138,17 +138,17 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Normalize text parts before the converter joins assistant/system blocks;
-	// afterwards a fingerprint at the start of a later part is no longer visible.
+	// Messages 会在转换时合并 system 文本块。先逐块处理，避免第二块开头的
+	// 已知前缀在 join 后落到正文中段而漏掉；后续共享步骤会再次幂等检查。
 	compatMessages, _ := msgReq["messages"].([]any)
-	var systemMessage map[string]any
+	var compatSystem map[string]any
 	if system, exists := msgReq["system"]; exists {
-		systemMessage = map[string]any{"role": "system", "content": system}
-		compatMessages = append([]any{systemMessage}, compatMessages...)
+		compatSystem = map[string]any{"role": "system", "content": system}
+		compatMessages = append([]any{compatSystem}, compatMessages...)
 	}
-	logSystemPromptPrefixCompatibility(r, map[string]any{"messages": compatMessages})
-	if systemMessage != nil {
-		msgReq["system"] = systemMessage["content"]
+	logDSHPromptCompatibility(r, reqID, map[string]any{"messages": compatMessages})
+	if compatSystem != nil {
+		msgReq["system"] = compatSystem["content"]
 	}
 
 	chatReq, err := anthropicToChatRequest(msgReq, modelName)
@@ -159,19 +159,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	chatReq["stream"] = true // 上游强制流式，非流式由网关本地聚合
 	recordCompatibilityRule(r, "messages_to_chat")
 
-	applyThinkingRules(chatReq, modelName)
-	if sanitizeMessages(chatReq) {
-		recordCompatibilityRule(r, "developer_to_system")
-	}
-	prepareSystemPromptForUpstream(chatReq, r, reqID, w.Header().Get("X-Trace-ID"))
-	logSystemPromptPrefixCompatibility(r, chatReq)
-	// 输出预算归一化：客户端未声明 max_tokens 时补模型输出上限，
-	// 避免上游默认预留 384000 导致长会话在远未到窗口上限时被 11133 拒绝
-	ensureUpstreamMaxTokens(chatReq, r, reqID, w.Header().Get("X-Trace-ID"), modelName)
-	repairReport := repairToolMessageSequence(chatReq)
-	logToolSequenceRepair(r, w.Header().Get("X-Trace-ID"), reqID, modelName, repairReport)
-	// 与 Chat / Responses 入口共用同一套 DeepSeek 多轮推理历史回填规则。
-	logReasoningHistoryRepair(r, reqID, modelName, repairReasoningHistory(chatReq))
+	prepareUpstreamChatRequest(chatReq, r, reqID, modelName)
 
 	upstreamBytes, err := json.Marshal(chatReq)
 	if err != nil {
@@ -250,6 +238,9 @@ func anthropicToChatRequest(body map[string]any, modelName string) (map[string]a
 	}
 	if tc, ok := body["tool_choice"].(map[string]any); ok {
 		chat["tool_choice"] = convertAnthropicToolChoice(tc)
+		if disabled, ok := tc["disable_parallel_tool_use"].(bool); ok {
+			chat["parallel_tool_calls"] = !disabled
+		}
 		if name := strOf(tc["name"]); name != "" {
 			// 实际上游的 tool_choice 只接受字符串，不能发送 OpenAI 的
 			// function 对象。仅暴露指定工具并设 required，保留强制选定语义。
@@ -279,6 +270,16 @@ func anthropicToChatRequest(body map[string]any, modelName string) (map[string]a
 			chat["reasoning_effort"] = "off"
 		case "enabled", "adaptive":
 			chat["reasoning_effort"] = anthropicEffort(th)
+		}
+	}
+	// 新版 Messages 将 effort 放在 output_config，不在 thinking 对象内。
+	// 显式关闭思考仍优先，不能被 effort 或预算重新开启。
+	th, _ := body["thinking"].(map[string]any)
+	if anthropicThinkingType(th) != "disabled" {
+		if output, ok := body["output_config"].(map[string]any); ok {
+			if effort := strings.TrimSpace(strOf(output["effort"])); effort != "" {
+				chat["reasoning_effort"] = effort
+			}
 		}
 	}
 	return chat, nil
