@@ -236,9 +236,15 @@ func keyStoreLoad() error {
 	if err != nil {
 		return err
 	}
-	var doc keyStoreData
+	var doc *keyStoreData
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return fmt.Errorf("apikeys.json 解析失败: %w", err)
+	}
+	if doc == nil {
+		return errors.New("apikeys.json 必须为对象")
+	}
+	if doc.Version != 1 {
+		return fmt.Errorf("apikeys.json 版本无效或不支持: %d", doc.Version)
 	}
 	apiKeys.mu.Lock()
 	defer apiKeys.mu.Unlock()
@@ -803,6 +809,11 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	ledger.mu.Lock()
 	e.Seq = nextLedgerSeq()
 	werr := ledgerAppendLocked(e)
+	// Keep membership fixed until this usage update is complete. Deletion either
+	// archives the updated usage afterwards, or happened earlier and needs this
+	// settlement merged into its archive. It must never do both.
+	apiKeys.mu.RLock()
+	registered := k.legacy || apiKeys.byID[k.ID] == k
 	k.mu.Lock()
 	k.rollWindowLocked(now)
 	if e.Known {
@@ -825,8 +836,9 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	k.usage.LastUsedAt = now.UnixMilli()
 	unknownNow := k.usage.Unknown
 	k.mu.Unlock()
+	apiKeys.mu.RUnlock()
 	// Key 可能在请求在途时被删除：真实消费仍要并入匿名归档，不能丢账。
-	if keyByID(k.ID) == nil {
+	if !registered {
 		archiveMergeSettlement(e, now)
 	}
 	needCompact := ledger.pending >= ledgerCompactEvery

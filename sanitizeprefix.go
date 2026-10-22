@@ -27,6 +27,10 @@ func sanitizeSystemPromptPrefixes(obj map[string]any) int {
 // History replay is scanned as well: process every standard text part of the
 // selected role, without touching user/tool data, reasoning, or tool arguments.
 func sanitizeMessageIdentityPrefixes(obj map[string]any, role string) int {
+	return sanitizeMessageIdentityPrefixesForProtocol(obj, role, false)
+}
+
+func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string, anthropic bool) int {
 	messages, ok := obj["messages"].([]any)
 	if !ok {
 		return 0
@@ -37,27 +41,16 @@ func sanitizeMessageIdentityPrefixes(obj map[string]any, role string) int {
 		if !ok || roleOfMessage(msg) != role {
 			continue
 		}
-		switch content := msg["content"].(type) {
-		case string:
-			if sanitized, changed := sanitizeSystemPromptPrefix(content); changed {
-				msg["content"] = sanitized
-				modified++
-			}
-		case []any:
-			for _, block := range content {
-				part, ok := block.(map[string]any)
-				if !ok {
-					continue
+		text, parts := dshMessageText(msg, anthropic)
+		var code []dshTextRange
+		parsedCode := false
+		for _, part := range parts {
+			if sanitized, changed := sanitizeSystemPromptPrefix(part.text); changed {
+				if !parsedCode {
+					code, parsedCode = dshMarkdownCodeRanges(text), true
 				}
-				if part["type"] != "text" {
-					continue
-				}
-				text, ok := part["text"].(string)
-				if !ok {
-					continue
-				}
-				if sanitized, changed := sanitizeSystemPromptPrefix(text); changed {
-					part["text"] = sanitized
+				if !dshPositionInCode(code, part.start) {
+					part.container[part.key] = sanitized
 					modified++
 				}
 			}
@@ -67,13 +60,14 @@ func sanitizeMessageIdentityPrefixes(obj map[string]any, role string) int {
 }
 
 func logSystemPromptPrefixCompatibility(r *http.Request, obj map[string]any) {
-	if sanitizeSystemPromptPrefixes(obj) > 0 {
+	anthropic := r != nil && r.URL != nil && r.URL.Path == "/v1/messages"
+	if sanitizeMessageIdentityPrefixesForProtocol(obj, "system", anthropic) > 0 {
 		recordCompatibilityRule(r, "dsh_system_identity_prefix")
 	}
-	if sanitizeMessageIdentityPrefixes(obj, "assistant") > 0 {
+	if sanitizeMessageIdentityPrefixesForProtocol(obj, "assistant", anthropic) > 0 {
 		recordCompatibilityRule(r, "dsh_assistant_identity_prefix")
 	}
-	if normalizeDSHGUIContexts(obj) > 0 {
+	if normalizeDSHGUIContextsForProtocol(obj, anthropic) > 0 {
 		recordCompatibilityRule(r, "dsh_gui_context_identity")
 	}
 }

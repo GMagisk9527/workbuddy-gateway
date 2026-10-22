@@ -4139,6 +4139,20 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	mode := fastPathMode.Load()
 	finishReason := ""
 	sawDone := false
+	streamComplete := false
+	defer func() {
+		// A downstream write failure must not discard usage already read upstream.
+		if len(usageRaw) > 0 {
+			var u map[string]any
+			if json.Unmarshal(usageRaw, &u) == nil {
+				usage = u
+			}
+		}
+		statsObserveUsage(r, usage, streamComplete)
+		observeModelCredit(acc, modelName, usage, reqID)
+		recordModelTokens(modelName, usage, reqID)
+		recordModelLatency(modelName, time.Since(startTime))
+	}()
 	var streamRejection *upstreamStreamRejection
 	for scanner.Scan() {
 		cleanData := stripDataPrefixBytes(scanner.Bytes())
@@ -4226,12 +4240,6 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 		}
 		flusher.Flush()
 	}
-	if len(usageRaw) > 0 {
-		var u map[string]any
-		if json.Unmarshal(usageRaw, &u) == nil {
-			usage = u
-		}
-	}
 	if mode == int32(fastPathShadow) {
 		shadowReport()
 	}
@@ -4240,7 +4248,8 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 		scanErr = streamRejection
 		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
 	}
-	completeTokenStream(body, scanErr == nil && finishReason != "")
+	streamComplete = scanErr == nil && finishReason != ""
+	completeTokenStream(body, streamComplete)
 	if scanErr != nil {
 		// 流被中断（上游卡死 / 超时 / 客户端取消）时，绝不补发 [DONE]：
 		// 补发等于告诉下游「正常结束」，会让残缺的工具调用被当成完整结果执行。
@@ -4289,7 +4298,10 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			debugTraceID(r), reqID, acc.Path, sawDone)
 	} else {
 		if sawDone {
-			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			if _, err := fmt.Fprintf(w, "data: [DONE]\n\n"); err != nil {
+				streamComplete = false
+				return
+			}
 			flusher.Flush()
 		}
 		debugEvent(r, "info", "stream_response_completed", map[string]any{
@@ -4298,10 +4310,6 @@ func streamChatResponse(w http.ResponseWriter, r *http.Request, resp *http.Respo
 			"saw_done":      sawDone,
 		})
 	}
-	observeModelCredit(acc, modelName, usage, reqID)
-	statsObserveUsage(r, usage, scanErr == nil && finishReason != "")
-	recordModelTokens(modelName, usage, reqID)
-	recordModelLatency(modelName, time.Since(startTime))
 	if scanErr == nil && finishReason != "" {
 		log.Printf("[#%d] 流式输出完成 (账号 %s [%s], 结束原因=%s, 耗时 %v, 首Token(v2) %s)", reqID, acc.Path, prof.Label, finishReason, time.Since(startTime), body.text())
 	}

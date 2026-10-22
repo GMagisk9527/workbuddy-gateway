@@ -568,6 +568,12 @@ type anthropicToolSlot struct {
 	open     bool
 }
 
+type anthropicContentSlot struct {
+	kind string
+	text *anthropicTextSlot
+	tool *anthropicToolSlot
+}
+
 // anthropicStreamState 把逐个到来的 chat.completion.chunk 翻译为 Anthropic
 // SSE 事件字节流。同一实例也可走 aggregate() 输出非流式完整 Message。
 type anthropicStreamState struct {
@@ -580,6 +586,7 @@ type anthropicStreamState struct {
 	text         *anthropicTextSlot
 	tools        map[int]*anthropicToolSlot
 	toolOrder    []int
+	blocks       []anthropicContentSlot
 	finish       string
 	usage        map[string]any
 }
@@ -687,6 +694,7 @@ func (s *anthropicStreamState) appendThinking(rc string) []byte {
 	if s.thinking == nil || !s.thinking.open {
 		s.thinking = &anthropicTextSlot{open: true, index: s.blockIndex}
 		s.blockIndex++
+		s.blocks = append(s.blocks, anthropicContentSlot{kind: "thinking", text: s.thinking})
 		out = append(out, s.emit("content_block_start", map[string]any{
 			"index":         s.thinking.index,
 			"content_block": map[string]any{"type": "thinking", "thinking": ""},
@@ -707,6 +715,7 @@ func (s *anthropicStreamState) appendText(ct string) []byte {
 	if s.text == nil || !s.text.open {
 		s.text = &anthropicTextSlot{open: true, index: s.blockIndex}
 		s.blockIndex++
+		s.blocks = append(s.blocks, anthropicContentSlot{kind: "text", text: s.text})
 		out = append(out, s.emit("content_block_start", map[string]any{
 			"index":         s.text.index,
 			"content_block": map[string]any{"type": "text", "text": ""},
@@ -731,6 +740,7 @@ func (s *anthropicStreamState) appendToolCall(tc map[string]any) []byte {
 		s.blockIndex++
 		s.tools[idx] = slot
 		s.toolOrder = append(s.toolOrder, idx)
+		s.blocks = append(s.blocks, anthropicContentSlot{kind: "tool_use", tool: slot})
 	}
 	// 工具块开始：先收口 thinking / text，保证块顺序 thinking -> text -> tool_use。
 	var out []byte
@@ -834,28 +844,31 @@ func (s *anthropicStreamState) finishEvents() []byte {
 
 // aggregate 输出完整 Anthropic Message 对象（非流式响应）。
 func (s *anthropicStreamState) aggregate() map[string]any {
-	content := []any{}
-	if s.thinking != nil && s.thinking.buf.Len() > 0 {
-		content = append(content, map[string]any{
-			"type": "thinking", "thinking": s.thinking.buf.String(),
-			"signature": anthropicSignature(s.thinking.buf.String()),
-		})
-	}
-	if s.text != nil && s.text.buf.Len() > 0 {
-		content = append(content, map[string]any{"type": "text", "text": s.text.buf.String()})
-	}
-	for _, idx := range s.toolOrder {
-		slot := s.tools[idx]
-		var input any
-		args := slot.args.String()
-		if args == "" {
-			input = map[string]any{}
-		} else if err := json.Unmarshal([]byte(args), &input); err != nil {
-			input = args // 参数不是合法 JSON 时原样返回，不让单次调用失败
+	content := make([]any, 0, len(s.blocks))
+	// Keep every slot in its original position; reopening text or thinking
+	// must not replace an earlier block, and tool argument fragments share a slot.
+	for _, block := range s.blocks {
+		switch block.kind {
+		case "thinking":
+			text := block.text.buf.String()
+			content = append(content, map[string]any{
+				"type": "thinking", "thinking": text, "signature": anthropicSignature(text),
+			})
+		case "text":
+			content = append(content, map[string]any{"type": "text", "text": block.text.buf.String()})
+		case "tool_use":
+			slot := block.tool
+			var input any
+			args := slot.args.String()
+			if args == "" {
+				input = map[string]any{}
+			} else if err := json.Unmarshal([]byte(args), &input); err != nil {
+				input = args // 参数不是合法 JSON 时原样返回，不让单次调用失败
+			}
+			content = append(content, map[string]any{
+				"type": "tool_use", "id": slot.id, "name": slot.name, "input": input,
+			})
 		}
-		content = append(content, map[string]any{
-			"type": "tool_use", "id": slot.id, "name": slot.name, "input": input,
-		})
 	}
 	return map[string]any{
 		"id":            s.msgID,
@@ -940,12 +953,19 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 	state := newAnthropicStreamState(modelName, wantThinking)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
+	streamComplete := false
+	defer func() {
+		statsObserveUsage(r, state.usage, streamComplete && !writeFailed)
+		observeModelCredit(acc, modelName, state.usage, reqID)
+		recordModelTokens(modelName, state.usage, reqID)
+		recordModelLatency(modelName, time.Since(startTime))
+	}()
 	scanErr := scanUpstreamSSE(body, state, writeEvent)
 	if writeFailed {
 		log.Printf("[#%d] 下游写入失败，已终止 Messages 流 (账号 %s)", reqID, acc.Path)
 		return
 	}
-	statsObserveUsage(r, state.usage, scanErr == nil && state.finish != "")
+	streamComplete = scanErr == nil && state.finish != ""
 	if scanErr != nil {
 		debugEvent(r, "error", "stream_response_failed", map[string]any{
 			"error_type": debugErrorType(scanErr),
@@ -965,7 +985,6 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 			"error": map[string]any{"type": "api_error", "code": code, "message": reason},
 		}))
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流式读取 账号=%s 异常=%v 业务影响=本次响应不完整，已下发 error 事件而非伪造完成", debugTraceID(r), reqID, acc.Path, scanErr)
-		recordModelLatency(modelName, time.Since(startTime))
 		return
 	}
 	if state.finish == "" {
@@ -979,15 +998,12 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 			"error": map[string]any{"type": "api_error", "message": "上游流结束但没有 finish_reason，本次回复不完整"},
 		}))
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=Messages收尾 账号=%s 结果=拒绝当成成功 原因=上游干净结束但没有 finish_reason", debugTraceID(r), reqID, acc.Path)
-		recordModelLatency(modelName, time.Since(startTime))
 		return
 	}
 
-	writeEvent(state.finishEvents())
-	observeModelCredit(acc, modelName, state.usage, reqID)
-	statsObserveUsage(r, state.usage, true)
-	recordModelTokens(modelName, state.usage, reqID)
-	recordModelLatency(modelName, time.Since(startTime))
+	if !writeEvent(state.finishEvents()) {
+		return
+	}
 	debugEvent(r, "info", "stream_response_completed", map[string]any{"status_code": http.StatusOK})
 	log.Printf("[响应完成] traceId=%s requestId=%d Messages流式输出完成 账号=%s 站点=%s 耗时=%v 首Token(v2)=%s", debugTraceID(r), reqID, acc.Path, prof.Label, time.Since(startTime), body.text())
 }

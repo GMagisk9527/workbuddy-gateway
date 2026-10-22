@@ -848,7 +848,14 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	seq := 0
 	var eventBuf []byte
 	var sseWriteErr error
+	writeFailed := func(err error) {
+		sseWriteErr = err
+		_ = resp.Body.Close()
+	}
 	emit := func(eventType string, data map[string]any) {
+		if sseWriteErr != nil {
+			return
+		}
 		data["type"] = eventType
 		data["sequence_number"] = seq
 		seq++
@@ -862,7 +869,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		eventBuf = append(eventBuf, b...)
 		eventBuf = append(eventBuf, '\n', '\n')
 		if err := writeSSE(w, flusher, eventBuf); err != nil {
-			sseWriteErr = err
+			writeFailed(err)
 		}
 	}
 
@@ -930,6 +937,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	var usage map[string]any
 	finishReason := ""
 	sawDone := false
+	streamComplete := false
 
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
@@ -938,15 +946,26 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	mode := fastPathMode.Load()
 	var view respChunkView
 	var usageRaw []byte
+	defer func() {
+		// The fast path defers decoding usage until the stream exits, including
+		// exits caused by a failed downstream write. Missing credit stays unknown.
+		if len(usageRaw) > 0 {
+			var u map[string]any
+			if json.Unmarshal(usageRaw, &u) == nil {
+				usage = u
+			}
+		}
+		statsObserveUsage(r, usage, streamComplete && sseWriteErr == nil)
+		observeModelCredit(acc, modelName, usage, reqID)
+		recordModelTokens(modelName, usage, reqID)
+		recordModelLatency(modelName, time.Since(startTime))
+	}()
 	var msgRaw, reasoningRaw []byte
 	var textPrefix, reasoningPrefix []byte
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
 	var streamRejection *upstreamStreamRejection
-	for scanner.Scan() {
-		if sseWriteErr != nil {
-			break
-		}
+	for sseWriteErr == nil && scanner.Scan() {
 		data := stripDataPrefixBytes(scanner.Bytes())
 		if len(data) == 0 {
 			continue
@@ -975,22 +994,30 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				}
 				if raw := view.reasoning[c]; len(raw) > 0 {
 					openReasoning()
+					if sseWriteErr != nil {
+						break
+					}
 					if reasoningPrefix == nil {
 						reasoningPrefix = respReasoningDeltaPrefix(make([]byte, 0, 192), reasoningItemID, reasoningIndex)
 					}
 					reasoningRaw = append(reasoningRaw, raw...)
 					if err := emitRawDelta(w, flusher, &deltaBuf, reasoningPrefix, raw, &seq); err != nil {
-						sseWriteErr = err
+						writeFailed(err)
+						break
 					}
 				}
 				if raw := view.content[c]; len(raw) > 0 {
 					openMessage()
+					if sseWriteErr != nil {
+						break
+					}
 					if textPrefix == nil {
 						textPrefix = respTextDeltaPrefix(make([]byte, 0, 192), msgItemID, msgIndex)
 					}
 					msgRaw = append(msgRaw, raw...)
 					if err := emitRawDelta(w, flusher, &deltaBuf, textPrefix, raw, &seq); err != nil {
-						sseWriteErr = err
+						writeFailed(err)
+						break
 					}
 				}
 				if n := view.toolCnt[c]; n > 0 {
@@ -1016,6 +1043,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 						})
 					}
 					for t := 0; t < n; t++ {
+						if sseWriteErr != nil {
+							break
+						}
 						tv := &view.tools[view.toolOff[c]+t]
 						if len(tv.args) == 0 {
 							continue
@@ -1026,7 +1056,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 							toolPrefix[tv.index] = p
 						}
 						if err := emitRawDelta(w, flusher, &deltaBuf, p, tv.args, &seq); err != nil {
-							sseWriteErr = err
+							writeFailed(err)
+							break
 						}
 					}
 				}
@@ -1133,17 +1164,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		scanErr = streamRejection
 		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
 	}
-	completeTokenStream(body, scanErr == nil && finishReason != "")
+	streamComplete = scanErr == nil && finishReason != ""
+	completeTokenStream(body, streamComplete)
 	if len(usageRaw) > 0 {
 		var u map[string]any
 		if json.Unmarshal(usageRaw, &u) == nil {
 			usage = u
 		}
+		usageRaw = nil
 	}
 	messageText := decodeJSONBody(msgRaw)
 	reasoningText := decodeJSONBody(reasoningRaw)
 	messageChars, reasoningChars := len(messageText), len(reasoningText)
-	statsObserveUsage(r, usage, scanErr == nil && finishReason != "")
 	if scanErr != nil {
 		debugEvent(r, "error", "stream_response_failed", map[string]any{
 			"error_type": debugErrorType(scanErr),
@@ -1164,7 +1196,6 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		failed["error"] = map[string]any{"code": code, "message": reason}
 		emit("response.failed", map[string]any{"response": failed})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流式读取 账号=%s 异常=%v 业务影响=本次响应不完整，已下发 response.failed 而非伪造完成", debugTraceID(r), reqID, acc.Path, scanErr)
-		recordModelLatency(modelName, time.Since(startTime))
 		return
 	}
 	if finishReason == "" {
@@ -1189,7 +1220,6 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		emit("response.failed", map[string]any{"response": failed})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=Responses收尾 账号=%s 结果=拒绝当成成功 原因=上游干净结束但没有 finish_reason 是否看到DONE=%t 已收到推理字符数=%d 已收到正文字符数=%d 工具调用数=%d 业务影响=不下发 output_item.done 和 response.completed，客户端收到 response.failed 是否已处理=是",
 			debugTraceID(r), reqID, acc.Path, sawDone, reasoningChars, messageChars, len(toolOrder))
-		recordModelLatency(modelName, time.Since(startTime))
 		return
 	}
 
@@ -1246,16 +1276,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	if usage != nil {
 		final["usage"] = toResponsesUsage(usage)
 	}
-	observeModelCredit(acc, modelName, usage, reqID)
-	recordModelTokens(modelName, usage, reqID)
 	emit("response."+status, map[string]any{"response": final})
+	if sseWriteErr != nil {
+		return
+	}
 
-	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	if err := writeSSE(w, flusher, []byte("data: [DONE]\n\n")); err != nil {
+		writeFailed(err)
+		return
+	}
 	if scanErr == nil {
 		debugEvent(r, "info", "stream_response_completed", map[string]any{"status_code": http.StatusOK})
 	}
-	recordModelLatency(modelName, time.Since(startTime))
 	log.Printf("[#%d] Responses 流式输出完成 (账号 %s [%s], 耗时 %v, 首Token(v2) %s)", reqID, acc.Path, prof.Label, time.Since(startTime), body.text())
 }
 

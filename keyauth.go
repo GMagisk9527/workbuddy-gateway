@@ -46,8 +46,15 @@ func loadAuthSwitch(dir string) error {
 	if err != nil {
 		return err
 	}
-	var doc authSwitchDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	var doc struct {
+		RequireAuth *bool `json:"requireAuth"`
+		UpdatedAt   int64 `json:"updatedAt,omitempty"`
+	}
+	err = json.Unmarshal(raw, &doc)
+	if err == nil && doc.RequireAuth == nil {
+		err = errors.New("缺少有效的 requireAuth 布尔值")
+	}
+	if err != nil {
 		// 文件损坏时按"要求鉴权"处理：宁可拒绝，也不因读不懂就开放。
 		authSwitchMu.Lock()
 		authSwitchOn = true
@@ -56,7 +63,7 @@ func loadAuthSwitch(dir string) error {
 		return nil
 	}
 	authSwitchMu.Lock()
-	authSwitchOn = doc.RequireAuth
+	authSwitchOn = *doc.RequireAuth
 	authSwitchMu.Unlock()
 	return nil
 }

@@ -41,6 +41,73 @@ func configuredFallbackSystemPrompt() string {
 	return fallback
 }
 
+// Locate a possible force suffix, accepting only the two exact identity edits
+// made by the compatibility pass. Code context is checked separately below.
+func systemPromptForceSuffix(content, force string) (int, bool) {
+	tail, source := content, force
+	neutralOpening := dshGUIContextNeutral + dshGUIContextOpening[len(dshGUIContextSentence):]
+	for {
+		pos := strings.LastIndex(source, dshGUIContextOpening)
+		if pos < 0 {
+			break
+		}
+		literal := source[pos+len(dshGUIContextOpening):]
+		if !strings.HasSuffix(tail, literal) {
+			return 0, false
+		}
+		tail = tail[:len(tail)-len(literal)]
+		switch {
+		case strings.HasSuffix(tail, dshGUIContextOpening):
+			tail = tail[:len(tail)-len(dshGUIContextOpening)]
+		case strings.HasSuffix(tail, neutralOpening):
+			tail = tail[:len(tail)-len(neutralOpening)]
+		default:
+			return 0, false
+		}
+		source = source[:pos]
+	}
+	if strings.HasSuffix(tail, source) {
+		return len(tail) - len(source), true
+	}
+	if identity, changed := sanitizeSystemPromptPrefix(source); changed && strings.HasSuffix(tail, identity) {
+		return len(tail) - len(identity), true
+	}
+	return 0, false
+}
+
+// Restore raw force at the same position in the message's parsing view, then
+// verify the exact wire text. Parsing force alone would mistake a closing fence
+// from the client for an opening fence. Configuration itself is never changed.
+func systemPromptForceWireMatches(existing, force, context string, start int, identityAllowed bool) bool {
+	if existing == force {
+		return true
+	}
+	code := dshMarkdownCodeRanges(context)
+	wire, _ := normalizeDSHGUIContextPart(force, start, code)
+	if identityAllowed && !dshPositionInCode(code, start) {
+		wire, _ = sanitizeSystemPromptPrefix(wire)
+	}
+	return existing == wire
+}
+
+func systemPromptHasForce(content, force string) bool {
+	start, ok := systemPromptForceSuffix(content, force)
+	if !ok || (start > 0 && !strings.HasSuffix(content[:start], "\n\n")) {
+		return false
+	}
+	return systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, start == 0)
+}
+
+func systemPromptBlockHasForce(message map[string]any, force string) bool {
+	text, parts := dshMessageText(message, false)
+	if len(parts) == 0 {
+		return false
+	}
+	last := parts[len(parts)-1]
+	start, ok := systemPromptForceSuffix(last.text, force)
+	return ok && start == 0 && systemPromptForceWireMatches(last.text, force, text[:last.start]+force, last.start, true)
+}
+
 // prepareSystemPromptForUpstream 在 Chat、Responses、Messages 三个入口统一执行。
 // 先保证首条为 system，再把实验性的全局强制文本追加到该 system 内容末尾（后置），
 // 使其成为整段提示词中位置最靠后的指令、紧贴其后的用户消息；
@@ -71,14 +138,16 @@ func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, request
 				kind = "字符串"
 				if content == "" {
 					first["content"] = force
-				} else if content != force && !strings.HasSuffix(content, "\n\n"+force) {
+				} else if !systemPromptHasForce(content, force) {
 					first["content"] = content + "\n\n" + force
 				}
 			case []any:
 				kind = "内容块数组"
 				if len(content) > 0 {
-					if last, ok := content[len(content)-1].(map[string]any); ok && last["type"] == "text" && last["text"] == force {
-						break // 重复执行兼容规则时不重复追加同一配置指令。
+					if last, ok := content[len(content)-1].(map[string]any); ok && last["type"] == "text" {
+						if _, ok := last["text"].(string); ok && systemPromptBlockHasForce(first, force) {
+							break // 兼容规范化前后均不重复追加同一配置指令。
+						}
 					}
 				}
 				blocks := make([]any, 0, len(content)+1)
