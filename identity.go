@@ -112,6 +112,18 @@ func normalizeIdentityTextWithRanges(text string, code []dshTextRange, offset in
 	return normalizeIdentityTextWithPrefix(text, code, offset, true)
 }
 
+func identityPrefixReplacement(text string, settings identitySettings) (string, string) {
+	if len(settings.replacements) == 0 {
+		if prefix := claudeCodeIdentityPrefix(text); prefix != "" {
+			return prefix, neutralClaudeCodeIdentity
+		}
+	}
+	if len(text) >= len(blockedSystemPromptPrefix) && strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
+		return text[:len(blockedSystemPromptPrefix)], settings.prefix
+	}
+	return "", ""
+}
+
 func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset int, allowPrefix bool) (string, bool) {
 	settings := identitySnapshot()
 	if !settings.enabled {
@@ -124,8 +136,9 @@ func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset in
 	replacer := strings.NewReplacer(pairs...)
 	var out strings.Builder
 	pos := 0
-	if allowPrefix && len(text) >= len(blockedSystemPromptPrefix) && strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
-		end := len(blockedSystemPromptPrefix)
+	oldPrefix, newPrefix := identityPrefixReplacement(text, settings)
+	if allowPrefix && oldPrefix != "" {
+		end := len(oldPrefix)
 		inCode := false
 		for _, span := range code {
 			if span.start < offset+end && span.end > offset {
@@ -134,7 +147,7 @@ func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset in
 			}
 		}
 		if !inCode {
-			out.WriteString(settings.prefix)
+			out.WriteString(newPrefix)
 			pos = end
 		}
 	}

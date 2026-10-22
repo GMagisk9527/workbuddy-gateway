@@ -1,8 +1,9 @@
 # Messages API 的 Claude Code 身份文本
 
-v1.14.29 支持通过 `identity` 配置处理 system/developer/assistant 的非代码文本。
-省略该段或使用 `{}` 时只保留既有 DSH 前缀兼容，不替换 `Claude Code`。
-升级程序不会自动改写旧配置。
+支持通过 `identity` 配置处理 system/developer/assistant 的非代码文本。
+省略该段或使用 `{}` 时，保留既有 DSH 前缀兼容，并将文本块开头已识别的完整
+Claude Code／Claude Agent SDK 身份声明改为 `You are an AI coding assistant.`。
+普通讨论中的名称不在默认替换范围，升级程序不会自动改写旧配置。
 
 如果希望使用统一的展示名称，可将下面这一段合入现有 `config.json`，保留其他配置：
 
@@ -15,7 +16,8 @@ v1.14.29 支持通过 `identity` 配置处理 system/developer/assistant 的非�
 }
 ```
 
-该配置会使用内置名称规则，不限于 Claude Code。需要更小范围时，使用自定义
+该配置会使用显式的内置名称规则，不限于 Claude Code，并优先于默认中性身份规则。
+需要更小范围时，使用自定义
 `replacements`；例如将明确的身份声明改为中性描述，而保留对客户端本身的讨论：
 
 ```json
@@ -30,6 +32,8 @@ v1.14.29 支持通过 `identity` 配置处理 system/developer/assistant 的非�
 ```
 
 键按原文精确匹配，应以实际客户端发送的声明为准。配置可热加载，仅影响后续请求。
+`identity.enabled=false` 同时关闭默认身份前缀兼容；显式 target／replacements
+继续按配置执行，不会被新的默认中性描述覆盖。
 用户正文、工具定义/参数/结果、thinking 和 Markdown 代码不会参与名称替换，
 因此不保证出站 JSON 完全不含 `Claude Code`。避免将替换结果再作为其他规则的输入，
 因为兼容处理可能执行多次。

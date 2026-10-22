@@ -44,7 +44,7 @@ Anthropic 元数据。匹配范围刻意限制为：
 - `cc_entrypoint` 仅识别 `cli` 和官方客户端 print 模式使用的 `sdk-cli`。
 
 system 字符串、后续文本块、普通用户正文、代码、历史消息以及工具定义／参数／结果
-均不按这个规则删除。其余 system 指令和 Claude Code 名称保留；仅有归因块时沿用
+均不按这个规则删除。其余 system 指令保留；仅有归因块时沿用
 既有默认／配置 fallback。日志只记录固定规则名，不记录归因值或正文。
 SSE、用量计算和账号调度沿用既有逻辑；后续若仍收到 11128，会原样作为错误返回，
 不会因本规则重试或切换账号。
@@ -54,3 +54,16 @@ SSE、用量计算和账号调度沿用既有逻辑；后续若仍收到 11128�
 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`。本项目固定转译到非 Anthropic 的 WorkBuddy
 协议，以上消费规则只用于这条转换路径，不适用于向 Anthropic／云端 Claude
 原样透传请求的网关。实测结果确认的是上述合成请求的触发项，其他 11128 仍需单独诊断。
+
+## 固定身份声明
+
+默认配置会把文本块开头已识别的完整 Claude Code／Claude Agent SDK 身份声明改为
+`You are an AI coding assistant.`，保留后续指令。包含旧 CLI、SDK 和团队代理的
+固定开头；不把替换结果描述成 Anthropic 或 WorkBuddy 的官方客户端。
+Markdown 代码范围按完整消息计算，包括跨文本块的代码。用户正文、工具以及
+正文中段的名称讨论不参与默认前缀规则。处理在 Anthropic system 合并前以及
+共享 fallback/force 注入后执行，force 检查复用同一规则以避免重复追加。
+
+显式的 `identity.target`／`replacements` 仍优先使用调用方配置；
+`identity.enabled=false` 可关闭身份兼容。更多配置见
+[Messages 身份文本说明](messages-identity.md)。

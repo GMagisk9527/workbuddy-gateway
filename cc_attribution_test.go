@@ -22,7 +22,7 @@ func TestCCAttributionMessagesHTTP(t *testing.T) {
 			h := newCompatHarness(t, "cn")
 			withRequestProfile(t, requestProfileLegacy)
 			withSystemPrompts(t, "", "")
-			instruction := "You are Claude Code. Keep this instruction.\n```text\n" + ccAttributionTestLine + "\n```\nLiteral: `" + ccAttributionTestLine + "`."
+			instruction := "Keep this Claude Code instruction.\n```text\n" + ccAttributionTestLine + "\n```\nLiteral: `" + ccAttributionTestLine + "`."
 			user := "Explain this literal line: " + ccAttributionTestLine
 			toolResult := "tool-result-sentinel " + ccAttributionTestLine
 			input := map[string]any{"text": ccAttributionTestLine, "sentinel": "private-arguments-sentinel"}
@@ -130,7 +130,7 @@ func TestCCAttributionWithoutOptionalCCH(t *testing.T) {
 			h := newCompatHarness(t, "cn")
 			withRequestProfile(t, requestProfileLegacy)
 			withSystemPrompts(t, "", "")
-			const instruction = "You are Claude Code. Preserve these instructions."
+			const instruction = "Preserve these Claude Code instructions."
 			attribution := strings.ReplaceAll(ccAttributionTestLine, " cch=abc123;", "")
 			body := map[string]any{
 				"model": compatModel, "stream": stream, "max_tokens": 64,
@@ -155,7 +155,7 @@ func TestCCAttributionSDKCLIHTTP(t *testing.T) {
 				h := newCompatHarness(t, "cn")
 				withRequestProfile(t, requestProfileLegacy)
 				withSystemPrompts(t, "", "")
-				const instruction = "You are Claude Code. Preserve these SDK CLI instructions."
+				const instruction = "Preserve these Claude Code SDK CLI instructions."
 				attribution := strings.ReplaceAll(ccAttributionTestLine, "cc_entrypoint=cli", "cc_entrypoint=sdk-cli")
 				if !withCCH {
 					attribution = strings.ReplaceAll(attribution, " cch=abc123;", "")
@@ -186,7 +186,7 @@ func TestCCAttributionConsumesOnlyFirstSystemBlock(t *testing.T) {
 		"system": []any{
 			ccAttributionTestBlock(ccAttributionTestLine),
 			ccAttributionTestBlock(ccAttributionTestLine),
-			ccAttributionTestBlock("You are Claude Code. Preserve the remaining instructions."),
+			ccAttributionTestBlock("Preserve the remaining Claude Code instructions."),
 		},
 		"messages": []any{map[string]any{"role": "user", "content": "Synthetic greeting."}},
 	}
@@ -195,13 +195,13 @@ func TestCCAttributionConsumesOnlyFirstSystemBlock(t *testing.T) {
 		t.Fatalf("Messages HTTP %d", status)
 	}
 	assertCompatMessages(t, h.take(t).body, []compatWantMessage{
-		{Role: "system", Text: ccAttributionTestLine + "\nYou are Claude Code. Preserve the remaining instructions."},
+		{Role: "system", Text: ccAttributionTestLine + "\nPreserve the remaining Claude Code instructions."},
 		{Role: "user", Text: "Synthetic greeting."},
 	})
 }
 
 func TestCCAttributionPreservesNonMetadataSystem(t *testing.T) {
-	const instruction = "You are Claude Code. Preserve this instruction."
+	const instruction = "Preserve this Claude Code instruction."
 	blockWithCache := ccAttributionTestBlock(ccAttributionTestLine)
 	blockWithCache["cache_control"] = map[string]any{"type": "ephemeral"}
 	blockWithUnknown := ccAttributionTestBlock(ccAttributionTestLine)

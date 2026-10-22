@@ -49,7 +49,11 @@ func TestMessagesClaudeCodeIdentityConfigThroughHTTP(t *testing.T) {
 						},
 						"tools": []any{map[string]any{"name": "save", "description": "Claude Code schema-sentinel", "input_schema": map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string", "description": "Claude Code property-sentinel"}}}}},
 					}
-					wantSystem := "You are " + tc.prose + ". fallback-sentinel"
+					prefixProse := tc.prose
+					if tc.name == "default" {
+						prefixProse = "an AI coding assistant"
+					}
+					wantSystem := "You are " + prefixProse + ". fallback-sentinel"
 					if kind != "fallback" {
 						body["system"] = "You are Claude Code.\n```text\nClaude Code\n```\nKeep `Claude Code` literal."
 						if kind == "blocks" {
@@ -59,7 +63,7 @@ func TestMessagesClaudeCodeIdentityConfigThroughHTTP(t *testing.T) {
 								map[string]any{"type": "text", "text": "```\nKeep `Claude Code` literal."},
 							}
 						}
-						wantSystem = "You are " + tc.prose + ".\n```text\nClaude Code\n```\nKeep `Claude Code` literal."
+						wantSystem = "You are " + prefixProse + ".\n```text\nClaude Code\n```\nKeep `Claude Code` literal."
 					}
 					wantSystem += "\n\nKeep " + tc.prose + " force-sentinel."
 					status, raw := h.send(t, "/v1/messages", body, nil, 0)
