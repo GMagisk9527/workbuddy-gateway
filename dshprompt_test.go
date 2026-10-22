@@ -181,8 +181,8 @@ func TestConfiguredDSHPromptsThroughHTTP(t *testing.T) {
 							body["system"] = tc.clientSystem
 						}
 						if tc.name == "force_block" {
-							// Messages joins system blocks before appending force; a
-							// mid-string identity stays outside the prefix rule.
+							// Messages joins system blocks before appending force; the
+							// default prefix rule does not apply mid-string.
 							want = "Client instruction.\n\n" + identity + "\n\n" + neutralGUI
 						}
 					}

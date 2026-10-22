@@ -17,6 +17,16 @@
 
 **v1.14.24**：Chat 流式响应增加首字节前 SSE 心跳与最多一次安全重放；DSH 身份句和 GUI 环境说明扩展覆盖 assistant 历史、后续文本块及配置注入提示词。默认开启，可通过 `upstream` 配置关闭重放。
 
+**v1.14.25（本 fork 同步范围）**：Responses 增加 namespace 子工具和 custom 工具（如 `apply_patch`）的转换及输出还原；web_search 转为客户端执行的函数，不提供托管搜索。保留已有可选出站模式，不新增 SDK 运行时或 Agent 身份头；产品名替换需要显式配置。上游路径仍为 `/v2/chat/completions`。
+
+**v1.14.26**：命名 `tool_choice` 改为上游接受的 `required` 字符串并只保留被选中的工具；修复 namespace/custom 强制工具调用被上游 11101 拒绝的问题。
+
+**v1.14.27**：国内模型请求改用 `https://www.workbuddy.cn/v2/chat/completions`；认证、刷新和额度仍走原 `copilot.tencent.com` / `codebuddy.cn`，不受 ChatBase 影响。国际站保持 `www.workbuddy.ai`；实测国际 Token 请求 `copilot.tencent.com` 返回 401。
+
+**v1.14.28**：展示身份替换支持 `config.json` 的 `identity.enabled`、`identity.target` 和自定义 `identity.replacements`。
+
+**v1.14.29（本 fork）**：新用户首次启动自动生成默认 `config.json`，其中 `identity` 为空对象；已有配置不自动改写。省略 identity 或使用空对象时保留旧的中性前缀兼容规则，显式设置 target/replacements 后才启用自定义展示名称。代码、工具参数及用户内容保持原样。
+
 **同时支持两个上游站点**（同一套 `/v2/plugin/*` 协议，凭据按站点隔离，账号池可混挂轮询）：
 
 | 站点 | 上游 | 登录方式 | 登录命令 |
@@ -191,6 +201,26 @@ workbuddy-gateway serve -webui -allow-price-probes
 
 例如 `{"systemPrompt":{"fallback":"你是一个助手。","force":"请用中文回答。"}}`：客户端没有 system 时，发往上游的是 `你是一个助手。\n\n请用中文回答。`；客户端自带 system 时，发往上游的是 `<客户端原 system>\n\n请用中文回答。`。配置值仅支持 JSON 字符串；空串或全空白视为未配置。不会写出或替换客户端的 user、assistant、tool 消息，也不改变账号选择。普通日志和 JSON 调试日志只记录规则分支、位置与字符数，**不记录提示词正文**。
 
+**展示身份替换**（热生效）：
+
+```json
+{
+  "identity": {
+    "enabled": true,
+    "target": "WorkBuddy"
+  }
+}
+```
+
+- 省略 `identity` 或设置为 `{}` 时保持旧的精确 DSH 开头前缀兼容规则，不批量替换指令中的产品名。
+- `target` 可选 `Assistant` 或 `WorkBuddy`；想更接近官方文案可用 `WorkBuddy`。
+- `enabled:false` 关闭替换。
+- 需要逐词控制时加 `replacements`，例如：
+  ```json
+  {"identity":{"enabled":true,"target":"WorkBuddy","replacements":{"Codex":"WorkBuddy","DeepSeek Harness":"WorkBuddy"}}}
+  ```
+- 显式配置仅处理 system/developer/assistant 的非代码文本；跨内容块的 Markdown 代码、user、tool、reasoning 和工具参数不改。展示名称配置不提供渠道授权。
+
 > **实验功能风险自负：** `force` 后置于 system 末尾（紧贴用户消息），因此比客户端自带指令更"新近"，冲突时通常更有影响力——这正是人设类、风格类指令希望达到的效果，但也可能与客户端的 system 指令冲突、改变模型行为、增加 token 消耗，或触发上游内容/参数校验。需要回退时将 `force` 改回 `""` 并保存；建议先在测试会话验证，切勿在配置中写入密码、密钥或个人隐私。`config.json` 已被 Git 忽略，不要将真实配置提交到仓库。
 
 `/v1/messages/count_tokens` 仅对客户端提供的内容做本地近似估算，不调用上游，也不计入网关随后注入的 `fallback` / `force` 文本；最终消耗以模型返回的 usage 为准。
@@ -354,13 +384,14 @@ workbuddy-gateway serve -keepalive-hours ""
 |---|---|
 | 模型名单、`models.accounts`（含 `all`） | 热生效，控制后续调度 |
 | `gateway.adminKey` / `apiKeyEnabled` / `apiKey` | 热生效；管理 Key 改变后需使用新 Key 登录 |
-| `systemPrompt` / `debug.enabled` | 热生效 |
+| `systemPrompt` / `identity` / `debug.enabled` | 热生效；仅影响后续请求 |
 | `upstream` 超时、网络重试次数 | 后续上游请求使用新值；已有流式响应保持原空闲超时 |
 | `gateway.apiPort` / `webPort` | 写入配置但**重启后**变更监听；页面仍显示实际监听端口 |
 
 - 配置先整体解析、校验，再应用。运行时遇到半写 JSON、空文件、文件短暂缺失、错误类型或非法账号路径时，**保留上一份有效配置**，错误原因写入 `logs/gateway-YYYY-MM-DD.log`。修正并保存后自动重试；不会把配置读取失败误当作“全部开启”。
 - 要恢复默认规则，请保存有效的 `{}` 或将对应列表设为 `[]`，而不是删除运行中的配置文件。
 - 上一版本省略 `all`、`accounts`、`models` 或 `gateway` 的配置仍可读取；`accounts: {}`、`accounts: null`、`all: {}` 和空名单均表示无全局限制。默认示例包含空的 `models.accounts.all.allowlist/blocklist`。
+- 首次启动且没有 `config.json` 时，程序按内置示例生成默认配置。已有配置保持字节不变，不自动补写 `identity`；省略该段或设置空对象时保留旧的中性前缀规则。显式配置的 `replacements` 键不限于内置 Harness 名称。
 - 如旧配置同时填写了**两种非空模型名单**，请在升级前选择并保留一种；新版本不再接受相互冲突的模型黑白名单。运行中错误配置会保留上次生效状态，启动时则给出明确错误。
 - 旧配置中只有白名单生效时，管理页开关反映白名单；首次网页模型操作会删除 `models.allowlist`，将**当前已知模型**的启停状态转换为 `models.blocklist`。其他已知模型状态不变，之后新增的模型默认开启（黑名单语义）。模型账号规则保持独立。
 - 新版本中的 `all` 是保留键；不要把它当作真实模型 ID。**先升级二进制，再添加 `all`**；旧二进制不识别全局语义，会把它当作名为 `all` 的模型专属规则。

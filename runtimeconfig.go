@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,9 @@ import (
 	"sync"
 	"time"
 )
+
+//go:embed config.example.json
+var embeddedDefaultRuntimeConfig []byte
 
 // 所有进程内配置文件读改写共用此锁，避免网页写入与热加载互相覆盖。
 // 锁序：runtimeConfigMu -> gatewayConfigMu；调度不持有此锁。
@@ -78,6 +82,47 @@ func hasModelNames(names []string) bool {
 	return false
 }
 
+// Generate defaults only for new installations. Existing production configs
+// remain byte-for-byte unchanged, including omitted identity settings.
+func ensureRuntimeConfigFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return writeNewRuntimeConfig(path)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("config.json 不是普通文件")
+	}
+	return nil
+}
+
+func writeNewRuntimeConfig(path string) error {
+	data := append([]byte(nil), embeddedDefaultRuntimeConfig...)
+	fd, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := fd.Write(data); err != nil {
+		fd.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := fd.Sync(); err != nil {
+		fd.Close()
+		return err
+	}
+	if err := fd.Close(); err != nil {
+		return err
+	}
+	log.Printf("[配置初始化] 已生成默认 config.json")
+	return nil
+}
+
 func loadRuntimeConfig(path string) error {
 	runtimeConfigMu.Lock()
 	defer runtimeConfigMu.Unlock()
@@ -128,9 +173,22 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 		creditFetch = *c.Credits.Fetch
 	}
 	setCreditConfig(creditFetch, c.Credits.ExpiringFirst, c.Credits.WindowDays)
+	setIdentityConfig(c.Identity)
+	identityEnabled, _, identityRuleCount := identitySettingsSummary()
+	log.Printf("[身份替换配置] traceId=%s 启用=%t 规则数=%d 说明=仅处理非代码身份文本；不记录替换内容，热加载只影响后续请求", trace, identityEnabled, identityRuleCount)
 	previousProfile := officialRequests.Load()
 	setRequestProfile(profile)
-	if previousProfile != officialRequests.Load() {
+	// 未配置 upstream.requestProfile 时会回退 legacy，出站请求体因此不压缩。
+	// 该回退此前是静默的：升级后只能从「请求体没变小」间接推断，故启动时无条件打印一次。
+	profileSource := "config.json upstream.requestProfile"
+	if c.Upstream.RequestProfile == "" {
+		profileSource = "缺省：config.json 未提供 upstream.requestProfile"
+	}
+	switch {
+	case !hot:
+		log.Printf("[出站兼容配置] traceId=%s profile=%s 来源=%s 结果=已应用 说明=legacy 不压缩出站请求体，official 启用出站 gzip 与桌面端指纹；只影响后续模型请求，不修改登录与凭据",
+			trace, profile, profileSource)
+	case previousProfile != officialRequests.Load():
 		log.Printf("[出站兼容配置] traceId=%s profile=%s 结果=已应用 说明=只影响后续模型请求，正在执行的请求沿用原快照，不修改登录和凭据", trace, profile)
 	}
 	logRetentionDays.Store(int64(c.Logs.RetentionDays))

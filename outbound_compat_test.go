@@ -162,8 +162,8 @@ func TestOfficialHeadersModelOnlyAndInternationalFallback(t *testing.T) {
 				len(req.Header.Get("X-Request-ID")) != 32 {
 				t.Fatal("observed desktop header contract not met")
 			}
-			for _, name := range []string{"Origin", "Referer", "X-Client-ID", "X-Refresh-Token",
-				"X-Device-Token", "X-Stainless-Runtime-Version", "X-Agent-Purpose"} {
+			for _, name := range []string{"Origin", "Referer", "X-Client-ID", "X-Refresh-Token", "X-Device-Token",
+				"X-Stainless-Runtime-Version", "X-Stainless-Runtime", "X-Agent-Purpose", "X-Agent-Type", "X-Agent-Intent"} {
 				if req.Header.Get(name) != "" {
 					t.Fatalf("unexpected header %s", name)
 				}

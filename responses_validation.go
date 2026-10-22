@@ -51,6 +51,17 @@ func validateResponsesReplay(body map[string]any) error {
 			if stringField(item, "call_id") == "" {
 				return fmt.Errorf("input[%d]: function_call_output 必须包含 call_id", i)
 			}
+		case "custom_tool_call":
+			if stringField(item, "call_id") == "" || stringField(item, "name") == "" {
+				return fmt.Errorf("input[%d]: custom_tool_call 必须包含 call_id 和 name", i)
+			}
+			if _, ok := item["input"].(string); !ok {
+				return fmt.Errorf("input[%d]: custom_tool_call.input 必须是字符串", i)
+			}
+		case "custom_tool_call_output":
+			if stringField(item, "call_id") == "" {
+				return fmt.Errorf("input[%d]: custom_tool_call_output 必须包含 call_id", i)
+			}
 		case "web_search_call": // 保留已有的搜索历史兼容，不把它插入工具结果序列
 		default:
 			return fmt.Errorf("input[%d]: 当前 Chat 上游不支持此 Responses 项类型；请回放完整文本/函数调用历史", i)

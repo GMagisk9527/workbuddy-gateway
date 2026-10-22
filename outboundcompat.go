@@ -232,14 +232,19 @@ func applyObservedDesktopHeaders(req *http.Request, prof *upstreamProfile, profi
 	} {
 		req.Header.Del(name)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", observedDesktopUA)
-	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Name", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.8.3")
-	req.Header.Set("X-Private-Data", "true")
-	// Agent 用途随主请求/标题/子任务变化；没有可靠元数据时不把所有调用冒充 main。
-	req.Header.Set("X-Codebuddy-Request", "1")
+	// Preserve the existing opt-in profile; do not invent SDK runtime metadata
+	// or label all requests as official main-agent work.
+	for name, value := range map[string]string{
+		"Accept":              "application/json",
+		"User-Agent":          observedDesktopUA,
+		"X-IDE-Type":          "WorkBuddy",
+		"X-IDE-Name":          "WorkBuddy",
+		"X-IDE-Version":       "5.8.3",
+		"X-Private-Data":      "true",
+		"X-Codebuddy-Request": "1",
+	} {
+		req.Header.Set(name, value)
+	}
 	// 保持同一逻辑请求的 message/request ID 相等；重试沿用，不改变本地审计 TraceID。
 	message := strings.ReplaceAll(req.Header.Get(conversationMessageIDHeader), "-", "")
 	req.Header.Set(conversationMessageIDHeader, message)

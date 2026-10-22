@@ -7,27 +7,26 @@ import (
 )
 
 const (
-	blockedSystemPromptPrefix     = "You are an AI agent powered by DeepSeek Harness"
-	replacementSystemPromptPrefix = "You are an AI agent powered by a large language model"
-	// Keep the upstream name for its shared compatibility tests and callers.
+	blockedSystemPromptPrefix            = "You are an AI agent powered by DeepSeek Harness"
+	replacementSystemPromptPrefix        = "You are an AI agent powered by a large language model"
 	blockedSystemPromptPrefixReplacement = replacementSystemPromptPrefix
 )
 
-// The upstream compatibility rule is limited to this exact identity prefix at
-// byte zero. It preserves all following developer instructions and user content.
+var blockedSystemPromptPrefixes = []string{blockedSystemPromptPrefix}
+
 func sanitizeSystemPromptPrefix(text string) (string, bool) {
-	if len(text) < len(blockedSystemPromptPrefix) || !strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
+	settings := identitySnapshot()
+	if !settings.enabled || len(text) < len(blockedSystemPromptPrefix) || !strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
 		return text, false
 	}
-	return replacementSystemPromptPrefix + text[len(blockedSystemPromptPrefix):], true
+	rewritten := settings.prefix + text[len(blockedSystemPromptPrefix):]
+	return rewritten, rewritten != text
 }
 
 func sanitizeSystemPromptPrefixes(obj map[string]any) int {
 	return sanitizeMessageIdentityPrefixes(obj, "system")
 }
 
-// History replay is scanned as well: process every standard text part of the
-// selected role, without touching user/tool data, reasoning, or tool arguments.
 func sanitizeMessageIdentityPrefixes(obj map[string]any, role string) int {
 	return sanitizeMessageIdentityPrefixesForProtocol(obj, role, false)
 }
@@ -36,6 +35,7 @@ func normalizeDSHIdentityPrefixes(obj map[string]any, role string) int {
 	return sanitizeMessageIdentityPrefixes(obj, role)
 }
 
+// Markdown scope follows the whole message, including spans across text parts.
 func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string, anthropic bool) int {
 	messages, ok := obj["messages"].([]any)
 	if !ok {
@@ -48,17 +48,11 @@ func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string,
 			continue
 		}
 		text, parts := dshMessageText(msg, anthropic)
-		var code []dshTextRange
-		parsedCode := false
+		code := dshMarkdownCodeRanges(text)
 		for _, part := range parts {
-			if sanitized, changed := sanitizeSystemPromptPrefix(part.text); changed {
-				if !parsedCode {
-					code, parsedCode = dshMarkdownCodeRanges(text), true
-				}
-				if !dshPositionInCode(code, part.start) {
-					part.container[part.key] = sanitized
-					modified++
-				}
+			if rewritten, changed := normalizeIdentityTextWithRanges(part.text, code, part.start); changed {
+				part.container[part.key] = rewritten
+				modified++
 			}
 		}
 	}
@@ -73,13 +67,12 @@ func logSystemPromptPrefixCompatibility(r *http.Request, obj map[string]any) {
 	logDSHPromptCompatibility(r, requestID, obj)
 }
 
-// The shared outbound chain retains the upstream count-only diagnostic event,
-// using the fork's message-level Markdown context before any text is merged.
 func logDSHPromptCompatibility(r *http.Request, requestID uint64, obj map[string]any) {
 	anthropic := r != nil && r.URL != nil && r.URL.Path == "/v1/messages"
+	// Complete GUI phrases must be processed before configurable name rules.
+	gui := normalizeDSHGUIContextsForProtocol(obj, anthropic)
 	system := sanitizeMessageIdentityPrefixesForProtocol(obj, "system", anthropic)
 	assistant := sanitizeMessageIdentityPrefixesForProtocol(obj, "assistant", anthropic)
-	gui := normalizeDSHGUIContextsForProtocol(obj, anthropic)
 	if system > 0 {
 		recordCompatibilityRule(r, "dsh_system_identity_prefix")
 	}
@@ -96,8 +89,7 @@ func logDSHPromptCompatibility(r *http.Request, requestID uint64, obj map[string
 	if trace == "" && r != nil {
 		trace = r.Header.Get("X-Trace-ID")
 	}
-	log.Printf("[DSH提示词兼容] traceId=%s requestId=%d system前缀=%d assistant前缀=%d GUI环境句=%d 结果=已改写为中性描述，未记录提示词正文",
-		trace, requestID, system, assistant, gui)
+	log.Printf("[DSH提示词兼容] traceId=%s requestId=%d system前缀=%d assistant前缀=%d GUI环境句=%d 结果=已应用兼容规则，未记录提示词正文", trace, requestID, system, assistant, gui)
 	debugEvent(r, "info", "dsh_prompt_compatibility", map[string]any{
 		"system_prefix_parts": system, "assistant_prefix_parts": assistant,
 		"gui_context_matches": gui, "prompt_body_logged": false,

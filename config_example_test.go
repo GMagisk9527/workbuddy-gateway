@@ -96,6 +96,7 @@ func TestConfigExampleCoversEveryRuntimeField(t *testing.T) {
 // 全新部署：直接使用示例文件必须能正常启动，并落到默认端口。
 func TestConfigExampleStartsFreshDeployment(t *testing.T) {
 	isolatedGatewayConfig(t)
+	t.Cleanup(func() { setIdentityConfig(runtimeIdentityConfig{}) })
 	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "config.example.json"))
 	if err != nil {
 		t.Fatal(err)
