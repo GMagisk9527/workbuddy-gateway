@@ -159,6 +159,9 @@ user、tool、reasoning 实测值、工具参数和工具结果不参与。官�
 
 ## Codex、dsh、Claude Code 接入建议
 
+Claude Code 名称配置、默认行为和 Messages 回归边界见
+[Messages 身份文本说明](messages-identity.md)。
+
 尽量让客户端直接连接网关对应的原生协议入口，避免先经过另一个 Responses→Chat 或 Messages→Chat 翻译层。
 
 - Codex / dsh 使用 Responses 时，可以原样提交 instructions、developer/user、工具与 reasoning.effort。
