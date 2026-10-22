@@ -167,7 +167,13 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	setModelFilter(c.Models.Blocklist, c.Models.Allowlist)
 	_ = setModelAccountFilter(c.Models.Accounts)
 	setSystemPromptConfig(c.SystemPrompt.Fallback, c.SystemPrompt.Force)
-	setAffinityConfig(c.Affinity.Enabled, c.Affinity.Mode, c.Affinity.TTLSeconds, c.Affinity.Capacity, c.Affinity.PrefixHeadBytes)
+	// 亲和默认开启：上游前缀缓存按账号隔离，不固定账号会让同一会话在每个账号上
+	// 各写一份缓存，既多花缓存写入，也会在轮到冷账号时整段 miss。
+	affinityEnabled := true
+	if c.Affinity.Enabled != nil {
+		affinityEnabled = *c.Affinity.Enabled
+	}
+	setAffinityConfig(affinityEnabled, c.Affinity.Mode, c.Affinity.TTLSeconds, c.Affinity.Capacity, c.Affinity.PrefixHeadBytes)
 	creditFetch := true
 	if c.Credits.Fetch != nil {
 		creditFetch = *c.Credits.Fetch
