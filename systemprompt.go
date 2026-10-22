@@ -41,8 +41,8 @@ func configuredFallbackSystemPrompt() string {
 	return fallback
 }
 
-// Locate a possible force suffix, accepting only the two exact identity edits
-// made by the compatibility pass. Code context is checked separately below.
+// Fast path for raw force and the legacy DSH identity edits. Configurable name
+// edits are checked in their complete message context below.
 func systemPromptForceSuffix(content, force string) (int, bool) {
 	tail, source := content, force
 	neutralOpening := dshGUIContextNeutral + dshGUIContextOpening[len(dshGUIContextSentence):]
@@ -84,28 +84,76 @@ func systemPromptForceWireMatches(existing, force, context string, start int, id
 	}
 	code := dshMarkdownCodeRanges(context)
 	wire, _ := normalizeDSHGUIContextPart(force, start, code)
-	if identityAllowed && !dshPositionInCode(code, start) {
-		wire, _ = sanitizeSystemPromptPrefix(wire)
-	}
+	// The shared compatibility pass reparses Markdown after the GUI edit, then
+	// applies all configured name rules. Use that same order and message scope.
+	code = dshMarkdownCodeRanges(context[:start] + wire)
+	wire, _ = normalizeIdentityTextWithPrefix(wire, code, start, identityAllowed)
 	return existing == wire
 }
 
 func systemPromptHasForce(content, force string) bool {
 	start, ok := systemPromptForceSuffix(content, force)
-	if !ok || (start > 0 && !strings.HasSuffix(content[:start], "\n\n")) {
+	if ok && (start == 0 || strings.HasSuffix(content[:start], "\n\n")) &&
+		systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, start == 0) {
+		return true
+	}
+	settings := identitySnapshot()
+	if !settings.enabled || len(settings.replacements) == 0 {
 		return false
 	}
-	return systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, start == 0)
+	// Name edits may affect only part of force when it closes client code.
+	// Restore raw force at valid paragraph boundaries and check its exact wire
+	// representation in that context. Bound the search by its maximum expansion
+	// so a short force does not scan every paragraph of a long client prompt.
+	limit := len(force)
+	ratio := 1
+	for _, replacement := range settings.replacements {
+		ratio = max(ratio, (len(replacement.New)+len(replacement.Old)-1)/len(replacement.Old))
+	}
+	if limit > len(content)/ratio {
+		limit = len(content)
+	} else {
+		limit *= ratio
+		extra := max(0, len(settings.prefix)-len(blockedSystemPromptPrefix))
+		limit += min(extra, len(content)-limit)
+	}
+	first := len(content) - limit
+	if first == 0 && systemPromptForceWireMatches(content, force, force, 0, true) {
+		return true
+	}
+	for pos := max(0, first-2); pos < len(content); {
+		next := strings.Index(content[pos:], "\n\n")
+		if next < 0 {
+			break
+		}
+		start := pos + next + 2
+		if start >= first && systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, false) {
+			return true
+		}
+		pos = start - 1 // Consecutive newlines have overlapping boundaries.
+	}
+	return false
 }
 
 func systemPromptBlockHasForce(message map[string]any, force string) bool {
 	text, parts := dshMessageText(message, false)
+	blocks, _ := message["content"].([]any)
+	if len(blocks) > 0 {
+		last, _ := blocks[len(blocks)-1].(map[string]any)
+		if last["type"] == "text" && last["text"] == "" {
+			// A deletion rule can leave an empty force block. The parsing view
+			// skips empty text, so restore its original separator as well.
+			if len(parts) > 0 {
+				text += "\n"
+			}
+			return systemPromptForceWireMatches("", force, text+force, len(text), true)
+		}
+	}
 	if len(parts) == 0 {
 		return false
 	}
 	last := parts[len(parts)-1]
-	start, ok := systemPromptForceSuffix(last.text, force)
-	return ok && start == 0 && systemPromptForceWireMatches(last.text, force, text[:last.start]+force, last.start, true)
+	return systemPromptForceWireMatches(last.text, force, text[:last.start]+force, last.start, true)
 }
 
 // prepareSystemPromptForUpstream 在 Chat、Responses、Messages 三个入口统一执行。

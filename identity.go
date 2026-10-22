@@ -109,6 +109,10 @@ func normalizeAssistantIdentityText(text string) (string, bool) {
 
 // Offsets belong to the original, complete message, including other parts.
 func normalizeIdentityTextWithRanges(text string, code []dshTextRange, offset int) (string, bool) {
+	return normalizeIdentityTextWithPrefix(text, code, offset, true)
+}
+
+func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset int, allowPrefix bool) (string, bool) {
 	settings := identitySnapshot()
 	if !settings.enabled {
 		return text, false
@@ -120,7 +124,7 @@ func normalizeIdentityTextWithRanges(text string, code []dshTextRange, offset in
 	replacer := strings.NewReplacer(pairs...)
 	var out strings.Builder
 	pos := 0
-	if len(text) >= len(blockedSystemPromptPrefix) && strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
+	if allowPrefix && len(text) >= len(blockedSystemPromptPrefix) && strings.EqualFold(text[:len(blockedSystemPromptPrefix)], blockedSystemPromptPrefix) {
 		end := len(blockedSystemPromptPrefix)
 		inCode := false
 		for _, span := range code {
