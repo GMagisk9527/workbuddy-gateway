@@ -138,6 +138,10 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if consumeClaudeCodeAttribution(msgReq) {
+		recordCompatibilityRule(r, "anthropic_attribution_consumed")
+	}
+
 	// Messages 会在转换时合并 system 文本块。先逐块处理，避免第二块开头的
 	// 已知前缀在 join 后落到正文中段而漏掉；后续共享步骤会再次幂等检查。
 	compatMessages, _ := msgReq["messages"].([]any)
