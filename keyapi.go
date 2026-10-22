@@ -35,7 +35,18 @@ func keyAdmissionMiddleware(next http.Handler) http.Handler {
 		}
 		defer release()
 		withSettlementKey(r, k) // 保留稳定引用：删除 Key 后仍能在结算时归账
-		next.ServeHTTP(w, r)
+		// Settle before releasing the admission slot, so the next request cannot
+		// observe a stale balance while this request is waiting for the WAL.
+		// The outer audit sees an already-cleared attempt and does not settle twice.
+		aw := &auditResponseWriter{ResponseWriter: w}
+		defer func() {
+			status := aw.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			statsFinishAttempt(r, status)
+		}()
+		next.ServeHTTP(aw, r)
 	})
 }
 

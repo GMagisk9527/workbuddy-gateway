@@ -71,7 +71,7 @@ func TestDSHGUIContextMultilineCodeSpans(t *testing.T) {
 		{"double_tick_with_single_tick", "Example ``first line\n` " + dshGUIContextOpening + "\nlast line``.", "Example ``first line\n` " + dshGUIContextOpening + "\nlast line``.", 0},
 		{"windows_newlines", "Example `first\r\n" + dshGUIContextOpening + "\r\nlast`.", "Example `first\r\n" + dshGUIContextOpening + "\r\nlast`.", 0},
 		{"normalize_after_close", "Example `first\n" + dshGUIContextOpening + "\nlast` " + dshGUIContextOpening, "Example `first\n" + dshGUIContextOpening + "\nlast` " + neutral, 1},
-		{"fence_like_line_inside_span", "Example ````first\n```\n" + dshGUIContextOpening + "\nlast```` " + dshGUIContextOpening, "Example ````first\n```\n" + dshGUIContextOpening + "\nlast```` " + neutral, 1},
+		{"fence_like_line_inside_span", "Example ````first\n    ```\n" + dshGUIContextOpening + "\nlast```` " + dshGUIContextOpening, "Example ````first\n    ```\n" + dshGUIContextOpening + "\nlast```` " + neutral, 1},
 		{"close_on_indented_line", "Example `first\n" + dshGUIContextOpening + "\n    last`\n" + dshGUIContextOpening, "Example `first\n" + dshGUIContextOpening + "\n    last`\n" + neutral, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
