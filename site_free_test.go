@@ -43,6 +43,7 @@ func TestSiteKnownFreeSkipsUnusableAccounts(t *testing.T) {
 			}
 			// The scheduler must remain usable after checking marker-only accounts.
 			accountMu.Lock()
+			_ = len(accounts)
 			accountMu.Unlock()
 		})
 	}

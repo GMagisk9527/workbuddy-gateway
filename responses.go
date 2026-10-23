@@ -847,6 +847,17 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming_unsupported", "服务器不支持流式响应 Flush")
 		return
 	}
+	// 上游首字节可能很慢：先下发 SSE 注释心跳，避免边缘节点静默期重置连接。
+	// 所有协议事件都经同一把写锁写出，心跳不会与事件帧交错。
+	streamContext, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	r = r.WithContext(streamContext)
+	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancelStream}
+	guard.setBody(resp.Body)
+	heartbeat := startStreamHeartbeat(guard, currentStreamKeepalive())
+	defer heartbeat.Stop()
+	// response.created / in_progress 不是模型有效数据，不能停掉心跳。
+	out := controlWriter{guard}
 
 	seq := 0
 	var eventBuf []byte
@@ -871,7 +882,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		eventBuf = append(eventBuf, "\ndata: "...)
 		eventBuf = append(eventBuf, b...)
 		eventBuf = append(eventBuf, '\n', '\n')
-		if err := writeSSE(w, flusher, eventBuf); err != nil {
+		if err := writeSSE(out, out, eventBuf); err != nil {
 			writeFailed(err)
 		}
 	}
@@ -974,6 +985,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if len(data) == 0 {
 			continue
 		}
+		// 上游已经有数据流动，停止心跳；心跳只覆盖首字节前的静默期。
+		guard.markEffectiveData()
 		if bytes.Equal(data, doneMarker) {
 			sawDone = true
 			continue
@@ -1005,7 +1018,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 						reasoningPrefix = respReasoningDeltaPrefix(make([]byte, 0, 192), reasoningItemID, reasoningIndex)
 					}
 					reasoningRaw = append(reasoningRaw, raw...)
-					if err := emitRawDelta(w, flusher, &deltaBuf, reasoningPrefix, raw, &seq); err != nil {
+					if err := emitRawDelta(out, out, &deltaBuf, reasoningPrefix, raw, &seq); err != nil {
 						writeFailed(err)
 						break
 					}
@@ -1019,7 +1032,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 						textPrefix = respTextDeltaPrefix(make([]byte, 0, 192), msgItemID, msgIndex)
 					}
 					msgRaw = append(msgRaw, raw...)
-					if err := emitRawDelta(w, flusher, &deltaBuf, textPrefix, raw, &seq); err != nil {
+					if err := emitRawDelta(out, out, &deltaBuf, textPrefix, raw, &seq); err != nil {
 						writeFailed(err)
 						break
 					}
@@ -1060,7 +1073,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 							p = respToolDeltaPrefix(make([]byte, 0, 192), tcItemID[tv.index], tcIndex[tv.index])
 							toolPrefix[tv.index] = p
 						}
-						if err := emitRawDelta(w, flusher, &deltaBuf, p, tv.args, &seq); err != nil {
+						if err := emitRawDelta(out, out, &deltaBuf, p, tv.args, &seq); err != nil {
 							writeFailed(err)
 							break
 						}
@@ -1176,14 +1189,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			break
 		}
 	}
-	if sseWriteErr != nil {
+	if sseWriteErr != nil || guard.err() != nil {
 		// 客户端已断开：关闭响应体会取消上游请求，停止继续消耗额度。
 		_ = resp.Body.Close()
 		log.Printf("[#%d] 下游写入失败，已终止本次流 (账号 %s)", reqID, acc.Path)
 		return
 	}
 	scanErr := scanner.Err()
-	if streamRejection != nil {
+	if streamRejection == nil {
+		// 读取层重放可能直接返回带业务码的错误（例如第二次请求收到 11128），
+		// 扫描循环没有对应的 data 行，这里补做一次识别，保留业务码。
+		streamRejection = reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+	} else {
 		scanErr = streamRejection
 		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
 	}

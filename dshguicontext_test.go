@@ -84,7 +84,7 @@ func TestDSHGUIContextRoleAndProvenanceScope(t *testing.T) {
 					if n := normalizeDSHGUIContexts(obj); n != want {
 						t.Fatalf("changed=%d want=%d", n, want)
 					}
-					text := prefix + dshGUIContextFixture
+					var text string
 					if blocks {
 						parts := message["content"].([]any)
 						text = parts[0].(map[string]any)["text"].(string) + parts[1].(map[string]any)["text"].(string)
