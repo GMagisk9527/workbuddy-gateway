@@ -213,7 +213,6 @@ func TestCCAttributionPreservesNonMetadataSystem(t *testing.T) {
 	}{
 		{"system-string", ccAttributionTestLine, ccAttributionTestLine},
 		{"later-block", []any{ccAttributionTestBlock(instruction), ccAttributionTestBlock(ccAttributionTestLine)}, instruction + "\n" + ccAttributionTestLine},
-		{"not-first-array-entry", []any{map[string]any{"type": "unknown", "data": "sentinel"}, ccAttributionTestBlock(ccAttributionTestLine)}, ccAttributionTestLine},
 		{"cache-control", []any{blockWithCache}, ccAttributionTestLine},
 		{"unknown-block-field", []any{blockWithUnknown}, ccAttributionTestLine},
 	} {
@@ -288,6 +287,7 @@ func TestCCAttributionMalformedBlockDoesNotMutateBody(t *testing.T) {
 		{"nil-first-block", []any{nil, ccAttributionTestBlock("Preserve later instructions.")}},
 		{"string-first-block", []any{ccAttributionTestLine}},
 		{"number-first-block", []any{42}},
+		{"unknown-first-block", []any{map[string]any{"type": "unknown", "data": "sentinel"}, ccAttributionTestBlock(ccAttributionTestLine)}},
 		{"missing-type", []any{map[string]any{"text": ccAttributionTestLine}}},
 		{"boolean-type", []any{map[string]any{"type": true, "text": ccAttributionTestLine}}},
 		{"array-type", []any{map[string]any{"type": []any{"text"}, "text": ccAttributionTestLine}}},

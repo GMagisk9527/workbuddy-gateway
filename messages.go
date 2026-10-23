@@ -107,7 +107,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	var msgReq map[string]any
 	decodeStarted := time.Now()
-	decodeErr := json.Unmarshal(bodyBytes, &msgReq)
+	decodeErr := decodeAnthropicMessageBody(bodyBytes, &msgReq)
 	decodeDuration := time.Since(decodeStarted)
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
@@ -200,7 +200,13 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 // anthropicToChatRequest 将 Anthropic Messages 请求体转换为上游 Chat 请求体。
 func anthropicToChatRequest(body map[string]any, modelName string) (map[string]any, error) {
+	if err := validateAnthropicChatInput(body); err != nil {
+		return nil, err
+	}
 	chat := map[string]any{"model": modelName}
+	if err := validateAnthropicOutputFormat(body); err != nil {
+		return nil, err
+	}
 
 	messages := []any{}
 	if sys := extractAnthropicSystemText(body["system"]); sys != "" {
@@ -403,6 +409,13 @@ func convertAnthropicBlocks(role string, blocks []any) []any {
 				if content == "" && hasImage {
 					content = "[图片]"
 				}
+				if failed, _ := blk["is_error"].(bool); failed {
+					if content != "" {
+						content = "[Tool execution error]\n" + content
+					} else {
+						content = "[Tool execution error]"
+					}
+				}
 				toolMsgs = append(toolMsgs, map[string]any{
 					"role":         "tool",
 					"tool_call_id": strOf(blk["tool_use_id"]),
@@ -535,6 +548,9 @@ func convertAnthropicTools(tools []any) []any {
 		}
 		if p, ok := t["input_schema"]; ok && p != nil {
 			fn["parameters"] = p
+		}
+		if strict, ok := t["strict"].(bool); ok {
+			fn["strict"] = strict
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
@@ -867,7 +883,9 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 			args := slot.args.String()
 			if args == "" {
 				input = map[string]any{}
-			} else if err := json.Unmarshal([]byte(args), &input); err != nil {
+			} else if json.Valid([]byte(args)) {
+				input = json.RawMessage(args) // Preserve the exact JSON numbers.
+			} else {
 				input = args // 参数不是合法 JSON 时原样返回，不让单次调用失败
 			}
 			content = append(content, map[string]any{
@@ -904,7 +922,13 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
+		// SSE comments and control fields carry no JSON payload. Keep accepting
+		// the legacy bare-object form, but never silently drop a malformed data.
+		if !strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "{") {
+			continue
+		}
+		data := stripDataPrefix(line)
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -913,7 +937,7 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
+			return fmt.Errorf("上游 SSE data 包含无效 JSON，本次回复不完整")
 		}
 		observeFirstToken(body, chunk)
 		if out := state.feed(chunk); sink != nil && len(out) > 0 {
@@ -1028,7 +1052,7 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 			"error":      safeDebugError(err),
 		})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游聚合读取 账号=%s 异常=%v", debugTraceID(r), reqID, acc.Path, err)
-		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "聚合上游流式响应失败: "+err.Error())
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "聚合上游流式响应失败: "+err.Error())
 		return
 	}
 	if state.finish == "" {
