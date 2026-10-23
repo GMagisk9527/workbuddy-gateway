@@ -1071,6 +1071,7 @@ claude
 > `tool_calls` 回译为 `tool_use`、`finish_reason` 映射 `stop_reason`（`tool_calls→tool_use`、
 > `length→max_tokens`），并复用账号池轮询、工具序列自愈与 WAF 脱敏管线。
 > 模型名直接填网关 `/v1/models` 列表中的 ID。
+> 支持范围及无法转换时的错误行为见 [Messages → Chat 兼容说明](messages-chat-compatibility.md)。
 
 DSH（`~/.dsh/settings.yaml`）：
 
