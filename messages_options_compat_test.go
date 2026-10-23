@@ -44,7 +44,7 @@ func TestMessagesRejectsMissingHistoryAndMalformedOutputFormat(t *testing.T) {
 		"empty-history":        {"system": "Synthetic system.", "messages": []any{}},
 		"invalid-history-item": {"system": "Synthetic system.", "messages": []any{42}},
 		"invalid-content":      {"messages": []any{map[string]any{"role": "user", "content": 42}}},
-		"invalid-role":         {"messages": []any{map[string]any{"role": "system", "content": "Synthetic system inside messages."}}},
+		"invalid-role":         {"messages": []any{map[string]any{"role": "unknown-role", "content": "Synthetic unsupported role."}}},
 		"format-string":        {"messages": []any{map[string]any{"role": "user", "content": "hi"}}, "output_config": map[string]any{"format": "json_schema"}},
 		"format-type":          {"messages": []any{map[string]any{"role": "user", "content": "hi"}}, "output_config": map[string]any{"format": map[string]any{"type": "unknown", "schema": map[string]any{"type": "object"}}}},
 		"format-schema":        {"messages": []any{map[string]any{"role": "user", "content": "hi"}}, "output_config": map[string]any{"format": map[string]any{"type": "json_schema", "schema": "private-schema-sentinel"}}},

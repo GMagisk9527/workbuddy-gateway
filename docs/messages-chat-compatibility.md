@@ -6,6 +6,7 @@
 | 输入 | 转换行为 |
 | --- | --- |
 | system、用户文本 | 保留指令和正文，沿用现有身份前缀、fallback/force 规则 |
+| `messages` 内的 `system` / `developer` 文本 | 保留既有指令角色兼容；共享 Chat 预处理把 `developer` 归一为 `system`，不把用户或工具结果提升为指令 |
 | base64／URL 图片 | 转为 Chat `image_url`；工具结果中的图片沿用既有提升逻辑 |
 | 自定义工具 | `input_schema` 转为 `function.parameters`，保留 `strict: true/false` |
 | `tool_use` / `tool_result` | 保留调用 ID、名称、参数和结果关联，沿用现有工具序列修复 |
@@ -13,6 +14,11 @@
 | 工具参数中的 JSON 数字 | 请求历史和非流式响应都避免浮点中转，保留大整数及高精度小数 |
 | enabled／adaptive thinking | 沿用现有 effort 转换及明文历史回放；不把不透明签名、redacted 数据当正文 |
 | cache_control、metadata 等 | 保留既有网关兼容处理；不会把 Anthropic 缓存或延迟工具加载语义冒充为 Chat 原生能力 |
+
+消息内的指令角色是本网关兼容扩展。2026-10-23 本机 Claude Code 的正常启动入口在新会话中
+发出过 `[user, system]`，同时提供顶层 system 文本块；角色白名单不能将它提前拒绝。
+回归测试用合成正文重建该结构，覆盖国内／国际站、legacy／official 模式及流式／聚合响应。
+这里只接受指令文本，不放宽图片、thinking 或工具块在不同角色下的原有约束。
 
 `strict` 只是完整传递工具约束，不代表网关增加了采样器或 JSON Schema 验证器。
 参数约束能否由模型强制执行取决于上游，调用方仍应验证实际工具输入。
@@ -23,7 +29,7 @@
 这些请求不选号、不调用上游、不消耗模型额度：
 
 - 缺少或空的 `messages`，即使提供了 system，也不能当成有效对话。
-- `messages[].role` 不是 `user` / `assistant`；其他 role 无法由 Chat 上游表达。
+- `messages[].role` 不在 `user` / `assistant` / `system` / `developer` 中。原生 Chat 的 `tool` / `function` 历史不能经文本角色兜底保留调用关联，应使用 Messages 的 `tool_use` / `tool_result` 块。
 - 不能转换的消息或内容形状；文档／PDF、search_result、未知内容块包括嵌套在工具结果中的形态。
 - Anthropic 托管工具及需要专属 schema 的预定义工具；不能把它们伪装成普通自定义函数。
 - 非空 `output_config.format`。普通 `output_config.effort` 仍可使用。
