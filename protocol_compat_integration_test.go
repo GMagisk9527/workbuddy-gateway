@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -80,7 +81,18 @@ func newCompatHarness(t *testing.T, site string) *compatHarness {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.calls.Add(1)
 		c := compatCapture{headers: r.Header.Clone()}
-		c.err = json.NewDecoder(r.Body).Decode(&c.body)
+		var body io.Reader = r.Body
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			var compressed *gzip.Reader
+			compressed, c.err = gzip.NewReader(r.Body)
+			if c.err == nil {
+				defer compressed.Close()
+				body = compressed
+			}
+		}
+		if c.err == nil {
+			c.err = json.NewDecoder(body).Decode(&c.body)
+		}
 		h.captured <- c
 		reply := h.reply.Load()
 		w.Header().Set("Content-Type", "text/event-stream")
