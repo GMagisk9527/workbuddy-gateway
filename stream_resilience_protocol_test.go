@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -402,5 +403,108 @@ func TestMessagesCloseDuringReplayKeepsAccountLock(t *testing.T) {
 	}
 	if !lateBody.closed.Load() {
 		t.Fatal("response returned after Close was not closed")
+	}
+}
+
+// 重放返回的 400 错误体可能还在阻塞读取：Close 必须能取消它并等待处理结束。
+type replayCtxBlockingBody struct {
+	ctx     context.Context
+	started chan struct{}
+	once    sync.Once
+	closed  atomic.Bool
+}
+
+func (b *replayCtxBlockingBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *replayCtxBlockingBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+func TestFirstByteReplayBodyCloseCancelsReplayErrorBody(t *testing.T) {
+	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+	replayReady := make(chan *replayCtxBlockingBody, 1)
+	body := newFirstByteReplayBody(first, context.Background(), nil, 1, "m", 1, func(ctx context.Context) (*http.Response, error) {
+		respBody := &replayCtxBlockingBody{ctx: ctx, started: make(chan struct{})}
+		replayReady <- respBody
+		return &http.Response{StatusCode: http.StatusBadRequest, Body: respBody}, nil
+	})
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := body.Read(make([]byte, 16))
+		readDone <- err
+	}()
+	var respBody *replayCtxBlockingBody
+	select {
+	case respBody = <-replayReady:
+	case <-time.After(time.Second):
+		t.Fatal("replay was never attempted")
+	}
+	select {
+	case <-respBody.started:
+	case <-time.After(time.Second):
+		t.Fatal("replay error body was not read")
+	}
+	closeDone := make(chan struct{})
+	go func() {
+		_ = body.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on the replay error body")
+	}
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("read after close must fail")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read did not return after Close canceled the replay")
+	}
+	if !respBody.closed.Load() {
+		t.Fatal("replay error body was not closed")
+	}
+}
+
+// 重放被上游明确拒绝时，第二个 attempt 不能因为 SSE 的 200 被记成 unknown 消费。
+func TestMessagesReplayRejectionIsNotSettledAsUnknown(t *testing.T) {
+	withStreamTestAccount(t)
+	dir := resetKeyWorld(t)
+	if err := ledgerLoad(dir); err != nil {
+		t.Fatal(err)
+	}
+	plain, key := mustCreateKey(t, keyCreateOptions{Name: "messages-replay-rejected", QuotaTotal: 20})
+	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+	rejectionBody := &resilienceTrackingBody{Reader: strings.NewReader(`{"error":{"code":11128,"message":"upstream rejected"}}`)}
+	var calls atomic.Int32
+	oldClient := cfg.HttpClient
+	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: first, Request: req}, nil
+		}
+		return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: rejectionBody, Request: req}, nil
+	})}
+	t.Cleanup(func() { cfg.HttpClient = oldClient })
+
+	r := messagesResilienceRequest()
+	r.Header.Set("Authorization", "Bearer "+plain)
+	w := httptest.NewRecorder()
+	newAPIHandler().ServeHTTP(w, r)
+
+	key.mu.Lock()
+	usage := key.usage
+	key.mu.Unlock()
+	if calls.Load() != 2 || usage.Requests != 1 || usage.Unknown != 1 || usage.Total != 0 {
+		t.Fatalf("rejected replay must not be settled as unknown consumption; calls=%d usage=%+v", calls.Load(), usage)
+	}
+	if !strings.Contains(w.Body.String(), "event: error") || !strings.Contains(w.Body.String(), "11128") {
+		t.Fatalf("business rejection not surfaced: %q", w.Body.String())
 	}
 }

@@ -232,14 +232,8 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 
 	resp, replayErr := b.replay(replayCtx)
 
-	b.mu.Lock()
-	b.inflightCancel = nil
-	closed := b.closed
-	b.mu.Unlock()
-
 	if replayErr != nil || resp == nil || resp.Body == nil {
-		cancelReplay()
-		b.inflightDone.Done()
+		b.finishReplay(cancelReplay)
 		debugEvent(b.r, "warn", "first_byte_replay_failed", map[string]any{
 			"attempt": b.replays, "model": b.model,
 			"business_impact": "首个有效字节前重放未能建立连接，按原读取错误返回",
@@ -249,36 +243,39 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		return n, err
 	}
 	if resp.StatusCode >= 400 {
-		// 重放拿到的是业务错误而不是 SSE：读完有限错误体后按业务拒绝返回，
-		// 不把 JSON 错误体交给 SSE 解析器。
+		// 错误体可能还会阻塞：在消费或关闭它之前保持 inflightCancel 有效，
+		// 让并发 Close 能取消这次读取，而不是只能等 idle timeout。
+		b.mu.Lock()
+		closed := b.closed
+		b.mu.Unlock()
+		if closed {
+			_ = resp.Body.Close()
+			b.finishReplay(cancelReplay)
+			return n, err
+		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
-		cancelReplay()
-		b.inflightDone.Done()
+		b.finishReplay(cancelReplay)
 		if rejection := detectUpstreamStreamRejection(body); rejection != nil {
 			return n, rejection
 		}
 		return n, fmt.Errorf("首字节前重放失败：上游返回 HTTP %d", resp.StatusCode)
 	}
-	if closed {
-		// 下游已经关闭：响应在 Close 之后才返回，必须关闭且不能继续读取。
-		_ = resp.Body.Close()
-		cancelReplay()
-		b.inflightDone.Done()
-		return n, err
-	}
 
+	// 安装成功响应；closed 检查与替换在同一临界区，Close 之后不再读取新响应体。
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		_ = resp.Body.Close()
-		cancelReplay()
-		b.inflightDone.Done()
+		b.finishReplay(cancelReplay)
 		return n, err
 	}
 	old := b.reader
 	b.reader = resp.Body
+	b.inflightCancel = nil
 	b.mu.Unlock()
+	// 不取消 replayCtx：它是新响应体的父 context，取消会让刚安装的流立即失效。
+	// 请求结束时由父 context 统一回收。
 	b.inflightDone.Done()
 	_ = old.Close()
 
@@ -289,6 +286,18 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何上游字节，账号锁未释放，未重新选号",
 		debugTraceID(b.r), b.reqID, b.model)
 	return b.Read(p)
+}
+
+// finishReplay 结束一次在途重放：清空取消入口、释放 context 并结束 WaitGroup。
+// 调用前必须已关闭或安装新响应体。
+func (b *firstByteReplayBody) finishReplay(cancel context.CancelFunc) {
+	b.mu.Lock()
+	b.inflightCancel = nil
+	b.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	b.inflightDone.Done()
 }
 
 func (b *firstByteReplayBody) Close() error {

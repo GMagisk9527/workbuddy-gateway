@@ -4063,7 +4063,14 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				statsSelectAccount(replayReq, acc, modelName)
 				replayed, cancel, replayErr := doUpstreamRequest(replayReq, acc, prof, upstreamBytes, reqID, traceID)
 				if replayErr != nil {
+					// 重放没有真正发出或连接失败：按失败状态终结第二个 attempt，
+					// 避免下游 SSE 已发出的 HTTP 200 再把它结算成一次 unknown 消费。
+					statsFinishAttempt(replayReq, http.StatusBadGateway)
 					return nil, replayErr
+				}
+				if replayed.StatusCode >= 400 {
+					// 上游明确拒绝：按真实状态结束这次尝试，不计为 unknown 用量。
+					statsFinishAttempt(replayReq, replayed.StatusCode)
 				}
 				replayed.Body = newIdleReadCloser(replayed.Body, currentIdleTimeout(), cancel)
 				return replayed, nil
