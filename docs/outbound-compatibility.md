@@ -116,6 +116,11 @@ Responses 的 namespace、custom 和 web_search 工具不再被静默丢弃：
   `response.custom_tool_call_input.*` 事件，客户端看到的是原始 Responses 形状；
 - 历史中的 `function_call`、`custom_tool_call` 及其 output 会一并转换，避免续轮丢失。
 
+转换后的工具名称必须唯一。例如普通函数 `mcp__run` 与命名空间 `mcp` 下的 `run`
+会映射到同一个 Chat 名称；现在返回本地 400，不再静默丢弃一个工具或使用错误的 schema。
+重复的普通工具名、自定义工具名，以及与 `web_search` 的名称冲突也按此规则拒绝，
+不会调用上游。互不冲突的工具名及其输出还原保持原有行为。
+
 这不是把 Chat 上游变成完整 OpenAI Responses 实现；工具的实际执行仍由客户端完成。
 
 ### 身份展示

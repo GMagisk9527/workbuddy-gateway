@@ -403,10 +403,16 @@ workbuddy-gateway serve -keepalive-hours ""
 - `declared_body_bytes`、`actual_body_bytes`、`body_read_ms`
 - `body_sha256_prefix`（SHA-256 前 12 位）
 - `json_valid`、`json_decode_ms`
-- `body_limit_bytes`、`body_limit_exceeded`（当前未设置请求体限制，因此分别为 `0`、`false`）
+- `body_limit_bytes`（JSON 请求体上限 32 MiB）、`body_limit_exceeded`（读取是否触发上限）
 - `read_error_type`、脱敏截断后的 `read_error`
 
 调试日志不会记录 `Authorization`、Cookie、API Key、Access Token、Refresh Token 或完整请求体。只记录是否提供 Authorization，以及凭据的不可逆短哈希 `api_key_fingerprint`。
+
+模型请求入口（Chat、Responses、Messages 及 `messages/count_tokens`）在鉴权后限制请求体：
+普通／`identity` 请求最多 32 MiB，gzip／deflate 请求压缩体最多 16 MiB、解压后最多
+32 MiB。超限返回各协议的 HTTP 413 错误；已声明超限长度的普通请求在读取前拒绝，
+未声明长度的请求按实际读取量限制。反向代理若设了更低上限，则先由代理拒绝。
+此限制控制单次请求大小；解析 JSON、构建上游请求及并发请求仍需要额外内存。
 
 ---
 

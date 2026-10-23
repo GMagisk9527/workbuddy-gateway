@@ -603,6 +603,8 @@ func debugBodyReadFailed(r *http.Request, body []byte, readStarted time.Time, re
 
 func debugBodyFields(r *http.Request, body []byte, readDuration, decodeDuration time.Duration, jsonValid bool, readErr error) map[string]any {
 	declared := r.ContentLength
+	var limitErr *http.MaxBytesError
+	limitExceeded := errors.As(readErr, &limitErr)
 	fields := map[string]any{
 		"declared_body_bytes": declared,
 		"actual_body_bytes":   len(body),
@@ -610,8 +612,8 @@ func debugBodyFields(r *http.Request, body []byte, readDuration, decodeDuration 
 		"body_sha256_prefix":  bodyHashPrefix(body),
 		"json_valid":          jsonValid,
 		"json_decode_ms":      durationMilliseconds(decodeDuration),
-		"body_limit_bytes":    int64(0),
-		"body_limit_exceeded": false,
+		"body_limit_bytes":    int64(requestDecodedLimit),
+		"body_limit_exceeded": limitExceeded,
 		"read_error_type":     "",
 		"read_error":          "",
 	}

@@ -26,6 +26,7 @@
 - 不能转换的消息或内容形状；文档／PDF、search_result、未知内容块包括嵌套在工具结果中的形态。
 - Anthropic 托管工具及需要专属 schema 的预定义工具；不能把它们伪装成普通自定义函数。
 - 非空 `output_config.format`。普通 `output_config.effort` 仍可使用。
+- 历史 `tool_use.input` 缺失、为 null、数组或标量；工具输入必须是 JSON 对象，空对象 `{}` 有效。
 
 2026-10-23 使用两个低额度合成 Chat 请求检查当前上游：带 `strict` 的普通工具调用
 返回了匹配参数；`response_format=json_schema` 虽返回 200，输出却没有遵循 schema。
@@ -36,7 +37,13 @@
 
 SSE 注释、event/id/retry 等控制行继续兼容。`data:` 中的坏 JSON 不再静默跳过：
 流式返回 error 并停止，不伪造 message_stop；非流式返回 502。
-原有读取中断、无 finish_reason、业务拒绝、TTFT 和用量结算路径继续沿用。
+工具参数分片在上游结束后检查：非空参数必须组成完整 JSON 对象，坏 JSON、数组、null
+及标量同样返回上述错误，不会被包装成成功的工具调用。空参数字符串沿用无参工具的 `{}`
+约定；合法对象的数字精度和参数内容保持不变。
+
+`finish_reason=length` 截断工具参数时也返回不完整错误，调用方可增加输出预算后重试；
+合法的对象和普通文本仍沿用 `max_tokens` 收尾。已收到的上游 usage 即使随后报错也保留结算，
+完整性标记为 false。原有读取中断、无 finish_reason、业务拒绝及 TTFT 规则继续沿用。
 
 本次没有新增厂商服务端工具执行环境、PDF 提取器、搜索引用系统或完整 schema 验证器。
 `count_tokens` 仍为既有本地估算，不能代替上游 tokenizer 或计费数据。

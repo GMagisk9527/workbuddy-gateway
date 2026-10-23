@@ -100,6 +100,9 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	readDuration := debugElapsedSince(readStarted)
 	if err != nil {
 		debugBodyReadFailed(r, bodyBytes, readStarted, err)
+		if writeRequestBodyLimitError(w, r, err) {
+			return
+		}
 		writeAnthropicError(w, http.StatusBadRequest, "api_error", "读取请求体失败")
 		return
 	}
@@ -863,6 +866,22 @@ func (s *anthropicStreamState) finishEvents() []byte {
 	return out
 }
 
+// A completed tool call must contain an object, not a malformed fragment or a
+// JSON scalar. Empty arguments keep the existing no-argument tool convention.
+func (s *anthropicStreamState) validateToolInputs() error {
+	for _, idx := range s.toolOrder {
+		args := s.tools[idx].args.String()
+		if args == "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(args)
+		if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid([]byte(trimmed)) {
+			return fmt.Errorf("上游工具参数不是完整的 JSON 对象，本次回复不完整")
+		}
+	}
+	return nil
+}
+
 // aggregate 输出完整 Anthropic Message 对象（非流式响应）。
 func (s *anthropicStreamState) aggregate() map[string]any {
 	content := make([]any, 0, len(s.blocks))
@@ -883,10 +902,10 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 			args := slot.args.String()
 			if args == "" {
 				input = map[string]any{}
-			} else if json.Valid([]byte(args)) {
-				input = json.RawMessage(args) // Preserve the exact JSON numbers.
 			} else {
-				input = args // 参数不是合法 JSON 时原样返回，不让单次调用失败
+				// scanUpstreamSSE has validated the final tool input. Keep its
+				// JSON numbers exact instead of decoding through float64.
+				input = json.RawMessage(args)
 			}
 			content = append(content, map[string]any{
 				"type": "tool_use", "id": slot.id, "name": slot.name, "input": input,
@@ -947,6 +966,9 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 		}
 	}
 	err := scanner.Err()
+	if err == nil && state.finish != "" {
+		err = state.validateToolInputs()
+	}
 	completeTokenStream(body, err == nil && state.finish != "")
 	return err
 }
@@ -1043,6 +1065,15 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	state := newAnthropicStreamState(modelName, wantThinking)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
+	streamComplete := false
+	defer func() {
+		// Retain measured consumption even when conversion rejects the result.
+		// Completion and billing are independent; unknown usage stays unknown.
+		statsObserveUsage(r, state.usage, streamComplete)
+		observeModelCredit(acc, modelName, state.usage, reqID)
+		recordModelTokens(modelName, state.usage, reqID)
+		recordModelLatency(modelName, time.Since(startTime))
+	}()
 	if err := scanUpstreamSSE(body, state, nil); err != nil {
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
@@ -1063,11 +1094,8 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "上游流结束但没有 finish_reason，本次回复不完整")
 		return
 	}
+	streamComplete = true
 	msg := state.aggregate()
-	observeModelCredit(acc, modelName, state.usage, reqID)
-	statsObserveUsage(r, state.usage, true)
-	recordModelTokens(modelName, state.usage, reqID)
-	recordModelLatency(modelName, time.Since(startTime))
 	out, err := json.Marshal(msg)
 	if err != nil {
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "序列化响应失败")
@@ -1095,6 +1123,9 @@ func handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	readDuration := debugElapsedSince(readStarted)
 	if err != nil {
 		debugBodyReadFailed(r, bodyBytes, readStarted, err)
+		if writeRequestBodyLimitError(w, r, err) {
+			return
+		}
 		writeAnthropicError(w, http.StatusBadRequest, "api_error", "读取请求体失败")
 		return
 	}

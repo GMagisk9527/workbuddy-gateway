@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -188,6 +191,40 @@ func TestDebugBodyEventsDoNotLogBody(t *testing.T) {
 	}
 	if completed["event"] != "request_body_read_completed" || completed["body_sha256_prefix"] == "" {
 		t.Fatalf("unexpected completed body event: %#v", completed)
+	}
+}
+
+func TestDebugBodyFieldsReportRequestLimit(t *testing.T) {
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens"} {
+		for _, tc := range []struct {
+			name     string
+			declared int64
+			err      error
+			exceeded bool
+		}{
+			{"normal", 2, nil, false},
+			{"unknown-length-normal", -1, nil, false},
+			{"declared-only", requestDecodedLimit + 1, nil, false},
+			{"ordinary-read-error", -1, io.ErrUnexpectedEOF, false},
+			{"same-message-is-not-limit-error", -1, errors.New("http: request body too large"), false},
+			{"limit-error", -1, &http.MaxBytesError{Limit: requestDecodedLimit}, true},
+			{"wrapped-limit-error", -1, fmt.Errorf("reading body: %w", &http.MaxBytesError{Limit: requestDecodedLimit}), true},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.ContentLength = tc.declared
+				fields := debugBodyFields(req, []byte(`{}`), time.Millisecond, 0, tc.err == nil, tc.err)
+				if got := fields["body_limit_bytes"]; got != int64(requestDecodedLimit) {
+					t.Errorf("body_limit_bytes=%v, want %d", got, requestDecodedLimit)
+				}
+				if got := fields["body_limit_exceeded"]; got != tc.exceeded {
+					t.Errorf("body_limit_exceeded=%v, want %v", got, tc.exceeded)
+				}
+				if fields["declared_body_bytes"] != tc.declared || fields["actual_body_bytes"] != 2 {
+					t.Fatal("request size diagnostics changed")
+				}
+			})
+		}
 	}
 }
 
