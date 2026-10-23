@@ -43,6 +43,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	readDuration := debugElapsedSince(readStarted)
 	if err != nil {
 		debugBodyReadFailed(r, bodyBytes, readStarted, err)
+		if writeRequestBodyLimitError(w, r, err) {
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "read_error", "读取请求体失败")
 		return
 	}
@@ -248,7 +251,10 @@ func responsesToChatRequestDetailed(respReq map[string]any, modelName string) (m
 			chat["verbosity"] = v
 		}
 	}
-	tools, toolMap := convertResponsesToolsDetailed(respReq["tools"])
+	tools, toolMap, err := convertResponsesToolsChecked(respReq["tools"])
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(tools) > 0 {
 		chat["tools"] = tools
 	}

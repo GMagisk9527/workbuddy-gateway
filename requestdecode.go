@@ -1,6 +1,6 @@
 package main
 
-// 请求体压缩解码。
+// 请求体大小限制与压缩解码。
 //
 // 客户端插件（dsh-plugin-model-request-accelerator 等）会把请求体压成 gzip/br
 // 再上传，把 3.8MB 的上下文缩到 1.5MB 左右，直接省掉上行时间。网关这里只负责
@@ -27,9 +27,9 @@ import (
 )
 
 const (
-	// 压缩后最多收 16MB（nginx 侧 client_max_body_size 50m 是外层上限）。
+	// 压缩后最多收 16MiB；反向代理可另设更低的外层上限。
 	requestCompressedLimit = 16 << 20
-	// 解压后最多 32MB：真实长上下文请求约 4~8MB，留足余量又能挡住压缩炸弹。
+	// 明文或解压后的 JSON 最多 32MiB。
 	requestDecodedLimit = 32 << 20
 )
 
@@ -41,6 +41,13 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 		encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
 		switch encoding {
 		case "", "identity":
+			if r.ContentLength > requestDecodedLimit {
+				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过网关上限")
+				return
+			}
+			// A missing Content-Length (chunked upload) must have the same bound.
+			// Limit while reading instead of buffering another copy in middleware.
+			r.Body = http.MaxBytesReader(w, r.Body, requestDecodedLimit)
 			next.ServeHTTP(w, r)
 			return
 		case "gzip", "x-gzip", "deflate":
@@ -83,6 +90,17 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			w.Header().Get("X-Trace-ID"), encoding, len(raw), len(decoded), float64(time.Since(start).Microseconds())/1000)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// The protocol handlers keep their existing errors for ordinary read failures,
+// but the shared size boundary must be a 413 in each protocol's error shape.
+func writeRequestBodyLimitError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var limitErr *http.MaxBytesError
+	if !errors.As(err, &limitErr) {
+		return false
+	}
+	writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过网关上限")
+	return true
 }
 
 // decodeCompressedBody 解压并限制解压后大小。

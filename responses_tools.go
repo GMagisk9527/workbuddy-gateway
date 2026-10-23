@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -94,15 +95,28 @@ func functionTool(name, description string, parameters any, strict any) map[stri
 // Chat function tools and returns the reverse map used to restore the client
 // shape in streaming and aggregate responses.
 func convertResponsesToolsDetailed(toolsAny any) ([]any, map[string]responsesToolMeta) {
+	tools, mapping, _ := convertResponsesToolsChecked(toolsAny)
+	return tools, mapping
+}
+
+// A flat Chat name must identify exactly one client tool. Check in the same
+// traversal that applies trimming and namespace/custom/search name conversion,
+// so validation cannot diverge from the actual upstream tool identities.
+func convertResponsesToolsChecked(toolsAny any) ([]any, map[string]responsesToolMeta, error) {
 	arr, ok := toolsAny.([]any)
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
 	out := make([]any, 0, len(arr))
 	tools := make(map[string]responsesToolMeta)
 	seen := make(map[string]bool)
+	var collisionErr error
 	add := func(tool map[string]any, meta responsesToolMeta) {
-		if meta.UpstreamName == "" || seen[meta.UpstreamName] {
+		if meta.UpstreamName == "" {
+			return
+		}
+		if seen[meta.UpstreamName] {
+			collisionErr = errors.New("tools 中的工具名称在转换后重名；请为函数、自定义工具及命名空间子工具使用互不冲突的名称")
 			return
 		}
 		seen[meta.UpstreamName] = true
@@ -200,7 +214,10 @@ func convertResponsesToolsDetailed(toolsAny any) ([]any, map[string]responsesToo
 			addWebSearch()
 		}
 	}
-	return out, tools
+	if collisionErr != nil {
+		return nil, nil, collisionErr
+	}
+	return out, tools, nil
 }
 
 func convertResponsesTools(toolsAny any) []any {

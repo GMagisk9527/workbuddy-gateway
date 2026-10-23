@@ -122,6 +122,9 @@ func validateAnthropicChatContent(content any, role, path string) error {
 			}
 		case "tool_use":
 			if role == "assistant" && strOf(block["id"]) != "" && strOf(block["name"]) != "" {
+				if input, ok := block["input"].(map[string]any); !ok || input == nil {
+					return fmt.Errorf("%s.input 必须是 JSON 对象", blockPath)
+				}
 				continue
 			}
 		case "tool_result":
