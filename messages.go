@@ -855,6 +855,7 @@ func intFloat(v any) int {
 // 客户端把 input 与 cache_read 相加时缓存会被算两遍。
 func (s *anthropicStreamState) anthropicUsage() map[string]any {
 	in, out, cached, created := 0, 0, 0, 0
+	hasCreated := false
 	if s.usage != nil {
 		in = intFloat(s.usage["prompt_tokens"])
 		out = intFloat(s.usage["completion_tokens"])
@@ -862,8 +863,14 @@ func (s *anthropicStreamState) anthropicUsage() map[string]any {
 		if v, _, ok := statsCachedValue(s.usage); ok {
 			cached = int(v)
 		}
-		// 只有上游明确给出写入量时才透传；没有就是 0，绝不编造。
-		created = intFloat(s.usage["cache_creation_input_tokens"])
+		// 上游可能用 cache_creation_input_tokens 或 prompt_cache_write_tokens
+		// 表示写入量；两者只取其一，不按命中量推算。
+		if v, _, ok := statsCacheWriteValue(s.usage); ok {
+			created, hasCreated = int(v), true
+		}
+	}
+	if cached < 0 {
+		cached = 0
 	}
 	if cached > in {
 		cached = in // 上游给了畸形命中数时钳到非负
@@ -871,12 +878,27 @@ func (s *anthropicStreamState) anthropicUsage() map[string]any {
 	if created < 0 {
 		created = 0
 	}
-	return map[string]any{
-		"input_tokens":                in - cached,
-		"cache_read_input_tokens":     cached,
-		"cache_creation_input_tokens": created,
-		"output_tokens":               out,
+	// Anthropic 的 input_tokens 既不含缓存命中，也不含缓存写入。
+	// 实测上游 prompt_tokens = 命中 + 未命中；写入量（若上报）属于未命中中的
+	// 子集，因此从剩余输入中扣除，保持普通输入/读取/写入/output 四类守恒。
+	input := in - cached
+	if created > 0 {
+		if created >= input {
+			input = 0
+		} else {
+			input -= created
+		}
 	}
+	usage := map[string]any{
+		"input_tokens":            input,
+		"cache_read_input_tokens": cached,
+		"output_tokens":           out,
+	}
+	// 上游没有提供写入字段时省略，而不是伪造 0；明确报 0 时保留 0。
+	if hasCreated {
+		usage["cache_creation_input_tokens"] = created
+	}
+	return usage
 }
 
 // finishEvents 关闭所有未收口块并输出 message_delta + message_stop。

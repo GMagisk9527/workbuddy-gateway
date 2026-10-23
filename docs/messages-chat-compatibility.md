@@ -79,6 +79,39 @@ SSE 注释、event/id/retry 等控制行继续兼容。`data:` 中的坏 JSON �
 `stop_reason:"refusal"`，截断或工具调用仍保留相应停止原因。业务错误（包括 11128）
 继续按原错误路径返回，不会被改写成模型拒答。
 
+## 缓存统计口径（2026-10-23 实测）
+
+通过部署中的 `/v1/chat/completions` 直接读取上游原始 `usage`（519 token 小前缀和
+4837 token 大前缀，各重复 2～3 轮，合成内容，无真实会话），确认：
+
+| 上游字段 | 实测行为 |
+| --- | --- |
+| `prompt_cache_hit_tokens` | 真实命中量；第二轮分别为 384 / 4608 |
+| `prompt_cache_miss_tokens` | 未命中量；与命中量相加等于 `prompt_tokens` |
+| `cache_read_input_tokens`、`cached_tokens` | 恒为 0，不能作为命中来源 |
+| `cache_creation_input_tokens`、`prompt_cache_write_tokens` | 字段存在但**恒为 0**，即使缓存已经建立也没有非零写入量 |
+
+因此网关的映射是：
+
+- `cache_read_input_tokens` 优先取 `prompt_cache_hit_tokens`（与 stats 共用同一套
+  `statsCachedValue`，多字段只取一个、不相加）；
+- `cache_creation_input_tokens` 取 `cache_creation_input_tokens`，缺失时回退
+  `prompt_cache_write_tokens`（含嵌套 `prompt_tokens_details.cache_creation_tokens`），
+  两者只取其一，不按命中量推算；
+- `input_tokens = prompt_tokens - cache_read - cache_creation`，普通输入、命中、写入、
+  输出四类守恒；写入量大于剩余输入时钳到 0；
+- 上游完全没有提供写入字段时，Anthropic usage **省略** `cache_creation_input_tokens`，
+  不再伪造 0；上游明确报 0 时保留 0。
+
+ccstatusline 用 `Cache Read / (Cache Read + Cache Write)` 计算命中率。上游写入量恒为 0
+时，这个式子必然显示 100%，它不代表 `prompt_cache_hit_tokens / prompt_tokens` 的真实
+命中率（小样本 384/519≈74%，大样本 4608/4837≈95%）。网关不能、也不会凭空生成写入量；
+需要真实命中率时请使用 `prompt_cache_hit_tokens` 与 `prompt_cache_miss_tokens`，或等待
+上游提供可信的写入统计。
+
+统计文件的行记录新增可选的 `cacheWriteTokens` / `cacheWriteSource`，用于确认某次调用
+上游是否报告了写入量；缺失时为空，不补 0。
+
 本次没有新增厂商服务端工具执行环境、PDF 提取器、搜索引用系统或完整 schema 验证器。
 `count_tokens` 仍为既有本地估算，不能代替上游 tokenizer 或计费数据。
 

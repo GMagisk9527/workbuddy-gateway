@@ -998,7 +998,7 @@ workbuddy-gateway serve -auth-dir ./auths
 | 内容 | 说明 |
 |---|---|
 | 账号模型账本 | 每个凭据的 `ModelStates`（按模型隔离的成本、额度阻断、冷却、最近观测时间），键由「凭据文件 + 站点 + UID + 企业 ID」派生 |
-| 逐次账号调用 | 完成时间、模型、HTTP 状态、是否完整、输入／输出／总 Token、缓存读取、`usage.credit`、总耗时、首字耗时 |
+| 逐次账号调用 | 完成时间、模型、HTTP 状态、是否完整、输入／输出／总 Token、缓存读取、上游报告的缓存写入（`cacheWriteTokens` / `cacheWriteSource`，未提供时省略）、`usage.credit`、总耗时、首字耗时 |
 
 **不记录**：访问令牌、刷新令牌、请求或响应正文、提示词、账号昵称。
 

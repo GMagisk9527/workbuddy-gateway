@@ -449,27 +449,31 @@ func TestToResponsesUsageCacheSources(t *testing.T) {
 
 func TestAnthropicUsageCacheSemantics(t *testing.T) {
 	s := &anthropicStreamState{usage: map[string]any{
-		"prompt_tokens":              float64(100),
-		"completion_tokens":          float64(10),
-		"cache_read_input_tokens":    float64(30),
+		"prompt_tokens":               float64(100),
+		"completion_tokens":           float64(10),
+		"cache_read_input_tokens":     float64(30),
 		"cache_creation_input_tokens": float64(7),
 	}}
 	u := s.anthropicUsage()
 	if got := u["cache_read_input_tokens"]; got != 30 {
 		t.Fatalf("cache_read 应为 30，实际 %v", got)
 	}
-	// Anthropic 语义：input_tokens 不含缓存读取
-	if got := u["input_tokens"]; got != 70 {
-		t.Fatalf("input_tokens 应为 100-30=70，实际 %v", got)
+	// Anthropic 语义：input_tokens 既不含缓存读取，也不含缓存写入。
+	// 普通输入 63 + 读取 30 + 写入 7 = 上游 prompt_tokens 100，四类 Token 守恒。
+	if got := u["input_tokens"]; got != 63 {
+		t.Fatalf("input_tokens 应为 100-30-7=63，实际 %v", got)
 	}
 	if got := u["cache_creation_input_tokens"]; got != 7 {
 		t.Fatalf("上游给出写入量时应透传 7，实际 %v", got)
 	}
+	if in, _ := u["input_tokens"].(int); in+30+7 != 100 {
+		t.Fatalf("缓存读取/写入与普通输入之和应等于 prompt_tokens，实际 %v", u)
+	}
 
-	// 上游没给写入量时必须是 0，不能编造
+	// 上游没给写入字段时省略，不能伪造 0（与「明确报 0」区分）
 	s2 := &anthropicStreamState{usage: map[string]any{"prompt_tokens": float64(10)}}
-	if got := s2.anthropicUsage()["cache_creation_input_tokens"]; got != 0 {
-		t.Fatalf("无写入量时应为 0，实际 %v", got)
+	if _, exists := s2.anthropicUsage()["cache_creation_input_tokens"]; exists {
+		t.Fatal("无写入量时不应输出 cache_creation_input_tokens")
 	}
 }
 

@@ -43,21 +43,24 @@ type statsAccount struct {
 }
 
 type statsRequest struct {
-	Account      string   `json:"account"`
-	Model        string   `json:"model"`
-	At           int64    `json:"at"` // 完成时间，Unix 毫秒，按该时刻归桶
-	Status       int      `json:"status"`
-	Complete     bool     `json:"complete"`
-	TotalTokens  *int64   `json:"totalTokens,omitempty"`
-	InputTokens  *int64   `json:"inputTokens,omitempty"`
-	OutputTokens *int64   `json:"outputTokens,omitempty"`
-	CachedTokens *int64   `json:"cachedTokens,omitempty"` // 已包含在输入里，不再加到总Token
-	CacheSource  string   `json:"cacheSource,omitempty"`  // 命中数来自哪个字段；空=上游未提供（区分"缺失"与"为 0"）
-	Affinity     string   `json:"affinity,omitempty"`     // 会话/前缀亲和的决策结果
-	Credit       *float64 `json:"credit,omitempty"`       // usage.credit，而不是余额差
-	LatencyMS    float64  `json:"latencyMs"`
-	TTFTMS       *float64 `json:"ttftMs,omitempty"`
-	TTFTMetric   string   `json:"ttftMetric,omitempty"` // 空=旧首响应体；v2=有效内容增量，仅v2参与新均值
+	Account      string `json:"account"`
+	Model        string `json:"model"`
+	At           int64  `json:"at"` // 完成时间，Unix 毫秒，按该时刻归桶
+	Status       int    `json:"status"`
+	Complete     bool   `json:"complete"`
+	TotalTokens  *int64 `json:"totalTokens,omitempty"`
+	InputTokens  *int64 `json:"inputTokens,omitempty"`
+	OutputTokens *int64 `json:"outputTokens,omitempty"`
+	CachedTokens *int64 `json:"cachedTokens,omitempty"` // 已包含在输入里，不再加到总Token
+	CacheSource  string `json:"cacheSource,omitempty"`  // 命中数来自哪个字段；空=上游未提供（区分"缺失"与"为 0"）
+	// CacheWriteTokens 是上游明确报告的缓存写入量；未提供时省略，不能按命中量推算。
+	CacheWriteTokens *int64   `json:"cacheWriteTokens,omitempty"`
+	CacheWriteSource string   `json:"cacheWriteSource,omitempty"`
+	Affinity         string   `json:"affinity,omitempty"` // 会话/前缀亲和的决策结果
+	Credit           *float64 `json:"credit,omitempty"`   // usage.credit，而不是余额差
+	LatencyMS        float64  `json:"latencyMs"`
+	TTFTMS           *float64 `json:"ttftMs,omitempty"`
+	TTFTMetric       string   `json:"ttftMetric,omitempty"` // 空=旧首响应体；v2=有效内容增量，仅v2参与新均值
 }
 
 type statsDocument struct {
@@ -234,7 +237,7 @@ func validStatsDocument(doc statsDocument) bool {
 			row.Status < 100 || row.Status > 599 || math.IsNaN(row.LatencyMS) || math.IsInf(row.LatencyMS, 0) {
 			return false
 		}
-		for _, value := range []*int64{row.TotalTokens, row.InputTokens, row.OutputTokens, row.CachedTokens} {
+		for _, value := range []*int64{row.TotalTokens, row.InputTokens, row.OutputTokens, row.CachedTokens, row.CacheWriteTokens} {
 			if value != nil && *value < 0 {
 				return false
 			}
@@ -399,6 +402,35 @@ func statsCachedValue(usage map[string]any) (int64, string, bool) {
 	return 0, "", false
 }
 
+// statsCacheWriteValue 返回上游报告的缓存写入 Token 数及其来源字段。
+// cache_creation_input_tokens（Anthropic 口径）与 prompt_cache_write_tokens
+// （WorkBuddy 扩展）表示同一数量，只能取其一，绝不累加；优先返回正数，
+// 都为 0 时保留来源，区分"上游明确报 0"与"未提供"。
+func statsCacheWriteValue(usage map[string]any) (int64, string, bool) {
+	var fallback *int64
+	var fallbackField string
+	for _, field := range []string{"cache_creation_input_tokens", "prompt_cache_write_tokens"} {
+		if v := statsTokenValue(usage, field); v != nil {
+			if *v > 0 {
+				return *v, field, true
+			}
+			fallback, fallbackField = v, field
+		}
+	}
+	if nested, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		if v := statsTokenValue(nested, "cache_creation_tokens"); v != nil {
+			if *v > 0 {
+				return *v, "prompt_tokens_details.cache_creation_tokens", true
+			}
+			fallback, fallbackField = v, "prompt_tokens_details.cache_creation_tokens"
+		}
+	}
+	if fallback != nil {
+		return *fallback, fallbackField, true
+	}
+	return 0, "", false
+}
+
 // 每次实际账号上游调用结束记录一次，失败重试的账号也单独记；未选号的鉴权拒绝不算账号消耗。
 func statsFinishAttempt(r *http.Request, status int) {
 	p := statsAttemptFor(r)
@@ -410,10 +442,16 @@ func statsFinishAttempt(r *http.Request, status int) {
 	if hasCached {
 		cachedPtr = &cachedTokens
 	}
+	cacheWriteTokens, cacheWriteSource, hasCacheWrite := statsCacheWriteValue(p.usage)
+	var cacheWritePtr *int64
+	if hasCacheWrite {
+		cacheWritePtr = &cacheWriteTokens
+	}
 	row := statsRequest{Account: p.id, Model: p.model, At: time.Now().UnixMilli(), Status: status,
 		Complete: p.complete && status < 400, LatencyMS: durationMilliseconds(time.Since(p.started)), TTFTMS: p.ttft, TTFTMetric: ttftMetric,
 		InputTokens: statsTokenValue(p.usage, "prompt_tokens"), OutputTokens: statsTokenValue(p.usage, "completion_tokens"),
-		CachedTokens: cachedPtr, CacheSource: cacheSource, Affinity: p.affinity}
+		CachedTokens: cachedPtr, CacheSource: cacheSource,
+		CacheWriteTokens: cacheWritePtr, CacheWriteSource: cacheWriteSource, Affinity: p.affinity}
 	if n, ok := usageTotalTokens(p.usage); ok && n >= 0 {
 		row.TotalTokens = &n
 	}
