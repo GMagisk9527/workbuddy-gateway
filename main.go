@@ -3963,7 +3963,8 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				// Keep queued requests behind the rejection's cooldown/disable update.
 				defer acc.lock.Unlock()
 				statsFinishAttempt(r, resp.StatusCode)
-				errBody, _ := io.ReadAll(resp.Body)
+				// 错误体只用于分类和提示；限制上限，避免异常上游把整段大响应读进内存。
+				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 				resp.Body.Close()
 				upstreamCancel()
 				errStr := string(errBody)
@@ -4050,7 +4051,20 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		recordModelSuccess(modelName)
 		// 用空闲看门狗包装响应体：持续有数据就永不超时，超过 upstreamIdleTimeout 无数据才中断。
 		// 关闭响应体时会一并取消上游 context，完成清理。
-		resp.Body = newIdleReadCloser(newAccountStreamBody(resp.Body, acc.lock.Unlock), currentIdleTimeout(), upstreamCancel)
+		var streamBody io.ReadCloser = newIdleReadCloser(resp.Body, currentIdleTimeout(), upstreamCancel)
+		// Messages / Responses 没有协议级重放，在读取层对「首个字节前」的瞬时中断
+		// 重放一次；账号锁由外层 accountStreamBody 持有到最终关闭，重放不会换号。
+		if firstByteReplayPath(r.URL.Path) && currentFirstByteRetry() {
+			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func() (*http.Response, error) {
+				replayed, cancel, replayErr := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
+				if replayErr != nil {
+					return nil, replayErr
+				}
+				replayed.Body = newIdleReadCloser(replayed.Body, currentIdleTimeout(), cancel)
+				return replayed, nil
+			})
+		}
+		resp.Body = newAccountStreamBody(streamBody, acc.lock.Unlock)
 		if affKey != "" {
 			if preferPath != "" && acc.Path != preferPath {
 				affinityForget(affKey)
@@ -4726,7 +4740,11 @@ func doJSONContext(ctx context.Context, client *http.Client, method, fullURL str
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	// 控制类接口的响应同样有上限：异常上游不能把无限大的 JSON 读进内存。
+	raw, err := readLimited(resp.Body, 8<<20)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("读取上游响应失败: %w", err)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d: %s", resp.StatusCode, string(raw))
 	}

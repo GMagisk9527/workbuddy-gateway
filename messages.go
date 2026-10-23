@@ -986,18 +986,25 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "服务器不支持流式响应 Flush")
 		return
 	}
+	// 等待上游首个字节期间下发 SSE 注释心跳，避免边缘节点因长时间静默重置连接；
+	// 心跳与数据帧共用同一把写锁，net/http 不保证 ResponseWriter 并发安全。
+	streamContext, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	r = r.WithContext(streamContext)
+	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancelStream}
+	guard.setBody(resp.Body)
+	heartbeat := startStreamHeartbeat(guard, currentStreamKeepalive())
+	defer heartbeat.Stop()
 	writeFailed := false
 	writeEvent := func(b []byte) bool {
 		if len(b) == 0 {
 			return true
 		}
-		if _, werr := w.Write(b); werr != nil {
-			// 客户端已断开：关闭响应体会取消上游请求，避免继续消耗额度。
-			_ = resp.Body.Close()
+		if werr := guard.writeFrame(b); werr != nil {
+			// 客户端已断开：guard 会关闭响应体并取消上游请求，避免继续消耗额度。
 			writeFailed = true
 			return false
 		}
-		flusher.Flush()
 		return true
 	}
 
@@ -1012,7 +1019,8 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		recordModelLatency(modelName, time.Since(startTime))
 	}()
 	scanErr := scanUpstreamSSE(body, state, writeEvent)
-	if writeFailed {
+	if writeFailed || guard.err() != nil {
+		writeFailed = true
 		log.Printf("[#%d] 下游写入失败，已终止 Messages 流 (账号 %s)", reqID, acc.Path)
 		return
 	}

@@ -83,6 +83,27 @@ func (g *streamWriteGuard) writeHeartbeat() error {
 	return g.write([]byte(": keepalive\n\n"), false, true)
 }
 
+// markEffectiveData 标记已收到有效上游数据，心跳随即停止。
+// Responses 会在读取上游前先写 response.created，这类协议事件不算有效数据。
+func (g *streamWriteGuard) markEffectiveData() {
+	g.mu.Lock()
+	g.dataSeen = true
+	g.mu.Unlock()
+}
+
+// controlWriter 复用 guard 的写锁输出协议事件，但不把它当作有效模型数据。
+// 用于 Responses 的 response.created / in_progress 等前置事件。
+type controlWriter struct{ g *streamWriteGuard }
+
+func (w controlWriter) Write(p []byte) (int, error) {
+	if err := w.g.write(p, false, false); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (controlWriter) Flush() {}
+
 func (g *streamWriteGuard) err() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -132,6 +153,85 @@ func (h *streamHeartbeat) Stop() {
 	}
 	h.once.Do(func() { close(h.stop) })
 	<-h.done
+}
+
+// firstByteReplayPath 只覆盖没有协议级重放的入口。Chat 由
+// streamChatResponseWithReplay 处理，两套机制不能叠加。
+func firstByteReplayPath(path string) bool {
+	switch path {
+	case "/v1/messages", "/v1/messages/count_tokens", "/v1/responses", "/responses":
+		return true
+	}
+	return false
+}
+
+// firstByteReplayBody 在读取层实现「首个字节前重放」：
+// 只有读取方尚未拿到任何上游字节时才重发一次，且沿用已选定的账号。
+// 它位于 accountStreamBody 内层，重放期间账号锁不会释放，不会触发重新选号，
+// 也不会让同一账号并发请求；一旦读出过数据、客户端取消或错误不是瞬时网络
+// 故障，就按原错误返回，绝不重放。
+type firstByteReplayBody struct {
+	reader    io.ReadCloser
+	replay    func() (*http.Response, error)
+	ctx       context.Context
+	r         *http.Request
+	reqID     uint64
+	model     string
+	budget    int
+	replays   int
+	delivered bool
+}
+
+func newFirstByteReplayBody(reader io.ReadCloser, ctx context.Context, r *http.Request, reqID uint64, model string, budget int, replay func() (*http.Response, error)) *firstByteReplayBody {
+	return &firstByteReplayBody{reader: reader, ctx: ctx, r: r, reqID: reqID, model: model, budget: budget, replay: replay}
+}
+
+func (b *firstByteReplayBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if n > 0 {
+		b.delivered = true
+		return n, err
+	}
+	if err == nil || errors.Is(err, io.EOF) {
+		return n, err
+	}
+	if !canReplayStream(err, b.delivered, b.replays < b.budget, b.ctx.Err() != nil) {
+		return n, err
+	}
+	b.replays++
+	resp, replayErr := b.replay()
+	if replayErr != nil || resp == nil || resp.Body == nil {
+		debugEvent(b.r, "warn", "first_byte_replay_failed", map[string]any{
+			"attempt": b.replays, "model": b.model,
+			"business_impact": "首个有效字节前重放未能建立连接，按原读取错误返回",
+		})
+		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=首字节前重放 模型=%s 结果=重放请求失败 业务影响=本次响应不完整 异常=%s",
+			debugTraceID(b.r), b.reqID, b.model, safeDebugError(replayErr))
+		return n, err
+	}
+	if resp.StatusCode >= 400 {
+		// 重放拿到的是业务错误而不是 SSE：读完有限错误体后按原错误语义返回，
+		// 不把 JSON 错误体交给 SSE 解析器。
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+		if rejection := detectUpstreamStreamRejection(body); rejection != nil {
+			return n, rejection
+		}
+		return n, fmt.Errorf("首字节前重放失败：上游返回 HTTP %d", resp.StatusCode)
+	}
+	_ = b.reader.Close()
+	b.reader = resp.Body
+	debugEvent(b.r, "warn", "stream_first_byte_replay", map[string]any{
+		"attempt": b.replays, "model": b.model,
+		"business_impact": "首个有效字节前重放一次；原调用可能额外消耗上游额度",
+	})
+	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何上游字节，账号锁未释放，未重新选号",
+		debugTraceID(b.r), b.reqID, b.model)
+	return b.Read(p)
+}
+
+func (b *firstByteReplayBody) Close() error {
+	return b.reader.Close()
 }
 
 // canReplayStream 只允许在客户端没有收到任何有效数据、预算未用尽、

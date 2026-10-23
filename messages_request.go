@@ -52,10 +52,19 @@ func validateAnthropicChatInput(body map[string]any) error {
 	}
 	for i, raw := range messages {
 		message, ok := raw.(map[string]any)
-		if !ok || strOf(message["role"]) == "" {
+		if !ok {
 			return fmt.Errorf("messages[%d] 必须是包含 role 的消息对象", i)
 		}
-		if err := validateAnthropicChatContent(message["content"], strOf(message["role"]), fmt.Sprintf("messages[%d].content", i)); err != nil {
+		role := strOf(message["role"])
+		if role == "" {
+			return fmt.Errorf("messages[%d] 必须是包含 role 的消息对象", i)
+		}
+		// Anthropic 只定义 user / assistant；其他 role 转换后会被原样透传给
+		// Chat 上游，错误会延迟到上游才暴露，这里直接给出本地 400。
+		if role != "user" && role != "assistant" {
+			return fmt.Errorf("messages[%d].role 必须是 user 或 assistant", i)
+		}
+		if err := validateAnthropicChatContent(message["content"], role, fmt.Sprintf("messages[%d].content", i)); err != nil {
 			return err
 		}
 	}

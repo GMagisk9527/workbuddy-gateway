@@ -30,8 +30,8 @@ func TestProtocolAuthenticationAndAudit(t *testing.T) {
 					if debugTraceID(r) != "integration-trace" {
 						t.Errorf("TraceID lost: %q", debugTraceID(r))
 					}
-					if requestIDFor(r) != requestIDFor(r) {
-						t.Error("requestID changed within one request")
+					if got := requestIDFor(r); got == 0 {
+						t.Error("requestID missing within one request")
 					}
 					w.WriteHeader(http.StatusNoContent)
 				}))))

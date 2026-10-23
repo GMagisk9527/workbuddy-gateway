@@ -25,6 +25,15 @@ const statsFile = "stats.json"
 const statsSchema = 1
 const statsMaxFileBytes = 64 << 20
 
+// 统计明细必须有上限：长期运行的网关如果只追加不裁剪，stats.json 会无限增长，
+// 每次落盘都要序列化整份文档，最终既吃内存又无法原子写入。
+// 上限只约束请求明细；账号摘要单独保留，不影响账号归属展示。
+const (
+	statsMaxRequests = 20000
+	// 超限时成批丢弃最旧记录，避免每条请求都移动整段切片。
+	statsPruneBatch = 500
+)
+
 // 只记录统计事实，不记录凭据、请求/响应正文、提示词或令牌。
 // identity 是账号身份摘要，避免同一文件换成另一个账号后继承旧模型阻断。
 type statsAccount struct {
@@ -179,9 +188,28 @@ func loadOptionalStats() {
 	if doc.Requests == nil {
 		doc.Requests = []statsRequest{}
 	}
+	trimmed, pruned := trimStatsRequests(doc.Requests)
+	doc.Requests = trimmed
 	requestStats.document, requestStats.mode = doc, "file"
 	requestStats.lastSaved = info.ModTime().UnixMilli()
-	log.Printf("[统计文件] traceId=%s 阶段=启动读取 结果=成功 账号=%d 请求记录=%d 说明=不含凭据或正文", trace, len(doc.Accounts), len(doc.Requests))
+	log.Printf("[统计文件] traceId=%s 阶段=启动读取 结果=成功 账号=%d 请求记录=%d 裁剪旧明细=%d 说明=不含凭据或正文", trace, len(doc.Accounts), len(doc.Requests), pruned)
+}
+
+// trimStatsRequests 丢弃最旧的请求明细，返回保留后的切片与丢弃条数。
+// 只前移切片起点，不复制剩余记录；调用方需持有 requestStats 锁或独占 doc。
+func trimStatsRequests(rows []statsRequest) ([]statsRequest, int) {
+	if len(rows) <= statsMaxRequests {
+		return rows, 0
+	}
+	drop := len(rows) - statsMaxRequests
+	// 成批丢弃，避免刚好触顶后每条请求都移动一次切片。
+	if rem := drop % statsPruneBatch; rem != 0 {
+		drop += statsPruneBatch - rem
+	}
+	if drop > len(rows) {
+		drop = len(rows)
+	}
+	return rows[drop:], drop
 }
 
 func validStatsDocument(doc statsDocument) bool {
@@ -408,8 +436,15 @@ func statsFinishAttempt(r *http.Request, status int) {
 		requestStats.document.Accounts[p.id] = p.account
 	}
 	requestStats.document.Requests = append(requestStats.document.Requests, row)
+	var pruned int
+	requestStats.document.Requests, pruned = trimStatsRequests(requestStats.document.Requests)
+	kept := len(requestStats.document.Requests)
 	requestStats.revision++
 	requestStats.Unlock()
+	if pruned > 0 {
+		log.Printf("[统计文件] 结果=裁剪 丢弃最旧明细=%d 保留=%d 上限=%d 说明=更早的请求明细不再参与汇总，账号摘要保留",
+			pruned, kept, statsMaxRequests)
+	}
 	log.Printf("[请求统计] traceId=%s 账号=%s 模型=%s 状态=%d 完整=%t 有Token=%t 有积分=%t 总耗时ms=%.2f TTFT口径=%s 有首Token=%t 说明=只记录实测usage，不记录正文；文件写入由后台执行",
 		debugTraceID(r), p.account.File, p.model, row.Status, row.Complete, row.TotalTokens != nil, row.Credit != nil, row.LatencyMS, row.TTFTMetric, row.TTFTMS != nil)
 	*p = statsAttempt{}

@@ -23,6 +23,7 @@
 这些请求不选号、不调用上游、不消耗模型额度：
 
 - 缺少或空的 `messages`，即使提供了 system，也不能当成有效对话。
+- `messages[].role` 不是 `user` / `assistant`；其他 role 无法由 Chat 上游表达。
 - 不能转换的消息或内容形状；文档／PDF、search_result、未知内容块包括嵌套在工具结果中的形态。
 - Anthropic 托管工具及需要专属 schema 的预定义工具；不能把它们伪装成普通自定义函数。
 - 非空 `output_config.format`。普通 `output_config.effort` 仍可使用。
