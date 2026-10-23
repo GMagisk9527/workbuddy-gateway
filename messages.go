@@ -141,6 +141,12 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r, msgReq, err = prepareAnthropicThinking(r, msgReq, modelName)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
 	if consumeClaudeCodeAttribution(msgReq) {
 		recordCompatibilityRule(r, "anthropic_attribution_consumed")
 	}
@@ -203,6 +209,13 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 // anthropicToChatRequest 将 Anthropic Messages 请求体转换为上游 Chat 请求体。
 func anthropicToChatRequest(body map[string]any, modelName string) (map[string]any, error) {
+	if err := validateAnthropicCapabilities(body); err != nil {
+		return nil, err
+	}
+	body, err := normalizeAnthropicToolReferences(body)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateAnthropicChatInput(body); err != nil {
 		return nil, err
 	}
@@ -580,9 +593,10 @@ func convertAnthropicToolChoice(tc map[string]any) any {
 // -----------------------------------------------------------------------------
 
 type anthropicTextSlot struct {
-	open  bool
-	index int
-	buf   strings.Builder
+	open      bool
+	index     int
+	buf       strings.Builder
+	signature string
 }
 
 type anthropicToolSlot struct {
@@ -601,18 +615,20 @@ type anthropicContentSlot struct {
 // anthropicStreamState 把逐个到来的 chat.completion.chunk 翻译为 Anthropic
 // SSE 事件字节流。同一实例也可走 aggregate() 输出非流式完整 Message。
 type anthropicStreamState struct {
-	msgID        string
-	model        string
-	wantThinking bool
-	started      bool
-	blockIndex   int
-	thinking     *anthropicTextSlot
-	text         *anthropicTextSlot
-	tools        map[int]*anthropicToolSlot
-	toolOrder    []int
-	blocks       []anthropicContentSlot
-	finish       string
-	usage        map[string]any
+	msgID          string
+	model          string
+	wantThinking   bool
+	hiddenThinking *protocolReasoningCodec
+	started        bool
+	blockIndex     int
+	thinking       *anthropicTextSlot
+	text           *anthropicTextSlot
+	tools          map[int]*anthropicToolSlot
+	toolOrder      []int
+	blocks         []anthropicContentSlot
+	finish         string
+	refused        bool
+	usage          map[string]any
 }
 
 func newAnthropicStreamState(modelName string, wantThinking bool) *anthropicStreamState {
@@ -672,6 +688,10 @@ func (s *anthropicStreamState) feed(chunk map[string]any) []byte {
 			if ct, ok := delta["content"].(string); ok && ct != "" {
 				out = append(out, s.appendText(ct)...)
 			}
+			if refusal, ok := delta["refusal"].(string); ok && refusal != "" {
+				s.refused = true
+				out = append(out, s.appendText(refusal)...)
+			}
 			if tcs, ok := delta["tool_calls"].([]any); ok {
 				for _, tcAny := range tcs {
 					tc, ok := tcAny.(map[string]any)
@@ -705,7 +725,7 @@ func (s *anthropicStreamState) stopThinking(out []byte) []byte {
 	s.thinking.open = false
 	out = append(out, s.emit("content_block_delta", map[string]any{
 		"index": s.thinking.index,
-		"delta": map[string]any{"type": "signature_delta", "signature": anthropicSignature(s.thinking.buf.String())},
+		"delta": map[string]any{"type": "signature_delta", "signature": s.thinkingSignature(s.thinking)},
 	})...)
 	out = append(out, s.emit("content_block_stop", map[string]any{"index": s.thinking.index})...)
 	return out
@@ -725,6 +745,12 @@ func (s *anthropicStreamState) appendThinking(rc string) []byte {
 		})...)
 	}
 	s.thinking.buf.WriteString(rc)
+	// WorkBuddy does not distinguish progress updates from reasoning. Both
+	// omitted and updates hide reasoning and keep encrypted replay state,
+	// rather than fabricating user-facing progress summaries.
+	if s.hiddenThinking != nil {
+		return out
+	}
 	out = append(out, s.emit("content_block_delta", map[string]any{
 		"index": s.thinking.index,
 		"delta": map[string]any{"type": "thinking_delta", "thinking": rc},
@@ -812,6 +838,13 @@ func mapStopReason(finish string) string {
 	return "end_turn"
 }
 
+func (s *anthropicStreamState) stopReason() string {
+	if s.refused && s.finish == "stop" && len(s.toolOrder) == 0 {
+		return "refusal"
+	}
+	return mapStopReason(s.finish)
+}
+
 func intFloat(v any) int {
 	f, _ := v.(float64)
 	return int(f)
@@ -859,7 +892,7 @@ func (s *anthropicStreamState) finishEvents() []byte {
 		}
 	}
 	out = append(out, s.emit("message_delta", map[string]any{
-		"delta": map[string]any{"stop_reason": mapStopReason(s.finish), "stop_sequence": nil},
+		"delta": map[string]any{"stop_reason": s.stopReason(), "stop_sequence": nil},
 		"usage": s.anthropicUsage(),
 	})...)
 	out = append(out, s.emit("message_stop", map[string]any{})...)
@@ -891,8 +924,11 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 		switch block.kind {
 		case "thinking":
 			text := block.text.buf.String()
+			if s.hiddenThinking != nil {
+				text = ""
+			}
 			content = append(content, map[string]any{
-				"type": "thinking", "thinking": text, "signature": anthropicSignature(text),
+				"type": "thinking", "thinking": text, "signature": s.thinkingSignature(block.text),
 			})
 		case "text":
 			content = append(content, map[string]any{"type": "text", "text": block.text.buf.String()})
@@ -918,7 +954,7 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 		"role":          "assistant",
 		"content":       content,
 		"model":         s.model,
-		"stop_reason":   mapStopReason(s.finish),
+		"stop_reason":   s.stopReason(),
 		"stop_sequence": nil,
 		"usage":         s.anthropicUsage(),
 	}
@@ -929,6 +965,17 @@ func (s *anthropicStreamState) aggregate() map[string]any {
 func anthropicSignature(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func (s *anthropicStreamState) thinkingSignature(slot *anthropicTextSlot) string {
+	if slot.signature == "" {
+		if s.hiddenThinking != nil {
+			slot.signature = s.hiddenThinking.seal(slot.buf.String())
+		} else {
+			slot.signature = anthropicSignature(slot.buf.String())
+		}
+	}
+	return slot.signature
 }
 
 // -----------------------------------------------------------------------------
@@ -1009,6 +1056,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 	}
 
 	state := newAnthropicStreamState(modelName, wantThinking)
+	applyAnthropicThinkingPolicy(state, r)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	streamComplete := false
@@ -1071,6 +1119,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time, wantThinking bool) {
 	defer resp.Body.Close()
 	state := newAnthropicStreamState(modelName, wantThinking)
+	applyAnthropicThinkingPolicy(state, r)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	streamComplete := false

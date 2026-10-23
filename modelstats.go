@@ -244,7 +244,7 @@ func hasFirstTokenDelta(chunk map[string]any) bool {
 	for _, raw := range choices {
 		choice, _ := raw.(map[string]any)
 		delta, _ := choice["delta"].(map[string]any)
-		for _, field := range []string{"content", "reasoning_content", "reasoning"} {
+		for _, field := range []string{"content", "refusal", "reasoning_content", "reasoning"} {
 			// 与dsh相同：空字符串不算，但非空空白字符串是有效增量。
 			if text, ok := delta[field].(string); ok && text != "" {
 				return true

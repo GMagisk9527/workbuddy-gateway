@@ -334,7 +334,7 @@ func TestCodexResponsesAndMessagesThroughHTTP(t *testing.T) {
 		"input": []any{map[string]any{"role": "developer", "content": "Follow project conventions."}, map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "Review."}, map[string]any{"type": "input_image", "image_url": "data:image/png;base64,AA==", "detail": "low"}}}},
 		"tools": []any{tool}, "tool_choice": map[string]any{"type": "function", "name": "inspect"}, "reasoning": map[string]any{"effort": "high"}, "max_output_tokens": 768,
 		"temperature": 0.2, "top_p": 0.8, "parallel_tool_calls": false, "service_tier": "auto", "prompt_cache_key": "synthetic-cache", "prompt_cache_retention": "in_memory", "safety_identifier": "synthetic-safety", "user": "synthetic-user",
-		"text": map[string]any{"verbosity": "low", "format": map[string]any{"type": "json_schema", "name": "answer", "strict": true, "schema": map[string]any{"type": "object"}}},
+		"text": map[string]any{"verbosity": "low", "format": map[string]any{"type": "text"}},
 	}
 	headers := map[string]string{"thread-id": "synthetic-codex-parent", "session-id": "synthetic-shared-process"}
 	var firstID string
@@ -361,9 +361,9 @@ func TestCodexResponsesAndMessagesThroughHTTP(t *testing.T) {
 		if c.body["tool_choice"] != "required" || c.body["max_tokens"] != float64(768) || c.body["verbosity"] != "low" {
 			t.Fatal("tool/output/text parameters lost")
 		}
-		format := c.body["response_format"].(map[string]any)["json_schema"].(map[string]any)
-		if format["strict"] != true || format["name"] != "answer" {
-			t.Fatal("structured output schema lost")
+		format := c.body["response_format"].(map[string]any)
+		if format["type"] != "text" {
+			t.Fatal("plain text output format lost")
 		}
 		messages := c.body["messages"].([]any)
 		if messages[1].(map[string]any)["role"] != "system" || messages[1].(map[string]any)["content"] != "Follow project conventions." {

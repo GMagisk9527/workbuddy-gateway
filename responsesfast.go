@@ -46,6 +46,7 @@ type respChunkView struct {
 	nChoices  int
 	reasoning [respMaxChoices][]byte
 	content   [respMaxChoices][]byte
+	refusal   [respMaxChoices][]byte
 	toolOff   [respMaxChoices]int
 	toolCnt   [respMaxChoices]int
 
@@ -59,6 +60,7 @@ var (
 	keyDeltaB   = []byte(`delta`)
 	keyFinishB  = []byte(`finish_reason`)
 	keyContB    = []byte(`content`)
+	keyRefusalB = []byte(`refusal`)
 	keyReasB    = []byte(`reasoning_content`)
 	keyReas2B   = []byte(`reasoning`)
 	keyToolsB   = []byte(`tool_calls`)
@@ -203,6 +205,7 @@ func respParseChoices(src []byte, i int, v *respChunkView) (int, bool) {
 func respParseChoice(src []byte, i int, v *respChunkView, c int) (int, bool) {
 	v.reasoning[c] = nil
 	v.content[c] = nil
+	v.refusal[c] = nil
 	v.toolCnt[c] = 0
 	i++ // '{'
 	var ks keySet
@@ -298,7 +301,7 @@ func respParseDelta(src []byte, i int, v *respChunkView, c int) (int, bool) {
 		}
 		i = skipWS(src, i+1)
 		switch {
-		case bytes.Equal(key, keyContB), bytes.Equal(key, keyReasB), bytes.Equal(key, keyReas2B):
+		case bytes.Equal(key, keyContB), bytes.Equal(key, keyRefusalB), bytes.Equal(key, keyReasB), bytes.Equal(key, keyReas2B):
 			if i < len(src) && src[i] == '"' {
 				end, okv := skipValue(src, i)
 				if !okv {
@@ -311,6 +314,8 @@ func respParseDelta(src []byte, i int, v *respChunkView, c int) (int, bool) {
 					switch {
 					case bytes.Equal(key, keyContB):
 						v.content[c] = raw
+					case bytes.Equal(key, keyRefusalB):
+						v.refusal[c] = raw
 					case bytes.Equal(key, keyReasB):
 						v.reasoning[c] = raw
 					}
@@ -551,12 +556,18 @@ func decodeJSONBody(raw []byte) string {
 
 // ---- 逐 token 事件的直接拼装 ----
 
-func respTextDeltaPrefix(dst []byte, itemID string, outputIndex int) []byte {
-	dst = append(dst, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\""...)
+func respContentDeltaPrefix(dst []byte, event, itemID string, outputIndex, contentIndex int) []byte {
+	dst = append(dst, "event: "...)
+	dst = append(dst, event...)
+	dst = append(dst, "\ndata: {\"type\":\""...)
+	dst = append(dst, event...)
+	dst = append(dst, "\",\"item_id\":\""...)
 	dst = append(dst, itemID...)
 	dst = append(dst, "\",\"output_index\":"...)
 	dst = strconv.AppendInt(dst, int64(outputIndex), 10)
-	dst = append(dst, ",\"content_index\":0,\"delta\":\""...)
+	dst = append(dst, ",\"content_index\":"...)
+	dst = strconv.AppendInt(dst, int64(contentIndex), 10)
+	dst = append(dst, ",\"delta\":\""...)
 	return dst
 }
 

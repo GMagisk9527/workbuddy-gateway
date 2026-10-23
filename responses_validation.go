@@ -1,11 +1,17 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"unicode/utf8"
+)
 
 // This gateway is a stateless Chat translator, not an OpenAI response store.
 // Reject server-side references before billing rather than silently dropping
 // conversation history or encrypted state that the Chat upstream cannot replay.
 func validateResponsesReplay(body map[string]any) error {
+	if err := validateResponsesCapabilities(body); err != nil {
+		return err
+	}
 	for _, key := range []string{"previous_response_id", "conversation"} {
 		if value := body[key]; value != nil && value != "" {
 			return fmt.Errorf("%s 不受无状态网关支持：请在 input 中回放完整消息及 function_call/function_call_output 历史", key)
@@ -65,6 +71,95 @@ func validateResponsesReplay(body map[string]any) error {
 		case "web_search_call": // 保留已有的搜索历史兼容，不把它插入工具结果序列
 		default:
 			return fmt.Errorf("input[%d]: 当前 Chat 上游不支持此 Responses 项类型；请回放完整文本/函数调用历史", i)
+		}
+	}
+	return nil
+}
+
+// Validate options with semantics that a synchronous Chat upstream cannot
+// provide. Empty/default options remain compatible; metadata is kept locally
+// by the response layer rather than forwarded as an upstream user identifier.
+func validateResponsesCapabilities(body map[string]any) error {
+	if value := body["background"]; value != nil {
+		background, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("background 必须是布尔值")
+		}
+		if background {
+			return fmt.Errorf("background=true 不受当前同步 Chat 网关支持；请使用 background=false")
+		}
+	}
+	if value := body["prompt"]; value != nil {
+		prompt, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("prompt 必须是对象")
+		}
+		if len(prompt) != 0 {
+			return fmt.Errorf("当前 Chat 网关不支持 prompt 模板；请在 instructions/input 中提供展开后的内容")
+		}
+	}
+	if value := body["truncation"]; value != nil {
+		mode, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("truncation 必须是字符串")
+		}
+		if mode != "" && mode != "disabled" {
+			return fmt.Errorf("当前 Chat 网关不支持自动 truncation；请使用 disabled 并由客户端管理历史长度")
+		}
+	}
+	if value := body["include"]; value != nil {
+		includes, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("include 必须是字符串数组")
+		}
+		for _, raw := range includes {
+			include, ok := raw.(string)
+			if !ok {
+				return fmt.Errorf("include 必须是字符串数组")
+			}
+			// The response layer provides gateway-encrypted reasoning for
+			// stateless replay. Other optional native output data is unavailable.
+			if include != "reasoning.encrypted_content" {
+				return fmt.Errorf("当前 Chat 网关的 include 仅支持 reasoning.encrypted_content")
+			}
+		}
+	}
+	if value := body["text"]; value != nil {
+		text, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("text 必须是对象")
+		}
+		if value := text["format"]; value != nil {
+			format, ok := value.(map[string]any)
+			if !ok {
+				return fmt.Errorf("text.format 必须是对象")
+			}
+			if value := format["type"]; value != nil {
+				kind, ok := value.(string)
+				if !ok {
+					return fmt.Errorf("text.format.type 必须是字符串")
+				}
+				if kind != "" && kind != "text" {
+					// WorkBuddy accepts response_format without guaranteeing its
+					// constraints. Match the Messages structured-output boundary.
+					return fmt.Errorf("当前 WorkBuddy Chat 上游不支持保证结构化输出约束的 text.format；请使用 type=text 或原生支持结构化输出的上游")
+				}
+			}
+		}
+	}
+	if value := body["metadata"]; value != nil {
+		metadata, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("metadata 必须是字符串键值对象")
+		}
+		if len(metadata) > 16 {
+			return fmt.Errorf("metadata 最多允许 16 个键值对")
+		}
+		for key, raw := range metadata {
+			value, ok := raw.(string)
+			if !ok || utf8.RuneCountInString(key) > 64 || utf8.RuneCountInString(value) > 512 {
+				return fmt.Errorf("metadata 的键必须不超过 64 个字符，值必须是不超过 512 个字符的字符串")
+			}
 		}
 	}
 	return nil

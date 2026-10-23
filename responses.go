@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -83,6 +84,11 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r, respReq, err = prepareResponsesReasoning(r, respReq, modelName)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	chatReq, toolMap, err := responsesToChatRequestDetailed(respReq, modelName)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -92,6 +98,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	recordCompatibilityRule(r, "responses_to_chat")
 	// 下游 Responses 恢复原始 namespace/custom 形状；Chat 上游只认识扁平的 function 名。
 	r = withResponsesToolMap(r, toolMap)
+	r = withResponsesMetadata(r, respReq["metadata"])
 
 	prepareUpstreamChatRequest(chatReq, r, reqID, modelName)
 	logResponsesToolOutputConversion(r, reqID, respReq)
@@ -652,7 +659,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	observeModelCredit(acc, modelName, usage, reqID)
 	recordModelTokens(modelName, usage, reqID)
 	recordModelLatency(modelName, time.Since(startTime))
-	out, err := chatCompletionToResponsesWithTools(completionJSON, modelName, responsesToolMapFor(r))
+	out, err := chatCompletionToResponsesForRequest(r, completionJSON, modelName, responsesToolMapFor(r))
 	if err != nil {
 		debugEvent(r, "error", "response_translation_failed", map[string]any{
 			"error_type": debugErrorType(err),
@@ -679,18 +686,23 @@ func chatCompletionToResponses(chatJSON []byte, modelName string) ([]byte, error
 
 // chatCompletionToResponsesWithTools 将 chat.completion JSON 转换为 Responses 响应对象。
 func chatCompletionToResponsesWithTools(chatJSON []byte, modelName string, toolMap map[string]responsesToolMeta) ([]byte, error) {
+	return chatCompletionToResponsesForRequest(nil, chatJSON, modelName, toolMap)
+}
+
+func chatCompletionToResponsesForRequest(r *http.Request, chatJSON []byte, modelName string, toolMap map[string]responsesToolMeta) ([]byte, error) {
 	var chat map[string]any
 	if err := json.Unmarshal(chatJSON, &chat); err != nil {
 		return nil, err
 	}
 
-	var content, reasoning, finishReason string
+	var content, refusal, reasoning, finishReason string
 	var toolCalls []any
 	if choices, ok := chat["choices"].([]any); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]any); ok {
 			finishReason, _ = choice["finish_reason"].(string)
 			if msg, ok := choice["message"].(map[string]any); ok {
 				content, _ = msg["content"].(string)
+				refusal, _ = msg["refusal"].(string)
 				reasoning, _ = msg["reasoning_content"].(string)
 				toolCalls, _ = msg["tool_calls"].([]any)
 			}
@@ -700,22 +712,28 @@ func chatCompletionToResponsesWithTools(chatJSON []byte, modelName string, toolM
 
 	output := []any{}
 	if reasoning != "" {
-		output = append(output, map[string]any{
+		item := map[string]any{
 			"id":      "rs_" + compactUUID(),
 			"type":    "reasoning",
 			"status":  status,
 			"summary": []any{map[string]any{"type": "summary_text", "text": reasoning}},
-		})
+		}
+		output = append(output, decorateResponsesReasoningItem(r, item))
 	}
-	if content != "" || len(toolCalls) == 0 {
+	if content != "" || refusal != "" || len(toolCalls) == 0 {
+		parts := []any{}
+		if content != "" || refusal == "" {
+			parts = append(parts, map[string]any{"type": "output_text", "text": content, "annotations": []any{}})
+		}
+		if refusal != "" {
+			parts = append(parts, map[string]any{"type": "refusal", "refusal": refusal})
+		}
 		output = append(output, map[string]any{
-			"id":     "msg_" + compactUUID(),
-			"type":   "message",
-			"status": status,
-			"role":   "assistant",
-			"content": []any{
-				map[string]any{"type": "output_text", "text": content, "annotations": []any{}},
-			},
+			"id":      "msg_" + compactUUID(),
+			"type":    "message",
+			"status":  status,
+			"role":    "assistant",
+			"content": parts,
 		})
 	}
 	for _, tcAny := range toolCalls {
@@ -746,7 +764,7 @@ func chatCompletionToResponsesWithTools(chatJSON []byte, modelName string, toolM
 		respID = "resp_" + strings.TrimPrefix(respID, "chatcmpl-")
 	}
 
-	result := buildResponsesEnvelope(respID, modelName, created)
+	result := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 	result["status"] = status
 	result["incomplete_details"] = incompleteDetails
 	result["output"] = output
@@ -809,14 +827,18 @@ func toResponsesUsage(u map[string]any) map[string]any {
 	if total == 0 {
 		total = in + out
 	}
-	cached, reasoningTokens := 0.0, 0.0
+	cached, reasoningTokens := 0.0, int64(0)
 	// 统一走 statsCachedValue：兼容 prompt_cache_hit_tokens / cache_read_input_tokens /
 	// cached_tokens / *_details.cached_tokens 多种表示，只取一个、不相加。
 	if v, _, ok := statsCachedValue(u); ok {
 		cached = float64(v)
 	}
+	var validReasoning bool
 	if d, ok := u["completion_tokens_details"].(map[string]any); ok {
-		reasoningTokens = numOr0(d["reasoning_tokens"])
+		reasoningTokens, validReasoning = responsesReasoningTokens(d["reasoning_tokens"])
+	}
+	if !validReasoning {
+		reasoningTokens, _ = responsesReasoningTokens(u["completion_thinking_tokens"])
 	}
 	return map[string]any{
 		"input_tokens":          int64(in),
@@ -825,6 +847,38 @@ func toResponsesUsage(u map[string]any) map[string]any {
 		"output_tokens_details": map[string]any{"reasoning_tokens": int64(reasoningTokens)},
 		"total_tokens":          int64(total),
 	}
+}
+
+// Prefer the standard detail even when it explicitly reports zero. The upstream
+// thinking counter is an alternative representation, never an additional cost.
+func responsesReasoningTokens(value any) (int64, bool) {
+	var number float64
+	switch value := value.(type) {
+	case float64:
+		number = value
+	case json.Number:
+		var err error
+		number, err = value.Float64()
+		if err != nil {
+			return 0, false
+		}
+	case int:
+		if value >= 0 {
+			return int64(value), true
+		}
+		return 0, false
+	case int64:
+		if value >= 0 {
+			return value, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+	if number < 0 || number >= math.Exp2(63) || math.IsNaN(number) || math.Trunc(number) != number {
+		return 0, false
+	}
+	return int64(number), true
 }
 
 func numOr0(v any) float64 {
@@ -889,7 +943,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	created := time.Now().Unix()
 	respID := "resp_" + compactUUID()
-	envelope := buildResponsesEnvelope(respID, modelName, created)
+	envelope := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 	emit("response.created", map[string]any{"response": envelope})
 	emit("response.in_progress", map[string]any{"response": envelope})
 
@@ -905,6 +959,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	msgOpen := false
 	msgIndex := -1
 	msgItemID := ""
+	textPartIndex, refusalPartIndex := -1, -1
+	var messagePartTypes []string
 
 	// function_call item 状态
 	toolCalls := map[int]*mergedToolCall{}
@@ -943,9 +999,24 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			"output_index": msgIndex,
 			"item":         map[string]any{"id": msgItemID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}},
 		})
+	}
+	openMessagePart := func(refusal bool) {
+		openMessage()
+		partIndex := &textPartIndex
+		if refusal {
+			partIndex = &refusalPartIndex
+		}
+		if *partIndex >= 0 {
+			return
+		}
+		part := map[string]any{"type": "output_text", "annotations": []any{}, "text": ""}
+		if refusal {
+			part = map[string]any{"type": "refusal", "refusal": ""}
+		}
+		*partIndex = len(messagePartTypes)
+		messagePartTypes = append(messagePartTypes, part["type"].(string))
 		emit("response.content_part.added", map[string]any{
-			"item_id": msgItemID, "output_index": msgIndex, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "annotations": []any{}, "text": ""},
+			"item_id": msgItemID, "output_index": msgIndex, "content_index": *partIndex, "part": part,
 		})
 	}
 
@@ -975,8 +1046,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		recordModelTokens(modelName, usage, reqID)
 		recordModelLatency(modelName, time.Since(startTime))
 	}()
-	var msgRaw, reasoningRaw []byte
-	var textPrefix, reasoningPrefix []byte
+	var msgRaw, refusalRaw, reasoningRaw []byte
+	var textPrefix, refusalPrefix, reasoningPrefix []byte
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
 	var streamRejection *upstreamStreamRejection
@@ -1024,15 +1095,29 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 					}
 				}
 				if raw := view.content[c]; len(raw) > 0 {
-					openMessage()
+					openMessagePart(false)
 					if sseWriteErr != nil {
 						break
 					}
 					if textPrefix == nil {
-						textPrefix = respTextDeltaPrefix(make([]byte, 0, 192), msgItemID, msgIndex)
+						textPrefix = respContentDeltaPrefix(make([]byte, 0, 192), "response.output_text.delta", msgItemID, msgIndex, textPartIndex)
 					}
 					msgRaw = append(msgRaw, raw...)
 					if err := emitRawDelta(out, out, &deltaBuf, textPrefix, raw, &seq); err != nil {
+						writeFailed(err)
+						break
+					}
+				}
+				if raw := view.refusal[c]; len(raw) > 0 {
+					openMessagePart(true)
+					if sseWriteErr != nil {
+						break
+					}
+					if refusalPrefix == nil {
+						refusalPrefix = respContentDeltaPrefix(make([]byte, 0, 192), "response.refusal.delta", msgItemID, msgIndex, refusalPartIndex)
+					}
+					refusalRaw = append(refusalRaw, raw...)
+					if err := emitRawDelta(out, out, &deltaBuf, refusalPrefix, raw, &seq); err != nil {
 						writeFailed(err)
 						break
 					}
@@ -1112,10 +1197,17 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				})
 			}
 			if ct, ok := delta["content"].(string); ok && ct != "" {
-				openMessage()
+				openMessagePart(false)
 				msgRaw = append(msgRaw, jsonEscapeBody(ct)...)
 				emit("response.output_text.delta", map[string]any{
-					"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "delta": ct,
+					"item_id": msgItemID, "output_index": msgIndex, "content_index": textPartIndex, "delta": ct,
+				})
+			}
+			if refusal, ok := delta["refusal"].(string); ok && refusal != "" {
+				openMessagePart(true)
+				refusalRaw = append(refusalRaw, jsonEscapeBody(refusal)...)
+				emit("response.refusal.delta", map[string]any{
+					"item_id": msgItemID, "output_index": msgIndex, "content_index": refusalPartIndex, "delta": refusal,
 				})
 			}
 			if tcs, ok := delta["tool_calls"].([]any); ok && len(tcs) > 0 {
@@ -1214,6 +1306,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		usageRaw = nil
 	}
 	messageText := decodeJSONBody(msgRaw)
+	refusalText := decodeJSONBody(refusalRaw)
 	reasoningText := decodeJSONBody(reasoningRaw)
 	messageChars, reasoningChars := len(messageText), len(reasoningText)
 	if scanErr != nil {
@@ -1231,7 +1324,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", upstreamIdleTimeout)
 		}
-		failed := buildResponsesEnvelope(respID, modelName, created)
+		failed := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 		failed["status"] = "failed"
 		failed["error"] = map[string]any{"code": code, "message": reason}
 		emit("response.failed", map[string]any{"response": failed})
@@ -1251,7 +1344,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			"tool_call_count": len(toolOrder),
 			"business_impact": "上游干净结束但没有 finish_reason，已拒绝 response.completed，改为小的 response.failed",
 		})
-		failed := buildResponsesEnvelope(respID, modelName, created)
+		failed := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 		failed["status"] = "failed"
 		failed["error"] = map[string]any{
 			"code":    "stream_closed_without_finish",
@@ -1265,7 +1358,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	// 若无任何输出，补一个空 message，保证 output 非空且事件序列完整
 	if !reasoningOpen && !msgOpen && len(toolOrder) == 0 {
-		openMessage()
+		openMessagePart(false)
 	}
 	status, incompleteDetails := responsesCompletionState(finishReason)
 
@@ -1275,16 +1368,26 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		emit("response.reasoning_summary_text.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "text": text})
 		emit("response.reasoning_summary_part.done", map[string]any{"item_id": reasoningItemID, "output_index": reasoningIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
 		item := map[string]any{"id": reasoningItemID, "type": "reasoning", "status": status, "summary": []any{map[string]any{"type": "summary_text", "text": text}}}
+		item = decorateResponsesReasoningItem(r, item)
 		emit("response.output_item.done", map[string]any{"output_index": reasoningIndex, "item": item})
 		idxToItem[reasoningIndex] = item
 	}
 
 	// 收尾：message
 	if msgOpen {
-		text := messageText
-		emit("response.output_text.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "text": text})
-		emit("response.content_part.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "annotations": []any{}, "text": text}})
-		item := map[string]any{"id": msgItemID, "type": "message", "status": status, "role": "assistant", "content": []any{map[string]any{"type": "output_text", "annotations": []any{}, "text": text}}}
+		parts := make([]any, 0, len(messagePartTypes))
+		for index, typ := range messagePartTypes {
+			part := map[string]any{"type": "output_text", "annotations": []any{}, "text": messageText}
+			if typ == "refusal" {
+				part = map[string]any{"type": "refusal", "refusal": refusalText}
+				emit("response.refusal.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": index, "refusal": refusalText})
+			} else {
+				emit("response.output_text.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": index, "text": messageText})
+			}
+			emit("response.content_part.done", map[string]any{"item_id": msgItemID, "output_index": msgIndex, "content_index": index, "part": part})
+			parts = append(parts, part)
+		}
+		item := map[string]any{"id": msgItemID, "type": "message", "status": status, "role": "assistant", "content": parts}
 		emit("response.output_item.done", map[string]any{"output_index": msgIndex, "item": item})
 		idxToItem[msgIndex] = item
 	}
@@ -1334,7 +1437,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 	}
 
-	final := buildResponsesEnvelope(respID, modelName, created)
+	final := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 	final["status"] = status
 	final["incomplete_details"] = incompleteDetails
 	final["output"] = output
