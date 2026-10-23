@@ -59,6 +59,7 @@ var (
 	keyName       = []byte(`name`)
 	keyArguments  = []byte(`arguments`)
 	keyContent    = []byte(`content`)
+	keyRefusal    = []byte(`refusal`)
 	keyReasoning  = []byte(`reasoning_content`)
 	keyReasoning2 = []byte(`reasoning`)
 	keyToolCalls  = []byte(`tool_calls`)
@@ -658,6 +659,7 @@ func rewriteDeltaInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int,
 		if len(val) > 2 && val[0] == '"' {
 			switch {
 			case bytes.Equal(key, keyContent),
+				bytes.Equal(key, keyRefusal),
 				bytes.Equal(key, keyReasoning),
 				bytes.Equal(key, keyReasoning2):
 				m.firstToken = true

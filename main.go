@@ -4848,7 +4848,7 @@ func noteFinishReason(current string, chunk map[string]any) string {
 }
 
 func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
-	var content, reasoning, role, respModel, respID, finish string
+	var content, refusal, reasoning, role, respModel, respID, finish string
 	var created int64
 	var usage map[string]any
 	toolCalls := map[int]*mergedToolCall{}
@@ -4891,6 +4891,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 				if v, ok := delta["content"].(string); ok {
 					content += v
 				}
+				if v, ok := delta["refusal"].(string); ok {
+					refusal += v
+				}
 				if v, ok := delta["reasoning_content"].(string); ok {
 					reasoning += v
 				}
@@ -4910,6 +4913,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	completeTokenStream(r, true)
 
 	message := map[string]any{"role": ifEmpty(role, "assistant"), "content": content}
+	if refusal != "" {
+		message["refusal"] = refusal
+	}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
 	}
