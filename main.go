@@ -4055,8 +4055,13 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		// Messages / Responses 没有协议级重放，在读取层对「首个字节前」的瞬时中断
 		// 重放一次；账号锁由外层 accountStreamBody 持有到最终关闭，重放不会换号。
 		if firstByteReplayPath(r.URL.Path) && currentFirstByteRetry() {
-			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func() (*http.Response, error) {
-				replayed, cancel, replayErr := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
+			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func(replayCtx context.Context) (*http.Response, error) {
+				// 第一次尝试已经拿到 HTTP 200，可能已经在上游产生消耗但拿不到 usage：
+				// 先按未知用量结算一次，再为重放建立独立 attempt，避免两次调用只记一条。
+				replayReq := r.WithContext(replayCtx)
+				statsFinishAttempt(replayReq, http.StatusOK)
+				statsSelectAccount(replayReq, acc, modelName)
+				replayed, cancel, replayErr := doUpstreamRequest(replayReq, acc, prof, upstreamBytes, reqID, traceID)
 				if replayErr != nil {
 					return nil, replayErr
 				}

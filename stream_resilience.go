@@ -170,9 +170,14 @@ func firstByteReplayPath(path string) bool {
 // 它位于 accountStreamBody 内层，重放期间账号锁不会释放，不会触发重新选号，
 // 也不会让同一账号并发请求；一旦读出过数据、客户端取消或错误不是瞬时网络
 // 故障，就按原错误返回，绝不重放。
+//
+// Close 可能与正在建立的重放并发发生（例如心跳写失败时由另一个 goroutine
+// 关闭响应体）。Close 会取消在途请求并等待其真正结束，随后外层
+// accountStreamBody 才释放账号锁；Close 之后才返回的响应必须关闭，不能再被读取。
 type firstByteReplayBody struct {
+	mu        sync.Mutex
 	reader    io.ReadCloser
-	replay    func() (*http.Response, error)
+	replay    func(context.Context) (*http.Response, error)
 	ctx       context.Context
 	r         *http.Request
 	reqID     uint64
@@ -180,27 +185,61 @@ type firstByteReplayBody struct {
 	budget    int
 	replays   int
 	delivered bool
+	closed    bool
+	// inflightCancel 取消仍在建立中的重放请求；nil 表示没有在途重放。
+	inflightCancel context.CancelFunc
+	// inflightDone 在途重放处理完成（含安装或关闭新响应体）后释放。
+	inflightDone sync.WaitGroup
 }
 
-func newFirstByteReplayBody(reader io.ReadCloser, ctx context.Context, r *http.Request, reqID uint64, model string, budget int, replay func() (*http.Response, error)) *firstByteReplayBody {
+func newFirstByteReplayBody(reader io.ReadCloser, ctx context.Context, r *http.Request, reqID uint64, model string, budget int, replay func(context.Context) (*http.Response, error)) *firstByteReplayBody {
 	return &firstByteReplayBody{reader: reader, ctx: ctx, r: r, reqID: reqID, model: model, budget: budget, replay: replay}
 }
 
 func (b *firstByteReplayBody) Read(p []byte) (int, error) {
-	n, err := b.reader.Read(p)
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	reader := b.reader
+	b.mu.Unlock()
+
+	n, err := reader.Read(p)
 	if n > 0 {
+		b.mu.Lock()
 		b.delivered = true
+		b.mu.Unlock()
 		return n, err
 	}
 	if err == nil || errors.Is(err, io.EOF) {
 		return n, err
 	}
-	if !canReplayStream(err, b.delivered, b.replays < b.budget, b.ctx.Err() != nil) {
+
+	// 决定是否重放必须和 Close 互斥：Add 与 closed 检查在同一个临界区内完成，
+	// 保证 Close 不会在 Add 之后漏等，也不会在 Add 之前就开始复用的账号。
+	b.mu.Lock()
+	if b.closed || b.delivered || b.replays >= b.budget ||
+		!canReplayStream(err, false, b.replays < b.budget, b.ctx.Err() != nil) {
+		b.mu.Unlock()
 		return n, err
 	}
 	b.replays++
-	resp, replayErr := b.replay()
+	replayCtx, cancelReplay := context.WithCancel(b.ctx)
+	b.inflightCancel = cancelReplay
+	b.inflightDone.Add(1)
+	b.mu.Unlock()
+
+	resp, replayErr := b.replay(replayCtx)
+
+	b.mu.Lock()
+	b.inflightCancel = nil
+	closed := b.closed
+	b.mu.Unlock()
+
 	if replayErr != nil || resp == nil || resp.Body == nil {
+		cancelReplay()
+		b.inflightDone.Done()
 		debugEvent(b.r, "warn", "first_byte_replay_failed", map[string]any{
 			"attempt": b.replays, "model": b.model,
 			"business_impact": "首个有效字节前重放未能建立连接，按原读取错误返回",
@@ -210,17 +249,39 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		return n, err
 	}
 	if resp.StatusCode >= 400 {
-		// 重放拿到的是业务错误而不是 SSE：读完有限错误体后按原错误语义返回，
+		// 重放拿到的是业务错误而不是 SSE：读完有限错误体后按业务拒绝返回，
 		// 不把 JSON 错误体交给 SSE 解析器。
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
+		cancelReplay()
+		b.inflightDone.Done()
 		if rejection := detectUpstreamStreamRejection(body); rejection != nil {
 			return n, rejection
 		}
 		return n, fmt.Errorf("首字节前重放失败：上游返回 HTTP %d", resp.StatusCode)
 	}
-	_ = b.reader.Close()
+	if closed {
+		// 下游已经关闭：响应在 Close 之后才返回，必须关闭且不能继续读取。
+		_ = resp.Body.Close()
+		cancelReplay()
+		b.inflightDone.Done()
+		return n, err
+	}
+
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		_ = resp.Body.Close()
+		cancelReplay()
+		b.inflightDone.Done()
+		return n, err
+	}
+	old := b.reader
 	b.reader = resp.Body
+	b.mu.Unlock()
+	b.inflightDone.Done()
+	_ = old.Close()
+
 	debugEvent(b.r, "warn", "stream_first_byte_replay", map[string]any{
 		"attempt": b.replays, "model": b.model,
 		"business_impact": "首个有效字节前重放一次；原调用可能额外消耗上游额度",
@@ -231,7 +292,25 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 }
 
 func (b *firstByteReplayBody) Close() error {
-	return b.reader.Close()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		b.inflightDone.Wait()
+		return nil
+	}
+	b.closed = true
+	cancel := b.inflightCancel
+	reader := b.reader
+	b.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	err := reader.Close()
+	// 等待仍然在建立中的重放真正结束；外层随后才释放账号锁，
+	// 保证 Close 之后没有同账号的上游请求仍在进行。
+	b.inflightDone.Wait()
+	return err
 }
 
 // canReplayStream 只允许在客户端没有收到任何有效数据、预算未用尽、

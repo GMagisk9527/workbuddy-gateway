@@ -534,6 +534,9 @@ Chat 在协议层重放并按账号池重新选号；Messages 和 Responses 在�
 重复输出已生成的内容。重放与心跳都会写入现有 TraceID 日志；重放失败时沿用已建立的
 SSE 响应，以流内错误事件结束，不伪造 `[DONE]`。
 
+重放的两次上游调用分别结算：第一次拿不到 usage，按未知用量计入；第二次按实测 usage
+计入。聊天、Responses、Messages 三个入口的行为一致。
+
 **瞬时网络错误重试**
 
 网关与上游 CDN 边缘节点之间的单条 TCP 连接可能被对端重置（`connection reset by peer`）、被关闭（`use of closed network connection`），或命中已被回收的 keep-alive 连接。这类错误属于瞬时故障，与请求体大小无关（实测 >5MB 请求 95% 成功，而 0.5MB 请求也会偶发失败）。

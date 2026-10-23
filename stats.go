@@ -189,10 +189,23 @@ func loadOptionalStats() {
 		doc.Requests = []statsRequest{}
 	}
 	trimmed, pruned := trimStatsRequests(doc.Requests)
-	doc.Requests = trimmed
+	if pruned > 0 {
+		// 启动时可能丢弃大量旧明细：复制到新的有界数组，释放原数组和旧行占用的内存，
+		// 只前移切片起点会继续保留整个 backing array。
+		doc.Requests = compactStatsRequests(trimmed)
+	} else {
+		doc.Requests = trimmed
+	}
 	requestStats.document, requestStats.mode = doc, "file"
 	requestStats.lastSaved = info.ModTime().UnixMilli()
 	log.Printf("[统计文件] traceId=%s 阶段=启动读取 结果=成功 账号=%d 请求记录=%d 裁剪旧明细=%d 说明=不含凭据或正文", trace, len(doc.Accounts), len(doc.Requests), pruned)
+}
+
+// compactStatsRequests 把保留的明细复制到容量精确的新数组，释放原数组及其旧行。
+func compactStatsRequests(rows []statsRequest) []statsRequest {
+	out := make([]statsRequest, len(rows))
+	copy(out, rows)
+	return out
 }
 
 // trimStatsRequests 丢弃最旧的请求明细，返回保留后的切片与丢弃条数。

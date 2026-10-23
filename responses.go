@@ -1196,7 +1196,11 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 	scanErr := scanner.Err()
-	if streamRejection != nil {
+	if streamRejection == nil {
+		// 读取层重放可能直接返回带业务码的错误（例如第二次请求收到 11128），
+		// 扫描循环没有对应的 data 行，这里补做一次识别，保留业务码。
+		streamRejection = reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+	} else {
 		scanErr = streamRejection
 		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
 	}

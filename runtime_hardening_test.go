@@ -50,3 +50,15 @@ func TestDoJSONContextLimitsUpstreamResponse(t *testing.T) {
 		t.Fatalf("oversized upstream response was not rejected: %v", err)
 	}
 }
+
+// 启动裁剪必须复制到新的有界数组，不能只前移切片起点继续保留整块 backing array。
+func TestCompactStatsRequestsReleasesBackingArray(t *testing.T) {
+	rows := make([]statsRequest, 10, 100)
+	compact := compactStatsRequests(rows[5:])
+	if len(compact) != 5 || cap(compact) != 5 {
+		t.Fatalf("len=%d cap=%d want 5,5", len(compact), cap(compact))
+	}
+	if &compact[0] == &rows[5] {
+		t.Fatal("retained rows still share the original backing array")
+	}
+}

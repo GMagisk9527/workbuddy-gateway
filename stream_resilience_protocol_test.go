@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -253,5 +254,153 @@ func TestFirstByteReplayPathCoverage(t *testing.T) {
 		if firstByteReplayPath(path) {
 			t.Fatalf("%s must keep its protocol-level behavior", path)
 		}
+	}
+}
+
+// 下游在重放请求仍在建立时关闭流：Close 必须取消该请求、等待其结束，
+// 并关闭 Close 之后才返回的响应体，不能继续读取或提前释放账号锁。
+func TestFirstByteReplayBodyCloseCancelsInflightReplay(t *testing.T) {
+	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+	replayStarted := make(chan struct{})
+	lateBody := &resilienceTrackingBody{Reader: strings.NewReader("late")}
+	body := newFirstByteReplayBody(first, context.Background(), nil, 1, "m", 1, func(ctx context.Context) (*http.Response, error) {
+		close(replayStarted)
+		<-ctx.Done()
+		return &http.Response{StatusCode: http.StatusOK, Body: lateBody}, nil
+	})
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := body.Read(make([]byte, 16))
+		readDone <- err
+	}()
+	<-replayStarted
+	if err := body.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("read after close must fail")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close returned without terminating the in-flight replay")
+	}
+	if !lateBody.closed.Load() {
+		t.Fatal("response returned after Close was not closed")
+	}
+	if !first.closed.Load() {
+		t.Fatal("original upstream body was not closed")
+	}
+}
+
+// 两次上游调用必须各结算一次：第一次没有 usage，记为未知，第二次按实测 credit 计入。
+func TestMessagesReplaySettlesEveryUpstreamAttempt(t *testing.T) {
+	withStreamTestAccount(t)
+	dir := resetKeyWorld(t)
+	if err := ledgerLoad(dir); err != nil {
+		t.Fatal(err)
+	}
+	plain, key := mustCreateKey(t, keyCreateOptions{Name: "messages-replay-accounting", QuotaTotal: 20})
+	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+	second := &resilienceTrackingBody{Reader: strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":3}}\n\ndata: [DONE]\n\n")}
+	calls := installReplayTransport(t, first, second)
+
+	r := messagesResilienceRequest()
+	r.Header.Set("Authorization", "Bearer "+plain)
+	w := httptest.NewRecorder()
+	newAPIHandler().ServeHTTP(w, r)
+
+	key.mu.Lock()
+	usage := key.usage
+	key.mu.Unlock()
+	if calls.Load() != 2 || usage.Requests != 2 || usage.Unknown != 1 || usage.Total != 3 || usage.Lifetime != 3 {
+		t.Fatalf("each upstream call must settle once; calls=%d usage=%+v", calls.Load(), usage)
+	}
+	if !first.closed.Load() || !second.closed.Load() || !strings.Contains(w.Body.String(), "event: message_stop") {
+		t.Fatal("successful replay must finish and close both upstream bodies")
+	}
+}
+
+// 重放拿到业务拒绝时，Responses 必须保留业务码，而不是退化成通用 stream_interrupted。
+func TestResponsesReplayPreservesBusinessRejection(t *testing.T) {
+	withStreamTestAccount(t)
+	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+	rejectionBody := &resilienceTrackingBody{Reader: strings.NewReader(`{"error":{"code":11128,"message":"upstream rejected"}}`)}
+	var calls atomic.Int32
+	oldClient := cfg.HttpClient
+	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: first, Request: req}, nil
+		}
+		return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header), Body: rejectionBody, Request: req}, nil
+	})}
+	t.Cleanup(func() { cfg.HttpClient = oldClient })
+
+	w := httptest.NewRecorder()
+	newAPIHandler().ServeHTTP(w, responsesResilienceRequest())
+
+	out := w.Body.String()
+	if !strings.Contains(out, "response.failed") || !strings.Contains(out, `"code":"11128"`) {
+		t.Fatalf("business rejection was replaced by a generic error: %q", out)
+	}
+	if !first.closed.Load() || !rejectionBody.closed.Load() {
+		t.Fatal("replay rejection bodies must be closed")
+	}
+}
+
+// 下游写失败触发关闭时，若重放还在建立连接，账号锁必须保持到重放真正结束，
+// 且 Close 之后返回的响应体必须关闭。
+func TestMessagesCloseDuringReplayKeepsAccountLock(t *testing.T) {
+	withStreamTestAccount(t)
+	setTestStreamKeepalive(t, 5*time.Millisecond)
+	accountMu.Lock()
+	acc := accounts[0]
+	accountMu.Unlock()
+
+	replayStarted := make(chan struct{})
+	lateBody := &resilienceTrackingBody{Reader: strings.NewReader(resilienceSSEBody)}
+	var lockWasFree atomic.Bool
+	var calls atomic.Int32
+	oldClient := cfg.HttpClient
+	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			first := &readErrorBody{err: errors.New("read: connection reset by peer")}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: first, Request: req}, nil
+		}
+		close(replayStarted)
+		<-req.Context().Done()
+		lockCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		if lockAccountWithContext(lockCtx, &acc.lock) {
+			lockWasFree.Store(true)
+			acc.lock.Unlock()
+		}
+		cancel()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: lateBody, Request: req}, nil
+	})}
+	t.Cleanup(func() { cfg.HttpClient = oldClient })
+
+	writer := &settlementFailWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newAPIHandler().ServeHTTP(writer, messagesResilienceRequest())
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("closing the downstream did not terminate the in-flight replay")
+	}
+	select {
+	case <-replayStarted:
+	default:
+		t.Fatal("replay was never attempted")
+	}
+	if lockWasFree.Load() {
+		t.Fatal("account lock was released while the replay request was still in flight")
+	}
+	if !lateBody.closed.Load() {
+		t.Fatal("response returned after Close was not closed")
 	}
 }
