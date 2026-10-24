@@ -54,7 +54,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	var respReq map[string]any
 	decodeStarted := time.Now()
-	decodeErr := json.Unmarshal(bodyBytes, &respReq)
+	decodeErr := decodeModelRequestBody(bodyBytes, &respReq)
 	decodeDuration := time.Since(decodeStarted)
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
@@ -643,6 +643,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		observeAggregateToolIdentityFailure(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}
@@ -746,6 +747,9 @@ func chatCompletionToResponsesForRequest(r *http.Request, chatJSON []byte, model
 		if fn, ok := tc["function"].(map[string]any); ok {
 			name, _ = fn["name"].(string)
 			args, _ = fn["arguments"].(string)
+		}
+		if callID == "" || name == "" {
+			return nil, errIncompleteToolIdentity
 		}
 		item := responsesToolCallItem(callID, name, args, toolMap)
 		item["status"] = status
@@ -968,6 +972,45 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	tcItemID := map[int]string{}
 	tcIndex := map[int]int{}
 	tcMeta := map[int]responsesToolMeta{}
+	var pendingToolArgs pendingToolArgumentBudget
+	var pendingIdentityErr error
+	reserveToolArgs := func(index int, id, name string, argumentBytes int) bool {
+		if call := toolCalls[index]; call != nil {
+			if id == "" {
+				id = call.ID
+			}
+			if name == "" {
+				name = call.Name
+			}
+		}
+		pendingIdentityErr = pendingToolArgs.reserve(index, id != "" && name != "", argumentBytes, 0)
+		return pendingIdentityErr == nil
+	}
+	openTool := func(idx int) bool {
+		if tcItemID[idx] != "" {
+			return false
+		}
+		st := toolCalls[idx]
+		if st.ID == "" || st.Name == "" {
+			return false
+		}
+		meta, _ := responsesToolMetaFor(r, st.Name)
+		tcMeta[idx] = meta
+		item := responsesToolCallItem(st.ID, st.Name, "", responsesToolMapFor(r))
+		item["status"] = "in_progress"
+		// Output indices describe emitted item order. An unidentified call must
+		// not reserve a hole before a ready message or parallel tool can open.
+		tcIndex[idx] = nextIndex
+		nextIndex++
+		tcItemID[idx] = item["id"].(string)
+		emit("response.output_item.added", map[string]any{"output_index": tcIndex[idx], "item": item})
+		if args := st.Args.String(); args != "" && meta.Kind != responsesToolCustom {
+			emit("response.function_call_arguments.delta", map[string]any{
+				"item_id": tcItemID[idx], "output_index": tcIndex[idx], "delta": args,
+			})
+		}
+		return true
+	}
 
 	openReasoning := func() {
 		if reasoningOpen {
@@ -1051,7 +1094,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
 	var streamRejection *upstreamStreamRejection
-	for sseWriteErr == nil && scanner.Scan() {
+	for sseWriteErr == nil && pendingIdentityErr == nil && scanner.Scan() {
 		data := stripDataPrefixBytes(scanner.Bytes())
 		if len(data) == 0 {
 			continue
@@ -1076,7 +1119,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			if view.finish != "" && finishReason == "" {
 				finishReason = view.finish
 			}
-			for c := 0; c < view.nChoices; c++ {
+			for c := 0; c < view.nChoices && pendingIdentityErr == nil; c++ {
 				if sseWriteErr != nil {
 					break
 				}
@@ -1123,34 +1166,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 					}
 				}
 				if n := view.toolCnt[c]; n > 0 {
-					before := len(toolOrder)
-					for t := 0; t < n; t++ {
-						applyToolCallView(toolCalls, &toolOrder, &view.tools[view.toolOff[c]+t])
-					}
-					for i := before; i < len(toolOrder); i++ {
-						idx := toolOrder[i]
-						st := toolCalls[idx]
-						if st.ID == "" {
-							st.ID = "call_" + compactUUID()
-						}
-						meta, _ := responsesToolMetaFor(r, st.Name)
-						tcMeta[idx] = meta
-						item := responsesToolCallItem(st.ID, st.Name, "", responsesToolMapFor(r))
-						item["status"] = "in_progress"
-						tcItemID[idx] = item["id"].(string)
-						tcIndex[idx] = nextIndex
-						nextIndex++
-						emit("response.output_item.added", map[string]any{
-							"output_index": tcIndex[idx],
-							"item":         item,
-						})
-					}
 					for t := 0; t < n; t++ {
 						if sseWriteErr != nil {
 							break
 						}
 						tv := &view.tools[view.toolOff[c]+t]
-						if len(tv.args) == 0 || tcMeta[tv.index].Kind == responsesToolCustom {
+						// Raw argument bytes upper-bound their decoded size. Reserve
+						// before appending so many unnamed calls share a fixed budget.
+						if !reserveToolArgs(tv.index, decodeJSONBody(tv.id), decodeJSONBody(tv.name), len(tv.args)) {
+							break
+						}
+						applyToolCallView(toolCalls, &toolOrder, tv)
+						if openTool(tv.index) || tcItemID[tv.index] == "" || len(tv.args) == 0 || tcMeta[tv.index].Kind == responsesToolCustom {
 							continue
 						}
 						p := toolPrefix[tv.index]
@@ -1179,6 +1206,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		finishReason = noteFinishReason(finishReason, chunk)
 		choices, _ := chunk["choices"].([]any)
 		for _, c := range choices {
+			if pendingIdentityErr != nil {
+				break
+			}
 			choice, _ := c.(map[string]any)
 			if choice == nil {
 				continue
@@ -1211,12 +1241,6 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				})
 			}
 			if tcs, ok := delta["tool_calls"].([]any); ok && len(tcs) > 0 {
-				// 先提取本次参数增量，供合并后补发 delta 事件
-				type argDelta struct {
-					idx int
-					arg string
-				}
-				var argDeltas []argDelta
 				for _, tcAny := range tcs {
 					tc, ok := tcAny.(map[string]any)
 					if !ok {
@@ -1226,53 +1250,21 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 					if v, ok := tc["index"].(float64); ok {
 						idx = int(v)
 					}
-					if fn, ok := tc["function"].(map[string]any); ok {
-						if a, ok := fn["arguments"].(string); ok && a != "" {
-							argDeltas = append(argDeltas, argDelta{idx: idx, arg: a})
-						}
+					fn, _ := tc["function"].(map[string]any)
+					if !reserveToolArgs(idx, strOf(tc["id"]), strOf(fn["name"]), len(strOf(fn["arguments"]))) {
+						break
 					}
-				}
-				before := len(toolOrder)
-				applyToolCallDelta(toolCalls, &toolOrder, tcs)
-				for i := before; i < len(toolOrder); i++ {
-					idx := toolOrder[i]
-					st := toolCalls[idx]
-					if st.ID == "" {
-						st.ID = "call_" + compactUUID()
-					}
-					meta, _ := responsesToolMetaFor(r, st.Name)
-					tcMeta[idx] = meta
-					tcIndex[idx] = nextIndex
-					nextIndex++
-					if meta.Kind == responsesToolCustom {
-						tcItemID[idx] = "ctc_" + compactUUID()
-						item := responsesToolCallItem(st.ID, st.Name, "", responsesToolMapFor(r))
-						item["id"], item["status"] = tcItemID[idx], "in_progress"
-						emit("response.output_item.added", map[string]any{
-							"output_index": tcIndex[idx],
-							"item":         item,
-						})
+					applyToolCallDelta(toolCalls, &toolOrder, []any{tc})
+					if openTool(idx) || tcItemID[idx] == "" || tcMeta[idx].Kind == responsesToolCustom {
 						continue
 					}
-					tcItemID[idx] = "fc_" + compactUUID()
-					itemName := st.Name
-					item := map[string]any{
-						"id": tcItemID[idx], "type": "function_call", "status": "in_progress",
-						"call_id": st.ID, "name": itemName, "arguments": "",
+					if fn, ok := tc["function"].(map[string]any); ok {
+						if a := strOf(fn["arguments"]); a != "" {
+							emit("response.function_call_arguments.delta", map[string]any{
+								"item_id": tcItemID[idx], "output_index": tcIndex[idx], "delta": a,
+							})
+						}
 					}
-					if meta.Namespace != "" {
-						item["name"] = meta.Name
-						item["namespace"] = meta.Namespace
-					}
-					emit("response.output_item.added", map[string]any{"output_index": tcIndex[idx], "item": item})
-				}
-				for _, ad := range argDeltas {
-					if tcMeta[ad.idx].Kind == responsesToolCustom {
-						continue // 自定义工具的 JSON 参数在收尾时还原为原始 input
-					}
-					emit("response.function_call_arguments.delta", map[string]any{
-						"item_id": tcItemID[ad.idx], "output_index": tcIndex[ad.idx], "delta": ad.arg,
-					})
 				}
 			}
 		}
@@ -1288,6 +1280,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 	scanErr := scanner.Err()
+	if scanErr == nil {
+		scanErr = pendingIdentityErr
+	}
 	if streamRejection == nil {
 		// 读取层重放可能直接返回带业务码的错误（例如第二次请求收到 11128），
 		// 扫描循环没有对应的 data 行，这里补做一次识别，保留业务码。
@@ -1295,6 +1290,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	} else {
 		scanErr = streamRejection
 		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+	}
+	if scanErr == nil && finishReason != "" {
+		scanErr = validateMergedToolIdentity(toolCalls, toolOrder)
 	}
 	streamComplete = scanErr == nil && finishReason != ""
 	completeTokenStream(body, streamComplete)

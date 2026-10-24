@@ -6,6 +6,7 @@ Responses 资源；客户端使用 `store:false` 并回放完整 input 历史。
 | 字段或行为 | 网关处理 |
 | --- | --- |
 | 文本、图片、函数及 custom 工具 | 沿用现有转换、工具名映射和参数保真规则 |
+| Schema 和嵌套工具结果中的数字 | 保留大整数及高精度小数，避免经过 float64 舍入；普通生成参数保持既有处理 |
 | 非空上游 refusal | 保留独立 refusal 内容块及 response.refusal.delta/done；快慢路径与聚合均支持 |
 | metadata | 最多 16 对字符串，键／值分别最多 64／512 字符；仅在网关响应中回显，不作为 Chat 用户标识转发 |
 | 推理 token | 标准 completion_tokens_details.reasoning_tokens 优先，包括显式 0；缺失或无效时取 completion_thinking_tokens，不相加 |
@@ -32,6 +33,11 @@ Responses 资源；客户端使用 `store:false` 并回放完整 input 历史。
 空选项及默认 background:false、truncation:disabled、text.format.type:text 仍兼容。
 metadata 在 created、in_progress、completed／incomplete／failed 响应 envelope 中一致回显。
 未收到有效完成原因或上游读取失败时继续按原逻辑返回 failed，不伪造成功。
+
+工具 ID／名称较晚到达时，先累计参数，身份齐全后才确定 custom／namespace 映射并发送
+开始事件，输出索引按实际开始事件顺序连续分配；快慢路径保留调用 ID、名称及参数。
+等待身份的参数共享 1 MiB 预算。流结束后仍缺身份的调用不会被报告为成功，已经收到的
+上游 usage 继续按真实消耗记录，完成标记为 false。
 
 推理 token 回退只改善输出明细，不修改总 token、credit 或结算；非空拒答计入有效输出，
 空字符串、null、心跳和 role 声明不计入。11128 等业务错误仍按原错误及禁止重放规则处理。

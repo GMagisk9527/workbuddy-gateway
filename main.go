@@ -4121,7 +4121,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var reqObj map[string]any
 	decodeStarted := time.Now()
-	decodeErr := json.Unmarshal(bodyBytes, &reqObj)
+	decodeErr := decodeModelRequestBody(bodyBytes, &reqObj)
 	decodeDuration := time.Since(decodeStarted)
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
@@ -4478,6 +4478,7 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		observeAggregateToolIdentityFailure(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}
@@ -4910,6 +4911,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	if finish == "" {
 		return nil, errStreamClosedWithoutFinish
 	}
+	if err := validateMergedToolIdentity(toolCalls, toolOrder); err != nil {
+		return nil, &aggregateToolIdentityError{usage: usage}
+	}
 	completeTokenStream(r, true)
 
 	message := map[string]any{"role": ifEmpty(role, "assistant"), "content": content}
@@ -4923,12 +4927,8 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		calls := make([]map[string]any, 0, len(toolOrder))
 		for _, idx := range toolOrder {
 			st := toolCalls[idx]
-			id := st.ID
-			if id == "" {
-				id = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), idx)
-			}
 			calls = append(calls, map[string]any{
-				"id":    id,
+				"id":    st.ID,
 				"type":  ifEmpty(st.Type, "function"),
 				"index": idx,
 				"function": map[string]any{

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -166,6 +167,9 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	chatReq, err := anthropicToChatRequest(msgReq, modelName)
 	if err != nil {
+		if writeConversionLimitError(w, r, err) {
+			return
+		}
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
@@ -174,8 +178,11 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	prepareUpstreamChatRequest(chatReq, r, reqID, modelName)
 
-	upstreamBytes, err := json.Marshal(chatReq)
+	upstreamBytes, err := marshalConvertedRequest(chatReq)
 	if err != nil {
+		if writeConversionLimitError(w, r, err) {
+			return
+		}
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "序列化请求失败")
 		return
 	}
@@ -602,6 +609,7 @@ type anthropicTextSlot struct {
 type anthropicToolSlot struct {
 	id, name string
 	args     strings.Builder
+	sentArgs int
 	index    int
 	open     bool
 }
@@ -612,42 +620,120 @@ type anthropicContentSlot struct {
 	tool *anthropicToolSlot
 }
 
+const maxPendingToolEventBytes = 1 << 20
+
+type anthropicPendingEvent struct {
+	index int
+	data  []byte
+}
+
 // anthropicStreamState 把逐个到来的 chat.completion.chunk 翻译为 Anthropic
 // SSE 事件字节流。同一实例也可走 aggregate() 输出非流式完整 Message。
 type anthropicStreamState struct {
-	msgID          string
-	model          string
-	wantThinking   bool
-	hiddenThinking *protocolReasoningCodec
-	started        bool
-	blockIndex     int
-	thinking       *anthropicTextSlot
-	text           *anthropicTextSlot
-	tools          map[int]*anthropicToolSlot
-	toolOrder      []int
-	blocks         []anthropicContentSlot
-	finish         string
-	refused        bool
-	usage          map[string]any
+	msgID             string
+	model             string
+	wantThinking      bool
+	hiddenThinking    *protocolReasoningCodec
+	started           bool
+	blockIndex        int
+	thinking          *anthropicTextSlot
+	text              *anthropicTextSlot
+	tools             map[int]*anthropicToolSlot
+	toolOrder         []int
+	blocks            []anthropicContentSlot
+	finish            string
+	refused           bool
+	usage             map[string]any
+	pendingToolIndex  int
+	pendingEvents     []anthropicPendingEvent
+	pendingEventBytes int
+	pendingEventErr   error
+	pendingToolArgs   pendingToolArgumentBudget
+	aggregateOnly     bool
 }
 
 func newAnthropicStreamState(modelName string, wantThinking bool) *anthropicStreamState {
 	return &anthropicStreamState{
-		msgID:        "msg_" + compactUUID(),
-		model:        modelName,
-		wantThinking: wantThinking,
-		tools:        map[int]*anthropicToolSlot{},
+		msgID:            "msg_" + compactUUID(),
+		model:            modelName,
+		wantThinking:     wantThinking,
+		tools:            map[int]*anthropicToolSlot{},
+		pendingToolIndex: -1,
 	}
 }
 
 // emit 格式化一个 Anthropic SSE 事件（event 行 + data 行 + 空行）。
 func (s *anthropicStreamState) emit(eventType string, data map[string]any) []byte {
+	if s.aggregateOnly {
+		return nil
+	}
 	data["type"] = eventType
+	queued := false
+	index, indexed := data["index"].(int)
+	if strings.HasPrefix(eventType, "content_block_") {
+		if s.pendingEventErr != nil {
+			return nil
+		}
+		queued = indexed && s.pendingToolIndex >= 0 && index > s.pendingToolIndex
+		if queued {
+			remaining := maxPendingToolEventBytes - s.pendingEventBytes - s.pendingToolArgs.bytes
+			if _, err := measureConversionJSON(data, remaining-len(eventType)-16); err != nil {
+				s.pendingEvents = nil
+				s.pendingEventBytes = 0
+				s.pendingEventErr = errPendingToolIdentityTooLarge
+				return nil
+			}
+		}
+	}
 	b, err := json.Marshal(data)
 	if err != nil {
 		return nil
 	}
-	return []byte("event: " + eventType + "\ndata: " + string(b) + "\n\n")
+	frame := []byte("event: " + eventType + "\ndata: " + string(b) + "\n\n")
+	if queued {
+		s.pendingEvents = append(s.pendingEvents, anthropicPendingEvent{index: index, data: frame})
+		s.pendingEventBytes += len(frame)
+		return nil
+	}
+	return frame
+}
+
+// Later blocks cannot start before an earlier unidentified tool. Once its
+// identity arrives, release the retained events without changing block indices.
+func (s *anthropicStreamState) releasePendingToolEvents(index int) {
+	if s.pendingToolIndex != index || s.pendingEventErr != nil {
+		return
+	}
+	s.pendingToolIndex = -1
+	for _, toolIndex := range s.toolOrder {
+		slot := s.tools[toolIndex]
+		if slot.id == "" || slot.name == "" {
+			s.pendingToolIndex = slot.index
+			break
+		}
+	}
+}
+
+func (s *anthropicStreamState) flushPendingToolEvents() []byte {
+	if s.pendingEventErr != nil || len(s.pendingEvents) == 0 {
+		return nil
+	}
+	sort.SliceStable(s.pendingEvents, func(i, j int) bool { return s.pendingEvents[i].index < s.pendingEvents[j].index })
+	var out []byte
+	kept := s.pendingEvents[:0]
+	for _, event := range s.pendingEvents {
+		if s.pendingToolIndex < 0 || event.index < s.pendingToolIndex {
+			out = append(out, event.data...)
+			s.pendingEventBytes -= len(event.data)
+		} else {
+			kept = append(kept, event)
+		}
+	}
+	for i := len(kept); i < len(s.pendingEvents); i++ {
+		s.pendingEvents[i] = anthropicPendingEvent{}
+	}
+	s.pendingEvents = kept
+	return out
 }
 
 // feed 消费一个上游 chunk，返回 0..n 个 Anthropic 事件。
@@ -799,29 +885,47 @@ func (s *anthropicStreamState) appendToolCall(tc map[string]any) []byte {
 	if id := strOf(tc["id"]); id != "" {
 		slot.id = id
 	}
+	var arguments string
 	if fn, ok := tc["function"].(map[string]any); ok {
 		if n := strOf(fn["name"]); n != "" {
 			slot.name = n
 		}
+		arguments = strOf(fn["arguments"])
+	}
+	if !s.aggregateOnly {
+		if err := s.pendingToolArgs.reserve(idx, slot.id != "" && slot.name != "", len(arguments), s.pendingEventBytes); err != nil {
+			s.pendingEventErr = err
+			return out
+		}
+	}
+	slot.args.WriteString(arguments)
+	// Identity may arrive after arguments. Starting with an empty ID or name
+	// cannot be repaired by a later delta, so retain arguments until both exist.
+	if slot.id == "" || slot.name == "" {
+		if !s.aggregateOnly && s.pendingToolIndex < 0 {
+			s.pendingToolIndex = slot.index
+		}
+		return out
 	}
 	if !slot.open {
 		slot.open = true
+		s.releasePendingToolEvents(slot.index)
 		out = append(out, s.emit("content_block_start", map[string]any{
 			"index": slot.index,
 			"content_block": map[string]any{
 				"type": "tool_use", "id": slot.id, "name": slot.name, "input": map[string]any{},
 			},
 		})...)
+		out = append(out, s.flushPendingToolEvents()...)
 	}
-	if fn, ok := tc["function"].(map[string]any); ok {
-		// 参数分片原样透传，拼接交给客户端（无从判断 JSON 何时完整）
-		if a := strOf(fn["arguments"]); a != "" {
-			slot.args.WriteString(a)
-			out = append(out, s.emit("content_block_delta", map[string]any{
-				"index": slot.index,
-				"delta": map[string]any{"type": "input_json_delta", "partial_json": a},
-			})...)
-		}
+	if slot.sentArgs < slot.args.Len() {
+		// Flush each retained fragment once and keep the argument bytes intact.
+		a := slot.args.String()[slot.sentArgs:]
+		slot.sentArgs = slot.args.Len()
+		out = append(out, s.emit("content_block_delta", map[string]any{
+			"index": slot.index,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": a},
+		})...)
 	}
 	return out
 }
@@ -902,8 +1006,15 @@ func (s *anthropicStreamState) finishEvents() []byte {
 // A completed tool call must contain an object, not a malformed fragment or a
 // JSON scalar. Empty arguments keep the existing no-argument tool convention.
 func (s *anthropicStreamState) validateToolInputs() error {
+	if s.pendingEventErr != nil {
+		return s.pendingEventErr
+	}
 	for _, idx := range s.toolOrder {
-		args := s.tools[idx].args.String()
+		slot := s.tools[idx]
+		if slot.id == "" || slot.name == "" {
+			return errIncompleteToolIdentity
+		}
+		args := slot.args.String()
 		if args == "" {
 			continue
 		}
@@ -1006,7 +1117,11 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 			return fmt.Errorf("上游 SSE data 包含无效 JSON，本次回复不完整")
 		}
 		observeFirstToken(body, chunk)
-		if out := state.feed(chunk); sink != nil && len(out) > 0 {
+		out := state.feed(chunk)
+		if state.pendingEventErr != nil {
+			return state.pendingEventErr
+		}
+		if sink != nil && len(out) > 0 {
 			if !sink(out) {
 				return nil // 下游写入失败：立即停止读取上游
 			}
@@ -1119,6 +1234,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time, wantThinking bool) {
 	defer resp.Body.Close()
 	state := newAnthropicStreamState(modelName, wantThinking)
+	state.aggregateOnly = true
 	applyAnthropicThinkingPolicy(state, r)
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
