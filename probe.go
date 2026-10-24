@@ -114,7 +114,13 @@ func handleAdminProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req probeRequest
-	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, readErr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if readErr != nil {
+		if !writeRequestBodyLimitError(w, r, readErr) {
+			writeOpenAIError(w, http.StatusBadRequest, "read_error", "读取请求体失败")
+		}
+		return
+	}
 	if len(bytes.TrimSpace(body)) > 0 {
 		if err := json.Unmarshal(body, &req); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_json", "无效的 JSON 请求体")

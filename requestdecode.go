@@ -10,8 +10,8 @@ package main
 // 取舍：
 //   - 只支持 gzip / deflate（标准库即可），brotli/zstd 返回 415，让客户端按
 //     自己的协商逻辑回退到 gzip——插件正是这么设计的（411/415/501 触发回退）。
-//   - 解压是"读满再解"：这几个 handler 本来就会把 body 全量读进内存解析，
-//     这里不额外增加内存模型；但必须有上限，防止压缩炸弹把 244MB 的机器打爆。
+//   - 压缩数据和解压后的输入共用在途字节预算，并保留单请求大小上限。
+//     准入层另按内存水位限制新请求，给 JSON 解析、协议转换和长流留出余量。
 
 import (
 	"bytes"
@@ -45,13 +45,20 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过网关上限")
 				return
 			}
+			if err := wrapMemoryBody(r); err != nil {
+				writeRequestMemoryError(w, r, err)
+				return
+			}
 			// A missing Content-Length (chunked upload) must have the same bound.
 			// Limit while reading instead of buffering another copy in middleware.
 			r.Body = http.MaxBytesReader(w, r.Body, requestDecodedLimit)
 			next.ServeHTTP(w, r)
 			return
 		case "gzip", "x-gzip", "deflate":
-			// 支持
+			if r.ContentLength > requestCompressedLimit {
+				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "压缩请求体超过网关上限")
+				return
+			}
 		default:
 			// 交给客户端自行回退（插件收到 415 会改用 gzip 并记住该 endpoint）。
 			log.Printf("[请求解码] traceId=%s 结果=拒绝 编码=%s 原因=不支持该压缩算法", w.Header().Get("X-Trace-ID"), encoding)
@@ -59,9 +66,16 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 				"不支持的请求体压缩算法: "+encoding+"（仅支持 gzip / deflate）")
 			return
 		}
+		if err := wrapMemoryBody(r); err != nil {
+			writeRequestMemoryError(w, r, err)
+			return
+		}
 
 		raw, err := io.ReadAll(io.LimitReader(r.Body, requestCompressedLimit+1))
 		if err != nil {
+			if writeRequestMemoryError(w, r, err) {
+				return
+			}
 			writeUpstreamError(w, r, http.StatusBadRequest, "invalid_request_encoding", "读取压缩请求体失败")
 			return
 		}
@@ -70,10 +84,9 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		start := time.Now()
-		decoded, err := decodeCompressedBody(encoding, raw)
+		decoded, err := decodeCompressedBodyWithMemory(encoding, raw, memoryLeaseFor(r))
 		if err != nil {
-			if errors.Is(err, errRequestBodyTooLarge) {
-				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "解压后的请求体超过网关上限")
+			if writeRequestMemoryError(w, r, err) {
 				return
 			}
 			log.Printf("[请求解码] traceId=%s 结果=失败 编码=%s 原因=%v", w.Header().Get("X-Trace-ID"), encoding, err)
@@ -95,6 +108,9 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 // The protocol handlers keep their existing errors for ordinary read failures,
 // but the shared size boundary must be a 413 in each protocol's error shape.
 func writeRequestBodyLimitError(w http.ResponseWriter, r *http.Request, err error) bool {
+	if writeRequestMemoryError(w, r, err) {
+		return true
+	}
 	var limitErr *http.MaxBytesError
 	if !errors.As(err, &limitErr) {
 		return false
@@ -105,6 +121,10 @@ func writeRequestBodyLimitError(w http.ResponseWriter, r *http.Request, err erro
 
 // decodeCompressedBody 解压并限制解压后大小。
 func decodeCompressedBody(encoding string, raw []byte) ([]byte, error) {
+	return decodeCompressedBodyWithMemory(encoding, raw, nil)
+}
+
+func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestMemoryLease) ([]byte, error) {
 	var reader io.Reader
 	switch encoding {
 	case "gzip", "x-gzip":
@@ -124,6 +144,13 @@ func decodeCompressedBody(encoding string, raw []byte) ([]byte, error) {
 		}
 	default:
 		return nil, errors.New("unsupported encoding")
+	}
+	if lease != nil {
+		var err error
+		reader, err = lease.reader(reader, -1)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out, err := io.ReadAll(io.LimitReader(reader, requestDecodedLimit+1))
 	if err != nil {

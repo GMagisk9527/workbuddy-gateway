@@ -71,7 +71,7 @@ func anthropicErrType(errType string) string {
 		return "permission_error"
 	case "model_rate_limited", "all_accounts_cooldown", "request_queue_full", "request_queue_timeout":
 		return "rate_limit_error"
-	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled":
+	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled", "request_memory_pressure", "request_body_budget_exceeded":
 		return "overloaded_error"
 	case "invalid_request_encoding", "unsupported_content_encoding":
 		// 请求体格式/编码问题是调用方错误，不能退化成服务端 api_error

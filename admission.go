@@ -10,9 +10,13 @@ import (
 )
 
 type admissionFileConfig struct {
-	MaxActive     int  `json:"maxActive"`
-	MaxWaiting    *int `json:"maxWaiting"`
-	WaitTimeoutMs int  `json:"waitTimeoutMs"`
+	MaxActive                  int   `json:"maxActive"`
+	MaxWaiting                 *int  `json:"maxWaiting"`
+	WaitTimeoutMs              int   `json:"waitTimeoutMs"`
+	MemoryProtection           *bool `json:"memoryProtection"`
+	MaxBodyBytes               int64 `json:"maxBodyBytes"`
+	MemoryHighWatermarkPercent int   `json:"memoryHighWatermarkPercent"`
+	MemoryLowWatermarkPercent  int   `json:"memoryLowWatermarkPercent"`
 }
 type admissionLimits struct {
 	active, waiting int
@@ -39,6 +43,7 @@ var errAdmissionTimeout = errors.New("request admission wait timed out")
 type admissionTicket struct{ id byte }
 type requestAdmission struct {
 	mu      sync.Mutex
+	memory  *requestMemoryAdmission
 	limits  admissionLimits
 	active  int
 	waiters []*admissionTicket
@@ -46,7 +51,7 @@ type requestAdmission struct {
 }
 
 func newRequestAdmission() *requestAdmission {
-	return &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{})}
+	return &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{}), memory: newRequestMemoryAdmission()}
 }
 
 var ingressAdmission = newRequestAdmission()
@@ -56,6 +61,8 @@ func logGatewayControls(trace string) {
 	s := currentSchedulingConfig()
 	enabled := s.LoadAware == nil || *s.LoadAware
 	log.Printf("[请求控制配置] traceId=%s 准入=%d/%d 排队=%d/%d 排队期限=%v 负载感知=%t 说明=准入覆盖解码到响应结束；已有请求不因缩容中断", trace, active, l.active, waiting, l.waiting, l.wait, enabled)
+	used, limit, pressured := ingressAdmission.memory.snapshot()
+	log.Printf("[内存准入配置] traceId=%s 请求体预算=%d/%d字节 内存压力=%t 说明=预算包含压缩与解压后的输入；新请求受内存水位保护", trace, used, limit, pressured)
 }
 
 func (g *requestAdmission) notifyLocked() { close(g.changed); g.changed = make(chan struct{}) }
@@ -63,6 +70,7 @@ func (g *requestAdmission) configure(c admissionFileConfig) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.limits = normalizeAdmission(c)
+	g.memory.configure(c)
 	g.notifyLocked()
 }
 func (g *requestAdmission) snapshot() (admissionLimits, int, int) {
@@ -81,6 +89,10 @@ func (g *requestAdmission) reserveLocked() func() {
 func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 	g.mu.Lock()
 	if err := ctx.Err(); err != nil {
+		g.mu.Unlock()
+		return nil, err
+	}
+	if err := g.memory.checkAdmission(); err != nil {
 		g.mu.Unlock()
 		return nil, err
 	}
@@ -120,6 +132,11 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 			return nil, errAdmissionTimeout
 		}
 		if g.active < g.limits.active && len(g.waiters) > 0 && g.waiters[0] == ticket {
+			if err := g.memory.checkAdmission(); err != nil {
+				remove()
+				g.mu.Unlock()
+				return nil, err
+			}
 			g.waiters = g.waiters[1:]
 			release := g.reserveLocked()
 			g.notifyLocked()
@@ -141,6 +158,9 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 		gate := ingressAdmission
 		release, err := gate.acquire(r.Context())
 		if err != nil {
+			if writeRequestMemoryError(w, r, err) {
+				return
+			}
 			code := "request_queue_full"
 			message := "请求队列已满，请稍后重试"
 			if errors.Is(err, errAdmissionTimeout) {
@@ -159,6 +179,9 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		defer release()
+		lease := &requestMemoryLease{gate: gate.memory}
+		defer lease.release()
+		r = r.WithContext(context.WithValue(r.Context(), requestMemoryContextKey{}, lease))
 		if r.Context().Err() != nil {
 			writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "请求已取消，未读取请求体")
 			return
