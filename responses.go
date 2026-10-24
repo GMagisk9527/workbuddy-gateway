@@ -643,7 +643,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
-		observeAggregateToolIdentityFailure(r, acc, modelName, reqID, startTime, err)
+		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}
@@ -1094,8 +1094,19 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	toolPrefix := map[int][]byte{}
 	deltaBuf := make([]byte, 0, 512)
 	var streamRejection *upstreamStreamRejection
+	var invalidDataErr error
 	for sseWriteErr == nil && pendingIdentityErr == nil && scanner.Scan() {
-		data := stripDataPrefixBytes(scanner.Bytes())
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		// SSE comments and control fields carry no JSON payload. Keep the legacy
+		// bare-object form, but never silently skip malformed data.
+		if line[0] == ':' ||
+			(!bytes.HasPrefix(line, []byte("data:")) && line[0] != '{' && !bytes.Equal(line, doneMarker)) {
+			continue
+		}
+		data := stripDataPrefixBytes(line)
 		if len(data) == 0 {
 			continue
 		}
@@ -1106,6 +1117,12 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			continue
 		}
 		if streamRejection = detectUpstreamStreamRejection(data); streamRejection != nil {
+			break
+		}
+		if mode == int32(fastPathOn) && !json.Valid(data) {
+			// parseResponsesChunk only scans the fields it needs; malformed
+			// literals or escapes in skipped fields must still fail the stream.
+			invalidDataErr = errInvalidUpstreamChunk
 			break
 		}
 		if mode == int32(fastPathOn) && parseResponsesChunk(data, &view) {
@@ -1196,7 +1213,10 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		var chunk map[string]any
 		if json.Unmarshal(data, &chunk) != nil {
-			continue
+			// Do not silently skip malformed data: a later finish_reason must not
+			// turn a truncated response into a successful response.completed.
+			invalidDataErr = errInvalidUpstreamChunk
+			break
 		}
 		observeFirstToken(body, chunk)
 		if u, ok := chunk["usage"].(map[string]any); ok {
@@ -1280,6 +1300,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 	scanErr := scanner.Err()
+	if scanErr == nil {
+		scanErr = invalidDataErr
+	}
 	if scanErr == nil {
 		scanErr = pendingIdentityErr
 	}
