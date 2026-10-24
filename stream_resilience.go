@@ -283,7 +283,7 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		"attempt": b.replays, "model": b.model,
 		"business_impact": "首个有效字节前重放一次；原调用可能额外消耗上游额度",
 	})
-	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何上游字节，账号锁未释放，未重新选号",
+	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何上游字节，并发名额未释放，未重新选号",
 		debugTraceID(b.r), b.reqID, b.model)
 	return b.Read(p)
 }
@@ -316,7 +316,7 @@ func (b *firstByteReplayBody) Close() error {
 		cancel()
 	}
 	err := reader.Close()
-	// 等待仍然在建立中的重放真正结束；外层随后才释放账号锁，
+	// 等待仍然在建立中的重放真正结束；外层随后才释放并发名额，
 	// 保证 Close 之后没有同账号的上游请求仍在进行。
 	b.inflightDone.Wait()
 	return err

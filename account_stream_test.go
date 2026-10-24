@@ -16,6 +16,7 @@ import (
 func setupAccountStreamTest(t *testing.T, transport http.RoundTripper) {
 	t.Helper()
 	isolatePolicies(t)
+	modelConcurrency.configure(concurrentFileConfig{MaxAcc: 1})
 	oldClient := cfg.HttpClient
 	cfg.HttpClient = &http.Client{Transport: transport}
 	t.Cleanup(func() { cfg.HttpClient = oldClient })

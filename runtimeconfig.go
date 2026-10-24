@@ -180,6 +180,8 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	}
 	setCreditConfig(creditFetch, c.Credits.ExpiringFirst, c.Credits.WindowDays)
 	setIdentityConfig(c.Identity)
+	modelConcurrency.configure(c.Concurrent)
+	logConcurrentConfig(trace)
 	identityEnabled, _, identityRuleCount := identitySettingsSummary()
 	log.Printf("[身份替换配置] traceId=%s 启用=%t 规则数=%d 说明=仅处理非代码身份文本；不记录替换内容，热加载只影响后续请求", trace, identityEnabled, identityRuleCount)
 	previousProfile := officialRequests.Load()

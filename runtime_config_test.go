@@ -23,12 +23,15 @@ func isolatePolicies(t *testing.T) {
 	oldKeepalive, oldFirstByteRetry := streamKeepalive, enableFirstByteRetry
 	upstreamConfigMu.RUnlock()
 	oldAccounts := accounts
+	oldConcurrency := modelConcurrency
+	modelConcurrency = newModelConcurrencyLimiter()
 	oldRetention := logRetentionDays.Load()
 	runtimeConfigMu.Lock()
 	oldHash, oldHasHash := runtimeAppliedHash, runtimeHasAppliedHash
 	runtimeHasAppliedHash = false
 	runtimeConfigMu.Unlock()
 	t.Cleanup(func() {
+		modelConcurrency = oldConcurrency
 		logRetentionDays.Store(oldRetention)
 		runtimeConfigMu.Lock()
 		runtimeAppliedHash, runtimeHasAppliedHash = oldHash, oldHasHash

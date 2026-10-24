@@ -72,8 +72,9 @@ type runtimeFileConfig struct {
 		Force    string `json:"force"`
 	} `json:"systemPrompt"`
 	// Omitted identity settings preserve the fork's existing neutral prefix.
-	Identity runtimeIdentityConfig `json:"identity"`
-	Debug    struct {
+	Identity   runtimeIdentityConfig `json:"identity"`
+	Concurrent concurrentFileConfig  `json:"concurrent"`
+	Debug      struct {
 		Enabled bool `json:"enabled"`
 	} `json:"debug"`
 	Logs struct {
