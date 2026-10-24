@@ -294,19 +294,40 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		}
 		b.atLineBoundary = p[n-1] == '\n'
 		b.mu.Unlock()
+		// io.Reader may legally return data and an error together. If the
+		// bytes are only comments/empty data and end at a line boundary, the
+		// error must not reach the scanner yet: retry now, then let the caller
+		// consume these bytes with a nil error and read the new stream next.
+		if err != nil && !errors.Is(err, io.EOF) {
+			if replayed, replayErr := b.tryReplay(err); replayed {
+				err = nil
+			} else {
+				err = replayErr
+			}
+		}
 		return n, err
 	}
 	if err == nil || errors.Is(err, io.EOF) {
 		return n, err
 	}
+	replayed, replayErr := b.tryReplay(err)
+	if replayed {
+		return b.Read(p)
+	}
+	return n, replayErr
+}
 
+// tryReplay decides whether the current read error can be retried, performs one
+// replay, and installs the replacement body. It returns the error the caller
+// should surface when no replay happened or the replay itself failed.
+func (b *firstByteReplayBody) tryReplay(readErr error) (bool, error) {
 	// 决定是否重放必须和 Close 互斥：Add 与 closed 检查在同一个临界区内完成，
 	// 保证 Close 不会在 Add 之后漏等，也不会在 Add 之前就开始复用的账号。
 	b.mu.Lock()
 	if b.closed || b.delivered || !b.atLineBoundary || b.replays >= b.budget ||
-		!canReplayStream(err, false, b.replays < b.budget, b.ctx.Err() != nil) {
+		!canReplayStream(readErr, false, b.replays < b.budget, b.ctx.Err() != nil) {
 		b.mu.Unlock()
-		return n, err
+		return false, readErr
 	}
 	b.replays++
 	replayCtx, cancelReplay := context.WithCancel(b.ctx)
@@ -324,7 +345,7 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		})
 		log.Printf("[异常] traceId=%s requestId=%d 发生阶段=首字节前重放 模型=%s 结果=重放请求失败 业务影响=本次响应不完整 异常=%s",
 			debugTraceID(b.r), b.reqID, b.model, safeDebugError(replayErr))
-		return n, err
+		return false, readErr
 	}
 	if resp.StatusCode >= 400 {
 		// 错误体可能还会阻塞：在消费或关闭它之前保持 inflightCancel 有效，
@@ -335,15 +356,15 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		if closed {
 			_ = resp.Body.Close()
 			b.finishReplay(cancelReplay)
-			return n, err
+			return false, readErr
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		b.finishReplay(cancelReplay)
 		if rejection := detectUpstreamStreamRejection(body); rejection != nil {
-			return n, rejection
+			return false, rejection
 		}
-		return n, fmt.Errorf("首字节前重放失败：上游返回 HTTP %d", resp.StatusCode)
+		return false, fmt.Errorf("首字节前重放失败：上游返回 HTTP %d", resp.StatusCode)
 	}
 
 	// 安装成功响应；closed 检查与替换在同一临界区，Close 之后不再读取新响应体。
@@ -352,7 +373,7 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		b.mu.Unlock()
 		_ = resp.Body.Close()
 		b.finishReplay(cancelReplay)
-		return n, err
+		return false, readErr
 	}
 	old := b.reader
 	b.reader = resp.Body
@@ -369,9 +390,9 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		"attempt": b.replays, "model": b.model,
 		"business_impact": "首个有效字节前重放一次；原调用可能额外消耗上游额度",
 	})
-	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何上游字节，并发名额未释放，未重新选号",
+	log.Printf("[网络重放] traceId=%s requestId=%d 阶段=首字节前 模型=%s 结果=已重放 说明=下游尚未收到任何有效数据，并发名额未释放，未重新选号",
 		debugTraceID(b.r), b.reqID, b.model)
-	return b.Read(p)
+	return true, nil
 }
 
 // finishReplay 结束一次在途重放：清空取消入口、释放 context 并结束 WaitGroup。

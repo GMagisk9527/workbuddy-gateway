@@ -1119,6 +1119,12 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if streamRejection = detectUpstreamStreamRejection(data); streamRejection != nil {
 			break
 		}
+		if mode == int32(fastPathOn) && !json.Valid(data) {
+			// parseResponsesChunk only scans the fields it needs; malformed
+			// literals or escapes in skipped fields must still fail the stream.
+			invalidDataErr = errInvalidUpstreamChunk
+			break
+		}
 		if mode == int32(fastPathOn) && parseResponsesChunk(data, &view) {
 			// 快路径：结构扫描 + 直接拼装事件（见 responsesfast.go）
 			if view.firstTok {

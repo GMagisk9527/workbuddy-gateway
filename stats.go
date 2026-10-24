@@ -334,7 +334,10 @@ type statsAttempt struct {
 	usage     map[string]any
 	ttft      *float64
 	complete  bool
-	affinity  string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
+	// settleUnknown 表示这次上游请求已经实际发生、但没有拿到可计费 usage。
+	// 即使下游因转换失败返回 4xx/5xx，也必须按未知消耗结算一次。
+	settleUnknown bool
+	affinity      string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
 }
 
 func statsAttemptFor(r *http.Request) *statsAttempt {
@@ -420,9 +423,11 @@ func statsFinishAttempt(r *http.Request, status int) {
 	if credit, ok := usageCredit(p.usage); ok && credit >= 0 && !math.IsNaN(credit) && !math.IsInf(credit, 0) {
 		row.Credit = &credit
 	}
-	// 额度结算：只有真正拿到 usage 的尝试才记账（换号失败的那次没有 usage，不计费）。
+	// 额度结算：拿到 usage 的尝试按实测记账；已实际读取上游成功响应但
+	// 没有 usage 的聚合失败按未知消耗结算一次。换号失败的那次没有 usage，
+	// 也没有 settleUnknown 标记，仍不计费。
 	// 身份来自请求上下文，不依赖会被 statsSelectAccount 重置的 attempt。
-	if p.attemptID != "" && (len(p.usage) > 0 || (p.id != "" && status < 400)) {
+	if p.attemptID != "" && (len(p.usage) > 0 || p.settleUnknown || (p.id != "" && status < 400)) {
 		if identity := keyIdentityFor(r); identity != nil {
 			k := settlementKeyFor(r)
 			if k == nil {

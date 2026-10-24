@@ -116,6 +116,137 @@ func newReplayProbeBody(first string, readErr error, onReplay func()) *firstByte
 	})
 }
 
+func TestFastPathRejectsInvalidJSONLiterals(t *testing.T) {
+	bodies := map[string]string{
+		"invalid-extension": `data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"stop"}],"extension":INVALID}` + "\n\ndata: [DONE]\n\n",
+		"invalid-escape":    `data: {"choices":[{"index":0,"delta":{"content":"bad\q"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n",
+	}
+	for name, upstream := range bodies {
+		for _, mode := range []fastPathModeT{fastPathOff, fastPathOn} {
+			t.Run(fmt.Sprintf("%s/mode=%d", name, mode), func(t *testing.T) {
+				old := fastPathMode.Load()
+				fastPathMode.Store(int32(mode))
+				defer fastPathMode.Store(old)
+
+				chat := httptest.NewRecorder()
+				chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+				streamChatResponse(chat, chatReq, &http.Response{Body: io.NopCloser(strings.NewReader(upstream))}, "m", 1, &Account{Path: "offline.json"}, &profileCN, time.Now())
+				chatOut := chat.Body.String()
+				if !strings.Contains(chatOut, "stream_interrupted") || strings.Contains(chatOut, "data: [DONE]") {
+					t.Fatalf("chat fast path accepted invalid JSON: %q", chatOut)
+				}
+
+				responses := httptest.NewRecorder()
+				responsesReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				streamResponsesResponse(responses, responsesReq, &http.Response{Body: io.NopCloser(strings.NewReader(upstream))}, "m", 1, &Account{Path: "offline.json"}, &profileCN, time.Now())
+				responsesOut := responses.Body.String()
+				if !strings.Contains(responsesOut, "response.failed") || strings.Contains(responsesOut, "response.completed") || strings.Contains(responsesOut, "data: [DONE]") {
+					t.Fatalf("responses fast path accepted invalid JSON: %q", responsesOut)
+				}
+			})
+		}
+	}
+}
+
+func TestAggregateFailureWithoutUsageSettlesUnknown(t *testing.T) {
+	upstream := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n" +
+		"data: {bad json}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	handlers := []struct {
+		name string
+		path string
+		fn   func(http.ResponseWriter, *http.Request, *http.Response, *Account, time.Time)
+	}{
+		{"chat", "/v1/chat/completions", func(w http.ResponseWriter, r *http.Request, resp *http.Response, acc *Account, start time.Time) {
+			writeChatAggregate(w, r, resp, "aggregate-no-usage-chat", 1, acc, &profileCN, start)
+		}},
+		{"responses", "/v1/responses", func(w http.ResponseWriter, r *http.Request, resp *http.Response, acc *Account, start time.Time) {
+			writeResponsesAggregate(w, r, resp, "aggregate-no-usage-responses", 1, acc, &profileCN, start)
+		}},
+	}
+	for _, handler := range handlers {
+		t.Run(handler.name, func(t *testing.T) {
+			resetKeyWorld(t)
+			if err := ledgerLoad(keyDataDir); err != nil {
+				t.Fatal(err)
+			}
+			_, k := mustCreateKey(t, keyCreateOptions{Name: "aggregate-no-usage"})
+
+			req := httptest.NewRequest(http.MethodPost, handler.path, nil)
+			req = withKeyIdentity(req, &keyIdentity{ID: k.ID})
+			p := &statsAttempt{id: "acc", attemptID: "aggregate-no-usage-" + handler.name, model: "m", started: time.Now()}
+			req = req.WithContext(context.WithValue(req.Context(), statsRequestContextKey{}, p))
+			rec := httptest.NewRecorder()
+			handler.fn(rec, req, &http.Response{Body: io.NopCloser(strings.NewReader(upstream))}, &Account{Path: "acc"}, time.Now())
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("aggregate status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			statsFinishAttempt(req, rec.Code)
+
+			k.mu.Lock()
+			u := k.usage
+			k.mu.Unlock()
+			if u.Unknown != 1 || u.Requests != 1 {
+				t.Fatalf("无 usage 的聚合失败应结算 1 次未知请求，实际 %+v", u)
+			}
+		})
+	}
+}
+
+func TestFirstByteReplayHandlesDataAndErrorInSameRead(t *testing.T) {
+	rst := errors.New("read: connection reset by peer")
+	for _, tc := range []struct {
+		name       string
+		first      string
+		wantReplay bool
+	}{
+		{"comment-only", ": heartbeat\n\n", true},
+		{"empty-data", "data: \n\n", true},
+		{"effective-data", "data: {\"a\":1}\n\n", false},
+		{"partial-data-prefix", "data: ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			body := newFirstByteReplayBody(&dataWithErrorReader{data: []byte(tc.first), err: rst}, context.Background(), nil, 1, "m", 1,
+				func(context.Context) (*http.Response, error) {
+					called = true
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("data: ok\n\n"))}, nil
+				})
+			buf := make([]byte, 1024)
+			n, err := body.Read(buf)
+			if !tc.wantReplay {
+				if n == 0 || err == nil || called {
+					t.Fatalf("non-replayable same-read body was replayed: n=%d err=%v called=%t", n, err, called)
+				}
+				return
+			}
+			if n == 0 || err != nil || !called {
+				t.Fatalf("comment/empty data with same-read error was not replayed: n=%d err=%v called=%t", n, err, called)
+			}
+			n, err = body.Read(buf)
+			if n == 0 || err != nil {
+				t.Fatalf("replacement body was not readable after same-read replay: n=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+type dataWithErrorReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *dataWithErrorReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), r.err
+}
+
+func (r *dataWithErrorReader) Close() error { return nil }
+
 func TestFirstByteReplayOnlyUsesEffectiveData(t *testing.T) {
 	rst := errors.New("read: connection reset by peer")
 	for _, tc := range []struct {

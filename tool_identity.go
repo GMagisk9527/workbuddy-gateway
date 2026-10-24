@@ -82,6 +82,14 @@ func observeAggregateFailureUsage(r *http.Request, acc *Account, model string, r
 	if !ok {
 		return
 	}
+	if len(usage) == 0 {
+		// The upstream response was consumed but no usage arrived before the
+		// conversion failed. Settlement must still count this real attempt as
+		// unknown rather than treating the local 5xx as a pre-upstream reject.
+		if p := statsAttemptFor(r); p != nil {
+			p.settleUnknown = true
+		}
+	}
 	statsObserveUsage(r, usage, false)
 	observeModelCredit(acc, model, usage, reqID)
 	recordModelTokens(model, usage, reqID)

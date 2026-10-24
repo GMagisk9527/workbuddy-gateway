@@ -4363,6 +4363,12 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 				}
 
 				if mode == int32(fastPathOn) {
+					// The structural fast path skips literals it does not use,
+					// so it cannot be the only JSON validity check.
+					if !json.Valid(cleanData) {
+						invalidDataErr = errInvalidUpstreamChunk
+						break
+					}
 					frame = append(frame[:0], "data: "...)
 					var fastOK bool
 					frame, fastOK = cleanChunkInto(frame, cleanData, &meta)
