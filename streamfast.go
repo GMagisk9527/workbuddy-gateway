@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -51,21 +52,22 @@ func init() {
 }
 
 var (
-	keyChoices    = []byte(`choices`)
-	keyUsage      = []byte(`usage`)
-	keyDelta      = []byte(`delta`)
-	keyFinishRsn  = []byte(`finish_reason`)
-	keyFuncCall   = []byte(`function_call`)
-	keyName       = []byte(`name`)
-	keyArguments  = []byte(`arguments`)
-	keyContent    = []byte(`content`)
-	keyRefusal    = []byte(`refusal`)
-	keyReasoning  = []byte(`reasoning_content`)
-	keyReasoning2 = []byte(`reasoning`)
-	keyToolCalls  = []byte(`tool_calls`)
-	keyFunction   = []byte(`function`)
-	doneMarker    = []byte("[DONE]")
-	dataPrefix    = []byte("data:")
+	keyChoices     = []byte(`choices`)
+	keyChoiceIndex = []byte(`index`)
+	keyUsage       = []byte(`usage`)
+	keyDelta       = []byte(`delta`)
+	keyFinishRsn   = []byte(`finish_reason`)
+	keyFuncCall    = []byte(`function_call`)
+	keyName        = []byte(`name`)
+	keyArguments   = []byte(`arguments`)
+	keyContent     = []byte(`content`)
+	keyRefusal     = []byte(`refusal`)
+	keyReasoning   = []byte(`reasoning_content`)
+	keyReasoning2  = []byte(`reasoning`)
+	keyToolCalls   = []byte(`tool_calls`)
+	keyFunction    = []byte(`function`)
+	doneMarker     = []byte("[DONE]")
+	dataPrefix     = []byte("data:")
 )
 
 // chunkMeta 是流式循环需要的、从分片里顺手提取出来的元数据。
@@ -73,12 +75,14 @@ type chunkMeta struct {
 	usage      []byte // 最近一个 usage 对象的原始字节（整条流通常只有末尾一个）
 	finish     string // 本分片内第一个非空 finish_reason
 	firstToken bool   // 本分片是否包含有效内容/推理/工具增量
+	choices    []chatChoiceFinish
 }
 
 func (m *chunkMeta) reset() {
 	m.usage = m.usage[:0]
 	m.finish = ""
 	m.firstToken = false
+	m.choices = m.choices[:0]
 }
 
 func skipWS(b []byte, i int) int {
@@ -522,6 +526,7 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 	dst = append(dst, '{')
 	i++
 	first := true
+	choice := chatChoiceFinish{}
 	var seenBuf [16][]byte
 	seen := seenBuf[:0]
 	for {
@@ -531,6 +536,7 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 		}
 		if src[i] == '}' {
 			dst = append(dst, '}')
+			m.choices = append(m.choices, choice)
 			return dst, i + 1, true
 		}
 		ks := i
@@ -559,10 +565,10 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 			if !okv {
 				return dst, i, false
 			}
+			value := jsonStringValue(src[i:end])
+			choice.finished = value != ""
 			if m.finish == "" {
-				if v := jsonStringValue(src[i:end]); v != "" {
-					m.finish = v
-				}
+				m.finish = value
 			}
 			if !first {
 				dst = append(dst, ',')
@@ -594,6 +600,13 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 			if !okv {
 				return dst, i, false
 			}
+			if bytes.Equal(key, keyChoiceIndex) {
+				index, err := strconv.Atoi(string(src[i:end]))
+				if err != nil || index < 0 {
+					return dst, i, false
+				}
+				choice.index = index
+			}
 			if !first {
 				dst = append(dst, ',')
 			}
@@ -609,6 +622,7 @@ func rewriteChoiceInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int
 		}
 		if i < len(src) && src[i] == '}' {
 			dst = append(dst, '}')
+			m.choices = append(m.choices, choice)
 			return dst, i + 1, true
 		}
 		return dst, i, false
