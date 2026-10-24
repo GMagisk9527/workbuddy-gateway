@@ -33,6 +33,9 @@ Responses 资源；客户端使用 `store:false` 并回放完整 input 历史。
 空选项及默认 background:false、truncation:disabled、text.format.type:text 仍兼容。
 metadata 在 created、in_progress、completed／incomplete／failed 响应 envelope 中一致回显。
 未收到有效完成原因或上游读取失败时继续按原逻辑返回 failed，不伪造成功。
+SSE 注释、event/id/retry 等控制行继续兼容；`data:` 中的坏 JSON 不再静默跳过，
+流式返回 response.failed 并停止，不发送 response.completed；已经收到的上游 usage
+仍按真实消耗记录，完成标记为 false。
 
 工具 ID／名称较晚到达时，先累计参数，身份齐全后才确定 custom／namespace 映射并发送
 开始事件，输出索引按实际开始事件顺序连续分配；快慢路径保留调用 ID、名称及参数。

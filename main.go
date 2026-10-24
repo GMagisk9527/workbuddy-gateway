@@ -1562,6 +1562,7 @@ func nextAccount() (*Account, error) {
 
 // markCooldown 将账号屏蔽至指定时间。
 func markCooldown(acc *Account, until time.Time, msg string) {
+	msg = sanitizeUpstreamText(msg)
 	accountMu.Lock()
 	acc.CooldownUntil = until
 	acc.CooldownMsg = msg
@@ -1571,6 +1572,7 @@ func markCooldown(acc *Account, until time.Time, msg string) {
 }
 
 func markModelCooldown(acc *Account, model string, until time.Time, msg string) {
+	msg = sanitizeUpstreamText(msg)
 	accountMu.Lock()
 	state := modelStateLocked(acc, model)
 	state.CooldownUntil = until
@@ -1587,6 +1589,7 @@ func markModelCooldown(acc *Account, model string, until time.Time, msg string) 
 // 因此这里只标记 QuotaBlocked（该账号暂时无法服务该模型），
 // 绝不覆盖 CostClass —— 模型收费属性只能由 usage.credit 证据决定。
 func markModelQuotaBlocked(acc *Account, model, msg string) {
+	msg = sanitizeUpstreamText(msg)
 	accountMu.Lock()
 	state := modelStateLocked(acc, model)
 	oldClass := state.CostClass
@@ -1602,6 +1605,7 @@ func markModelQuotaBlocked(acc *Account, model, msg string) {
 // disableAccount 将账号标记为失效（授权过期/撤销），禁止调度并删除凭据文件，
 // 同时写入持久化失效标记，便于控制台提示用户重新登录。
 func disableAccount(acc *Account, reason string) {
+	reason = sanitizeUpstreamText(reason)
 	accountMu.Lock()
 	acc.Disabled = true
 	acc.DisabledReason = reason
@@ -3993,6 +3997,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				resp.Body.Close()
 				upstreamCancel()
 				errStr := string(errBody)
+				// Raw upstream error bodies can contain account identifiers or
+				// token fragments. Keep them for classification, but never put
+				// them into logs, cooldown/disabled state, or status snapshots.
+				safeErrStr := sanitizeUpstreamText(errStr)
 				rejection := classifyUpstreamRejection(errBody)
 				logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
 				debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
@@ -4004,14 +4012,15 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				log.Printf("[外部接口] traceId=%s requestId=%d 上游=%s 状态码=%d 结果=失败 账号=%s", traceID, reqID, prof.chatURL(), resp.StatusCode, acc.Path)
 				if rejection.Code == "11128" {
 					// 渠道/结构拒绝并不证明凭据失效或余额耗尽。不得换号重放、
-					// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方。
+					// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方，
+					// 但隐去账号标识与令牌片段。
 					recordModelFailure(modelName, rejection.Code)
-					writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
+					writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, safeErrStr))
 					return false
 				}
 
 				if isQuotaExhausted(resp.StatusCode, errStr) {
-					markModelQuotaBlocked(acc, modelName, errStr)
+					markModelQuotaBlocked(acc, modelName, safeErrStr)
 					if selection == selectionProbeExhausted {
 						msg := fmt.Sprintf("当前模型 %s 已在余额耗尽账号 %s 上完成受控探测并确认需要付费额度，本次不再探测其他耗尽账号", modelName, acc.Path)
 						log.Printf("[#%d] %s", reqID, msg)
@@ -4019,7 +4028,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 						writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_requires_quota", msg)
 						return false
 					}
-					lastRateErr = errStr
+					lastRateErr = safeErrStr
 					return true
 				}
 
@@ -4028,14 +4037,14 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 					if !ok {
 						until = time.Now().Add(60 * time.Second)
 					}
-					markModelCooldown(acc, modelName, until, errStr)
+					markModelCooldown(acc, modelName, until, safeErrStr)
 					if selection == selectionProbeExhausted {
 						msg := fmt.Sprintf("当前模型 %s 在余额耗尽账号 %s 的受控探测中触发模型级限流，本次不再探测其他耗尽账号", modelName, acc.Path)
 						recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
 						writeUpstreamError(w, r, http.StatusServiceUnavailable, "model_rate_limited", msg)
 						return false
 					}
-					lastRateErr = errStr
+					lastRateErr = safeErrStr
 					return true
 				}
 
@@ -4045,21 +4054,21 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 					if !ok {
 						until = time.Now().Add(60 * time.Second) // 无法解析时默认冷却 60 秒
 					}
-					markCooldown(acc, until, errStr)
-					lastRateErr = errStr
+					markCooldown(acc, until, safeErrStr)
+					lastRateErr = safeErrStr
 					return true // 尝试下一个账号
 				}
 
 				if isAuthFailure(resp.StatusCode, errStr) {
 					// 授权失效（401/403 / token 无效 / 登录过期）：禁用该账号并删除凭据文件，
 					// 自动改用下一个可用账号，控制台提示用户重新登录
-					disableAccount(acc, fmt.Sprintf("上游鉴权失败 (HTTP %d): %s", resp.StatusCode, truncate(errStr, 200)))
-					lastAuthErr = errStr
+					disableAccount(acc, fmt.Sprintf("上游鉴权失败 (HTTP %d): %s", resp.StatusCode, truncate(safeErrStr, 200)))
+					lastAuthErr = safeErrStr
 					return true // 尝试下一个账号
 				}
 
 				recordModelFailure(modelName, modelStatusFromError(resp.StatusCode, errStr))
-				writeUpstreamError(w, r, resp.StatusCode, "upstream_error", fmt.Sprintf("upstream %d: %s", resp.StatusCode, errStr))
+				writeUpstreamError(w, r, resp.StatusCode, "upstream_error", fmt.Sprintf("upstream %d: %s", resp.StatusCode, safeErrStr))
 				return false
 			}()
 			if retry {
@@ -4180,6 +4189,15 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isStream, _ := reqObj["stream"].(bool)
+	if !isStream {
+		if n, ok := reqObj["n"].(float64); ok && n > 1 {
+			// The local non-stream aggregator only represents one choice. Do not
+			// merge n>1 choices into a single corrupted message; streaming keeps
+			// the upstream choices separate and remains supported.
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "非流式 Chat 聚合不支持 n>1；请使用 stream=true 或 n=1")
+			return
+		}
+	}
 	debugSetModelAndStream(r, modelName, isStream)
 	debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, true, nil)
 	prepareConversationContext(r, reqObj)
@@ -4299,6 +4317,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 				recordModelLatency(modelName, time.Since(startTime))
 			}()
 			var streamRejection *upstreamStreamRejection
+			var invalidDataErr error
 			for guard.err() == nil && scanner.Scan() {
 				line := bytes.TrimSpace(scanner.Bytes())
 				if len(line) == 0 {
@@ -4358,33 +4377,38 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 							usageRaw = append(usageRaw[:0], meta.usage...)
 						}
 					} else {
-						// 形状不可识别：回退到原实现，语义不变。
+						// 形状不可识别：回退到原实现，但非法 JSON 不能被当成
+						// 可透传的扩展数据，否则后续 finish 会把残缺流标成成功。
+						var chunk map[string]any
+						if json.Unmarshal(cleanData, &chunk) != nil {
+							invalidDataErr = errInvalidUpstreamChunk
+							break
+						}
 						cleanedChunk := cleanChunkJSON(string(cleanData))
 						if cleanedChunk == "" {
 							continue
 						}
 						frame = append(frame[:0], "data: "...)
 						frame = append(frame, cleanedChunk...)
-						var chunk map[string]any
-						if json.Unmarshal(cleanData, &chunk) == nil {
-							observeFirstToken(body, chunk)
-							if u, ok := chunk["usage"].(map[string]any); ok {
-								usage = u
-								usageRaw = usageRaw[:0]
-							}
-							finishReason = noteFinishReason(finishReason, chunk)
+						observeFirstToken(body, chunk)
+						if u, ok := chunk["usage"].(map[string]any); ok {
+							usage = u
+							usageRaw = usageRaw[:0]
 						}
+						finishReason = noteFinishReason(finishReason, chunk)
 					}
 				} else {
 					// 原路径（WBG_FASTPATH=off 或 shadow）
 					var chunk map[string]any
-					if json.Unmarshal(cleanData, &chunk) == nil {
-						observeFirstToken(body, chunk)
-						if u, ok := chunk["usage"].(map[string]any); ok {
-							usage = u
-						}
-						finishReason = noteFinishReason(finishReason, chunk)
+					if json.Unmarshal(cleanData, &chunk) != nil {
+						invalidDataErr = errInvalidUpstreamChunk
+						break
 					}
+					observeFirstToken(body, chunk)
+					if u, ok := chunk["usage"].(map[string]any); ok {
+						usage = u
+					}
+					finishReason = noteFinishReason(finishReason, chunk)
 					cleanedChunk := cleanChunkJSON(string(cleanData))
 					if cleanedChunk == "" {
 						continue
@@ -4406,6 +4430,9 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 				return false
 			}
 			scanErr := scanner.Err()
+			if scanErr == nil {
+				scanErr = invalidDataErr
+			}
 			if commentLines > 0 || metadataLines > 0 {
 				debugEvent(r, "debug", "stream_sse_framing_checked", map[string]any{
 					"comment_lines": commentLines, "metadata_lines": metadataLines,
@@ -4515,7 +4542,7 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
-		observeAggregateToolIdentityFailure(r, acc, modelName, reqID, startTime, err)
+		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}
@@ -4796,14 +4823,14 @@ func doJSONContext(ctx context.Context, client *http.Client, method, fullURL str
 		return nil, resp.StatusCode, fmt.Errorf("读取上游响应失败: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d: %s", resp.StatusCode, string(raw))
+		return nil, resp.StatusCode, fmt.Errorf("http_error: upstream %d: %s", resp.StatusCode, sanitizeUpstreamText(string(raw)))
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("解析上游 JSON 失败: %w", err)
 	}
 	if env.Code != 0 {
-		return nil, resp.StatusCode, fmt.Errorf("code=%d msg=%s", env.Code, env.Msg)
+		return nil, resp.StatusCode, fmt.Errorf("code=%d msg=%s", env.Code, sanitizeUpstreamText(env.Msg))
 	}
 	return env.Data, resp.StatusCode, nil
 }
@@ -4895,7 +4922,14 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
+		// SSE comments and control fields carry no JSON payload. Keep the
+		// legacy bare-object form, but never silently skip malformed data.
+		if line == "" || strings.HasPrefix(line, ":") ||
+			(!strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "{")) {
+			continue
+		}
+		data := stripDataPrefix(line)
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -4904,7 +4938,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		}
 		var chunk map[string]any
 		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
+			// A malformed chunk is not an ignorable extension: dropping it would
+			// let a later finish_reason turn a truncated response into success.
+			return nil, &aggregateUsageError{usage: usage, cause: errInvalidUpstreamChunk}
 		}
 		observeFirstToken(r, chunk)
 		if v, ok := chunk["id"].(string); ok && v != "" {

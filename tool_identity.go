@@ -8,6 +8,7 @@ import (
 
 var errIncompleteToolIdentity = errors.New("上游工具调用缺少 ID 或名称，本次回复不完整")
 var errPendingToolIdentityTooLarge = errors.New("上游工具身份延迟期间输出过大，本次回复不完整")
+var errInvalidUpstreamChunk = errors.New("上游 SSE data 包含无效 JSON，本次回复不完整")
 
 // Bound only arguments waiting for identity, not the normal accumulated tool
 // output. Multiple unidentified calls share one budget rather than one per slot.
@@ -53,13 +54,36 @@ type aggregateToolIdentityError struct {
 func (e *aggregateToolIdentityError) Error() string { return errIncompleteToolIdentity.Error() }
 func (e *aggregateToolIdentityError) Unwrap() error { return errIncompleteToolIdentity }
 
-func observeAggregateToolIdentityFailure(r *http.Request, acc *Account, model string, reqID uint64, start time.Time, err error) {
+// aggregateUsageError carries measured usage when an upstream stream contains
+// data that cannot be converted. The caller still returns a failure, but the
+// account's real consumption must not be lost.
+type aggregateUsageError struct {
+	usage map[string]any
+	cause error
+}
+
+func (e *aggregateUsageError) Error() string { return e.cause.Error() }
+func (e *aggregateUsageError) Unwrap() error { return e.cause }
+
+func aggregateFailureUsage(err error) (map[string]any, bool) {
 	var identityError *aggregateToolIdentityError
-	if !errors.As(err, &identityError) {
+	if errors.As(err, &identityError) {
+		return identityError.usage, true
+	}
+	var usageError *aggregateUsageError
+	if errors.As(err, &usageError) {
+		return usageError.usage, true
+	}
+	return nil, false
+}
+
+func observeAggregateFailureUsage(r *http.Request, acc *Account, model string, reqID uint64, start time.Time, err error) {
+	usage, ok := aggregateFailureUsage(err)
+	if !ok {
 		return
 	}
-	statsObserveUsage(r, identityError.usage, false)
-	observeModelCredit(acc, model, identityError.usage, reqID)
-	recordModelTokens(model, identityError.usage, reqID)
+	statsObserveUsage(r, usage, false)
+	observeModelCredit(acc, model, usage, reqID)
+	recordModelTokens(model, usage, reqID)
 	recordModelLatency(model, time.Since(start))
 }

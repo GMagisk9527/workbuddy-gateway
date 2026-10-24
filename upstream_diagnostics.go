@@ -24,7 +24,9 @@ func (e *upstreamStreamRejection) Error() string {
 }
 
 func (e *upstreamStreamRejection) clientMessage() string {
-	return "upstream SSE: " + e.body
+	// The body is forwarded to the caller, so apply the same identifier masking
+	// used for logs and account state.
+	return sanitizeUpstreamText("upstream SSE: " + e.body)
 }
 
 func detectUpstreamStreamRejection(data []byte) *upstreamStreamRejection {
