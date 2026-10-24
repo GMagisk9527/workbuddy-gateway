@@ -41,6 +41,8 @@ func isolatedGatewayConfig(t *testing.T) {
 	oldConcurrent, _, _ := modelConcurrency.snapshot("")
 	oldAdmission, oldScheduling := ingressAdmission, currentSchedulingConfig()
 	ingressAdmission = newRequestAdmission()
+	// Deterministic tests use synthetic memory signals, independent of CI RAM.
+	ingressAdmission.memory.sample = func() memorySample { return memorySample{} }
 	setSchedulingConfig(schedulingFileConfig{})
 	setRequestProfile("legacy")
 	oldWriter := log.Writer()

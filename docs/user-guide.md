@@ -949,7 +949,15 @@ workbuddy-gateway serve -auth-dir ./auths
 
 ```json
 {
-  "admission": {"maxActive": 2, "maxWaiting": 8, "waitTimeoutMs": 15000},
+  "admission": {
+    "maxActive": 2,
+    "maxWaiting": 8,
+    "waitTimeoutMs": 15000,
+    "memoryProtection": true,
+    "maxBodyBytes": 0,
+    "memoryHighWatermarkPercent": 85,
+    "memoryLowWatermarkPercent": 75
+  },
   "scheduling": {"loadAware": true, "affinityWaitMs": 250, "waitTimeoutMs": 15000}
 }
 ```
@@ -959,7 +967,13 @@ workbuddy-gateway serve -auth-dir ./auths
 - 名额持续到整个处理结束，包含上游流及本地聚合。此限制与 `concurrent` 同时生效，因此默认 API 实际总并发最多为 2，即使 `concurrent.MaxGlobal=0`。如有充足资源，可一起调高请求准入和上游并发。
 - `maxActive` 的 0/省略使用默认 2，允许最大 1024；`maxWaiting` 省略为 8，显式 0 表示不排队，最大 10000；`waitTimeoutMs` 的 0/省略为 15000，最大 600000。负数和错误类型拒绝加载。
 - 配置可热加载：扩容唤醒等待者，缩容等待已有请求自然完成，不取消正在输出的流；已入队者沿用入队时的等待期限。FIFO 排队，取消会立即撤出队列并让后续请求继续。
-- 这是请求数量与排队保护，不是进程 RSS 的硬上限。单请求的 32 MiB 解码上限保持原值；大上下文、多媒体和协议转换仍会有额外内存开销，需按实际内存调节并发。
+- 默认启用 `memoryProtection`。共享请求体预算覆盖读取中的输入和已经读完但响应尚未结束的请求；gzip / deflate 同时计算压缩数据与解压后的数据，分块上传也按实际读取逐步预留。提前关闭请求体不会释放预算，整个 handler 返回（含取消、错误和 panic）后才释放。
+- `maxBodyBytes` 是全局在途输入字节预算，0/省略为自动计算：取 64 MiB、有效 Go 内存上限的四分之一、各可读 cgroup 内存上限的八分之一中的最小值。没有相应上限的项不参与计算。例：Go `GOMEMLIMIT=48MiB`、cgroup 上限约 128 MB 时，自动预算为 12 MiB。可显式指定正整数字节数，最大 1 TiB；负数和小数拒绝加载。
+- 内存采样最多每 250 毫秒刷新一次。Go 监测使用运行时管理的内存（total 减去已归还系统的 heap），Linux 同时读取常见 cgroup v1/v2 路径及父级限制，包含同一 cgroup 中其他进程的消耗。任何有效范围达到高水位即暂停新准入，所有可用范围回落到低水位才恢复。默认高/低水位为 85%/75%；0/省略使用默认值，允许 1～100，低水位必须小于高水位。
+- 水位过高返回 HTTP 503 `request_memory_pressure`；其他在途请求暂时占满字节预算返回 503 `request_body_budget_exceeded`，两者均带 `Retry-After: 1`。Messages 返回 Anthropic `overloaded_error`。新到达请求在读取 body 前拒绝，已排队者获得名额时重新检查水位；未知长度或压缩体可能在读取过程中发现预算不足，但不会进入模型调用。
+- 单个请求自身超过输入预算或原有大小上限时返回 HTTP 413，Messages 为 `request_too_large`，客户端应缩小上下文。拒绝发生在上游调用前，不产生模型消耗和未知用量记账。健康检查、模型列表和用量查询仍可访问。
+- 配置可热加载。缩小预算会阻止新的预留，已经预留的输入与正在输出的流继续完成。`memoryProtection:false` 关闭字节预算与水位保护，请求数量准入及原有单请求大小限制继续生效。
+- 输入预算与水位属于软保护，采样可能滞后，也不等于进程 RSS 的硬上限；JSON 对象、转换副本和聚合输出还有额外开销。单请求原有 16 MiB 压缩 / 32 MiB 解码上限保留，实际允许大小还受输入预算约束。无法读取 cgroup 时使用 Go 信号；未配置 Go 内存上限时只使用有效 cgroup 信号，两者均不可用时仍保留输入预算和数量限制。
 
 ### 负载感知与软亲和
 

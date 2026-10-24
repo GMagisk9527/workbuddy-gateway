@@ -73,6 +73,22 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if c.Admission.MaxActive < 0 || c.Admission.MaxActive > 1024 || c.Admission.MaxWaiting != nil && (*c.Admission.MaxWaiting < 0 || *c.Admission.MaxWaiting > 10000) || c.Admission.WaitTimeoutMs < 0 || c.Admission.WaitTimeoutMs > 600000 {
 		return c, errors.New("admission 并发需为 0～1024，排队需为 0～10000，等待时间需为 0～600000 毫秒")
 	}
+	if c.Admission.MaxBodyBytes < 0 || c.Admission.MaxBodyBytes > 1<<40 {
+		return c, errors.New("admission.maxBodyBytes 必须为 0～1099511627776 的整数字节数；0 为自动预算")
+	}
+	high, low := c.Admission.MemoryHighWatermarkPercent, c.Admission.MemoryLowWatermarkPercent
+	if high < 0 || high > 100 || low < 0 || low > 100 {
+		return c, errors.New("admission 内存水位必须为 0～100 的整数百分比")
+	}
+	if high == 0 {
+		high = 85
+	}
+	if low == 0 {
+		low = 75
+	}
+	if low >= high {
+		return c, errors.New("admission 内存恢复水位必须低于高水位")
+	}
 	if c.Scheduling.AffinityWaitMs < 0 || c.Scheduling.AffinityWaitMs > 60000 || c.Scheduling.WaitTimeoutMs < 0 || c.Scheduling.WaitTimeoutMs > 600000 {
 		return c, errors.New("scheduling 亲和等待需为 0～60000 毫秒，总等待需为 0～600000 毫秒")
 	}

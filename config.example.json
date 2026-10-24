@@ -18,7 +18,11 @@
   "admission": {
     "maxActive": 2,
     "maxWaiting": 8,
-    "waitTimeoutMs": 15000
+    "waitTimeoutMs": 15000,
+    "memoryProtection": true,
+    "maxBodyBytes": 0,
+    "memoryHighWatermarkPercent": 85,
+    "memoryLowWatermarkPercent": 75
   },
   "scheduling": {
     "loadAware": true,
