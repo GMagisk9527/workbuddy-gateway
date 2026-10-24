@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	version = "1.14.29"
+	version = "1.14.30"
 
 	// 状态快照文件名：serve 后台周期写入，monitor 前台命令实时读取展示
 	statusSnapshotFile = "workbuddy-status.json"
@@ -173,6 +173,15 @@ var legacyLargeBodyWarned atomic.Bool
 //
 // 返回的 cancel 用于在流式读取结束后取消上游 context（调用方负责）。
 func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, upstreamBytes []byte, reqID uint64, traceID string) (*http.Response, context.CancelFunc, error) {
+	// A consistent credential snapshot is shared by all retries of this request.
+	// Hot reload must not mix token fields across concurrent sends.
+	accountMu.Lock()
+	var auth *StoredAuth
+	if acc != nil && acc.Auth != nil {
+		value := *acc.Auth
+		auth = &value
+	}
+	accountMu.Unlock()
 	// 兼容直接调用与测试；正常入口已经在协议转换前准备完成。只生成一次，不能在 try 循环里重建。
 	prepareConversationContext(r, nil)
 	profile := requestProfileFor(r)
@@ -208,7 +217,7 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 			upstreamCancel()
 			return nil, nil, err
 		}
-		backendHeaders(req, acc.Auth, prof)
+		backendHeaders(req, auth, prof)
 		applyObservedDesktopHeaders(req, prof, profile)
 		if usesObservedDesktopHeaders(profile, prof) {
 			req.Header.Set("Content-Encoding", "gzip")
@@ -483,7 +492,7 @@ type Account struct {
 	credits        accountCredits                // 积分包明细与最早作废时间（受 accountMu 保护）
 	creditCodes    []string                      // 最近一次额度查询返回的套餐编码（受 accountMu 保护）
 	fingerprint    string                        // 凭据文件变更指纹（mtime+size，凭据热加载用）
-	lock           sync.Mutex                    // 单账号串行锁（防止同账号并发触发 11128）
+	lock           sync.RWMutex                  // 凭据维护写锁；模型发送共享读锁，并发数由 concurrent 控制
 	// 续期失败计数（仅内存，重启清零）：单次失败可能是上游抖动，连续失败才判定登录态失效。
 	RefreshFailCount int
 	LastRefreshError string
@@ -651,6 +660,11 @@ func main() {
 	initHTTPClient()
 	closeLog := initFileLogging(command)
 	defer closeLog()
+	if serveCommand || command == "probe" {
+		// Config is loaded before logging is initialized. Persist its effective
+		// concurrency limits now as well, rather than leaving them console-only.
+		logConcurrentConfig(newTraceID())
+	}
 	closeDebug := func() {}
 	if serveCommand {
 		var err error
@@ -1937,6 +1951,11 @@ func refreshAccountTokenLocked(acc *Account, reason string) error {
 		accountMu.Unlock()
 		return fmt.Errorf("无法刷新：账号缺少 RefreshToken 或已失效")
 	}
+	if reason == "按需续期" && time.Now().Unix() <= acc.Auth.Auth.ExpiresAt-900 {
+		accountMu.Unlock()
+		log.Printf("[Auth] 账号 %s 按需续期跳过：等待期间其他请求已完成刷新，继续使用有效凭据", acc.Path)
+		return nil
+	}
 	refreshed := *acc.Auth
 	oldTokens := refreshed.Auth // 覆盖前校验要比对旧凭据，先留存副本。
 	path := acc.Path
@@ -2477,18 +2496,28 @@ func refreshEnterpriseAccountQuota(ctx context.Context, acc *Account, auth Store
 	return nil
 }
 
-func lockAccountWithContext(ctx context.Context, mu *sync.Mutex) bool {
+func lockAccountWithContext(ctx context.Context, mu interface {
+	TryLock() bool
+	Unlock()
+}) bool {
+	if !tryAccountLockWithContext(ctx, mu.TryLock) {
+		return false
+	}
+	if ctx.Err() != nil {
+		mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func tryAccountLockWithContext(ctx context.Context, tryLock func() bool) bool {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
-		if mu.TryLock() {
-			if ctx.Err() != nil {
-				mu.Unlock()
-				return false
-			}
+		if tryLock() {
 			return true
 		}
 		select {
@@ -3809,7 +3838,7 @@ func authRequired() bool {
 // 路由处理: /v1/chat/completions (支持任意 model 透传)
 // -----------------------------------------------------------------------------
 
-// upstreamChat 完成「多账号轮询 + 429 冷却代偿 + 授权失效禁用 + 单账号串行」的上游调度。
+// upstreamChat 完成多账号轮询、429 冷却代偿、授权失效禁用与模型并发控制。
 // 成功时返回 200 响应（调用方负责关闭 Body）与命中的账号/站点；失败时函数内部已写回
 // 错误响应并返回 ok=false。Chat Completions 与 Responses 两个入口共用此逻辑。
 func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelName string, upstreamBytes []byte, startTime time.Time) (*http.Response, *Account, *upstreamProfile, bool) {
@@ -3902,8 +3931,33 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		case selectionProbeExhausted:
 			log.Printf("[ModelProbe] requestId=%d 账号 %s 付费余额已耗尽，但模型 %s 收费属性未知；执行一次受控探测，5分钟内不重复探测", reqID, acc.Path, modelName)
 		}
-		// 按账号所属站点（国内站/国际站）路由上游与指纹 Header
+		releaseSlot, slotErr := acquireModelConcurrency(r, acc, reqID, traceID)
+		if slotErr != nil {
+			recordModelFailure(modelName, "concurrent_wait_canceled")
+			writeUpstreamError(w, r, http.StatusServiceUnavailable, "concurrent_wait_canceled", "等待模型并发名额时请求已取消，未发送上游")
+			return nil, nil, nil, false
+		}
+		if err := lockModelAccountWithContext(r.Context(), acc); err != nil {
+			releaseSlot()
+			if r.Context().Err() != nil {
+				recordModelFailure(modelName, "请求已取消")
+				writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "等待账号凭据时请求已取消或超时")
+				return nil, nil, nil, false
+			}
+			lastAuthErr = err.Error()
+			continue
+		}
+		// 排队期间冷却、配额、名单和账号池都可能变化，须重新检查选号资格。
+		accountMu.Lock()
+		currentSelection, usable := queuedAccountUsableLocked(acc, modelName, selection, time.Now())
 		prof := acc.Profile()
+		accountMu.Unlock()
+		if !usable {
+			acc.lock.RUnlock()
+			releaseSlot()
+			continue
+		}
+		selection = currentSelection
 
 		debugEvent(r, "info", "upstream_request_started", map[string]any{
 			"upstream_host": prof.chatURL(),
@@ -3911,40 +3965,11 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			"payload_bytes": len(upstreamBytes),
 		})
 		// 注入 CodeBuddy 凭据与指纹 Header
-		// 限制同一账号向腾讯上游的请求严格单并发串行排队，防止并发双发触发腾讯风控
-		if !lockAccountWithContext(r.Context(), &acc.lock) {
-			recordModelFailure(modelName, "请求已取消")
-			writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "等待账号时请求已取消或超时")
-			return nil, nil, nil, false
-		}
-		// 排队期间冷却、配额、名单和账号池都可能变化，须重新检查选号资格。
-		accountMu.Lock()
-		currentSelection, usable := queuedAccountUsableLocked(acc, modelName, selection, time.Now())
-		accountMu.Unlock()
-		if !usable {
-			acc.lock.Unlock()
-			continue
-		}
-		selection = currentSelection
-		// A long preceding stream can outlast the token checked at selection time.
-		// Refresh under the already-owned lock, without recursively locking it.
-		if err := ensureValidTokenWithRefresh(r.Context(), acc, func(a *Account) error {
-			return refreshAccountTokenLocked(a, "按需续期")
-		}); err != nil {
-			acc.lock.Unlock()
-			if r.Context().Err() != nil {
-				recordModelFailure(modelName, "请求已取消")
-				writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "账号续期时请求已取消或超时")
-				return nil, nil, nil, false
-			}
-			lastAuthErr = err.Error()
-			continue
-		}
-		prof = acc.Profile()
 		statsSelectAccount(r, acc, modelName)
 		resp, upstreamCancel, err := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
 		if err != nil {
-			acc.lock.Unlock()
+			acc.lock.RUnlock()
+			releaseSlot()
 			debugEvent(r, "error", "upstream_request_failed", map[string]any{
 				"upstream_host": prof.chatURL(),
 				"error_type":    debugErrorType(err),
@@ -3956,12 +3981,12 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			writeUpstreamError(w, r, http.StatusBadGateway, "upstream_network_error", fmt.Sprintf("网络转发失败: %v", err))
 			return nil, nil, nil, false
 		}
-
 		// 上游非 200 响应处理
 		if resp.StatusCode >= 400 {
 			retry := func() bool {
 				// Keep queued requests behind the rejection's cooldown/disable update.
-				defer acc.lock.Unlock()
+				defer releaseSlot()
+				defer acc.lock.RUnlock()
 				statsFinishAttempt(r, resp.StatusCode)
 				// 错误体只用于分类和提示；限制上限，避免异常上游把整段大响应读进内存。
 				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -4043,6 +4068,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			return nil, nil, nil, false
 		}
 
+		acc.lock.RUnlock()
 		debugEvent(r, "info", "upstream_response_received", map[string]any{
 			"upstream_host": prof.chatURL(),
 			"status_code":   resp.StatusCode,
@@ -4053,9 +4079,19 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		// 关闭响应体时会一并取消上游 context，完成清理。
 		var streamBody io.ReadCloser = newIdleReadCloser(resp.Body, currentIdleTimeout(), upstreamCancel)
 		// Messages / Responses 没有协议级重放，在读取层对「首个字节前」的瞬时中断
-		// 重放一次；账号锁由外层 accountStreamBody 持有到最终关闭，重放不会换号。
+		// 重放一次；外层持有并发名额直到重放和响应体关闭，重放不会换号。
 		if firstByteReplayPath(r.URL.Path) && currentFirstByteRetry() {
 			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func(replayCtx context.Context) (*http.Response, error) {
+				if err := lockModelAccountWithContext(replayCtx, acc); err != nil {
+					return nil, err
+				}
+				defer acc.lock.RUnlock()
+				accountMu.Lock()
+				_, usable := queuedAccountUsableLocked(acc, modelName, selection, time.Now())
+				accountMu.Unlock()
+				if !usable {
+					return nil, errors.New("首字节重试前账号已不可用")
+				}
 				// 第一次尝试已经拿到 HTTP 200，可能已经在上游产生消耗但拿不到 usage：
 				// 先按未知用量结算一次，再为重放建立独立 attempt，避免两次调用只记一条。
 				replayReq := r.WithContext(replayCtx)
@@ -4076,7 +4112,8 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				return replayed, nil
 			})
 		}
-		resp.Body = newAccountStreamBody(streamBody, acc.lock.Unlock)
+		resp.Body = streamBody
+		bindModelConcurrency(r, resp, upstreamCancel, releaseSlot)
 		if affKey != "" {
 			if preferPath != "" && acc.Path != preferPath {
 				affinityForget(affKey)
