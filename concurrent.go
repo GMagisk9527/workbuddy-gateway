@@ -138,10 +138,7 @@ func (l *modelConcurrencyLimiter) acquire(ctx context.Context, key string, onWai
 }
 
 func acquireModelConcurrency(r *http.Request, acc *Account, reqID uint64, trace string) (func(), error) {
-	key, err := filepath.Abs(acc.Path)
-	if err != nil {
-		key = filepath.Clean(acc.Path)
-	}
+	key := modelConcurrencyKey(acc)
 	started := time.Now()
 	limiter := modelConcurrency
 	audit := func(stage string) {
@@ -162,6 +159,48 @@ func acquireModelConcurrency(r *http.Request, acc *Account, reqID uint64, trace 
 	audit("准入")
 	var once sync.Once
 	return func() { once.Do(func() { release(); audit("释放") }) }, nil
+}
+
+func modelConcurrencyKey(acc *Account) string {
+	key, err := filepath.Abs(acc.Path)
+	if err != nil {
+		return filepath.Clean(acc.Path)
+	}
+	return key
+}
+func (l *modelConcurrencyLimiter) accountLoads() map[string]int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string]int, len(l.accounts))
+	for k, n := range l.accounts {
+		out[k] = n
+	}
+	return out
+}
+func (l *modelConcurrencyLimiter) tryAcquire(ctx context.Context, key string) (func(), <-chan struct{}, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, l.changed, err
+	}
+	if l.accounts[key] >= l.limits.MaxAcc || l.limits.MaxGlobal > 0 && l.total >= l.limits.MaxGlobal {
+		return nil, l.changed, nil
+	}
+	l.total++
+	l.accounts[key]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			l.accounts[key]--
+			if l.accounts[key] == 0 {
+				delete(l.accounts, key)
+			}
+			l.notifyLocked()
+		})
+	}, l.changed, nil
 }
 
 // Wrap the final logical stream, outside first-byte replay. Closing waits for
