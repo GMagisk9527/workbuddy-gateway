@@ -57,6 +57,10 @@ tool_choice 和 parallel_tool_calls 不因官方样本省略就被删除，工�
 
 这些转换修正不依赖 official 开关：
 
+Chat 和 Responses 的请求解析保留工具 schema、嵌套工具数据及扩展字段中的 JSON
+数字精度，大整数和高精度小数不会因浮点中转而改值。标准生成参数继续采用既有标量
+处理，工具 arguments 中的 JSON 字符串也继续原样传递。
+
 | 原协议字段 | 网关 Chat 字段 |
 |---|---|
 | Responses reasoning.effort | reasoning_effort，保留 max 等显式值 |

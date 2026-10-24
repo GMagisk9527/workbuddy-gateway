@@ -135,3 +135,57 @@ func TestMessagesToolReferenceSearchThenCallThroughHTTP(t *testing.T) {
 		}
 	}
 }
+
+func TestMessagesToolReferenceRepeatedDefinitionsRemainBounded(t *testing.T) {
+	body := syntheticToolReferenceRequest()
+	body["tools"].([]any)[1].(map[string]any)["description"] = strings.Repeat("a", 16<<10)
+	refs := make([]any, 256)
+	for i := range refs {
+		refs[i] = map[string]any{"type": "tool_reference", "tool_name": "Inspect"}
+	}
+	result := body["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	result["content"] = refs
+	before, _ := json.Marshal(body)
+	normalized, err := normalizeAnthropicToolReferences(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(normalized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) > 4*len(before) {
+		t.Fatalf("repeated references expanded %d input bytes to %d bytes", len(before), len(after))
+	}
+	converted := normalized["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["content"].([]any)
+	if len(converted) != len(refs) {
+		t.Fatal("repeated references were dropped")
+	}
+	for _, raw := range converted {
+		if text := raw.(map[string]any)["text"].(string); !strings.Contains(text, "Inspect") {
+			t.Fatal("reference lost its tool identity")
+		}
+	}
+	unchanged, _ := json.Marshal(body)
+	if string(before) != string(unchanged) {
+		t.Fatal("bounded normalization changed the caller's request")
+	}
+}
+
+func TestMessagesToolReferenceRejectsCumulativeExpansionBeforeMarshaling(t *testing.T) {
+	body := syntheticToolReferenceRequest()
+	tools, refs := []any{}, []any{}
+	// HTML escaping makes the definitions much larger on the JSON wire. Each
+	// definition fits independently, but their combined expanded text does not.
+	description := strings.Repeat("<", 64<<10)
+	for i := 0; i < 48; i++ {
+		name := fmt.Sprintf("Inspect%d", i)
+		tools = append(tools, map[string]any{"name": name, "description": description, "input_schema": map[string]any{"type": "object"}})
+		refs = append(refs, map[string]any{"type": "tool_reference", "tool_name": name})
+	}
+	body["tools"] = tools
+	body["messages"].([]any)[1].(map[string]any)["content"].([]any)[0].(map[string]any)["content"] = refs
+	if _, err := normalizeAnthropicToolReferences(body); err == nil {
+		t.Fatal("cumulative normalized request larger than the request budget was accepted")
+	}
+}

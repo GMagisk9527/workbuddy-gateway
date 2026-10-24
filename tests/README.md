@@ -24,6 +24,7 @@ go test ./...
 go test -run '^TestConfigEditor' -count=1
 go test -run 'TestOfficial|TestRequestProfile|TestHarnessProtocol' -count=1
 go test -run 'TestMessages(ThinkingDisplay|ToolReference|ClaudeCodeCompleteShape|UpstreamRefusal)|TestResponses(Output|EncryptedReasoning|UnsupportedCapabilities)|TestProtocolReasoning' -count=1
+go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMarshalConverted|TestMessages.*(ToolIdentity|ConversionLimit|RequestLimit|ToolReference)|TestResponses.*ToolIdentity|TestPendingTool|TestInvalidToolIdentity' -count=1
 ```
 
 `*_test.go` 直接使用 `package main` 私有实现，不搬进普通子目录。Go 在 `go build .` 时会排除这些文件，标准测试命令仍运行完整测试，不需要额外加载器。
