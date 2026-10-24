@@ -1358,7 +1358,7 @@ func usableForModelLocked(acc *Account, model string, now time.Time) (accountSel
 // A queued probe owns the reservation made by nextAccountForModelPrefer. It
 // must still pass all other checks when it finally acquires the account lock.
 func usableForModelReservationLocked(acc *Account, model string, now time.Time, reservedProbe bool) (accountSelectionKind, bool) {
-	if acc.Disabled || acc.CooldownUntil.After(now) {
+	if acc.Auth == nil || acc.Disabled || acc.CooldownUntil.After(now) {
 		return "", false
 	}
 	model = normalizeModelName(model)

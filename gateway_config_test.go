@@ -41,6 +41,7 @@ func isolatedGatewayConfig(t *testing.T) {
 	oldConcurrent, _, _ := modelConcurrency.snapshot("")
 	oldAdmission, oldScheduling := ingressAdmission, currentSchedulingConfig()
 	ingressAdmission = newRequestAdmission()
+	setSchedulingConfig(schedulingFileConfig{})
 	setRequestProfile("legacy")
 	oldWriter := log.Writer()
 	cfg = Config{Addr: "127.0.0.1", WebUI: true, AuthFile: "workbuddy.json"}

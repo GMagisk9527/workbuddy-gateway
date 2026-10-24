@@ -132,7 +132,7 @@ func TestSchedulingStickyReturnsBeforeGraceWhenSlotOpens(t *testing.T) {
 	modelConcurrency.configure(concurrentFileConfig{MaxAcc: 1})
 	held, _, _ := modelConcurrency.tryAcquire(context.Background(), modelConcurrencyKey(a))
 	defer held()
-	setSchedulingConfig(schedulingFileConfig{AffinityWaitMs: 1000})
+	setSchedulingConfig(schedulingFileConfig{AffinityWaitMs: 1000, WaitTimeoutMs: 2000})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil).WithContext(ctx)

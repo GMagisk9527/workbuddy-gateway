@@ -58,6 +58,9 @@ func acquireScheduledAccount(r *http.Request, model string, attempted map[*Accou
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), wait)
 	defer cancel()
+	if attempted == nil {
+		attempted = make(map[*Account]bool)
+	}
 	limiter := modelConcurrency
 	started := time.Now()
 	stickyUntil := started.Add(grace)
@@ -81,19 +84,16 @@ func acquireScheduledAccount(r *http.Request, model string, attempted map[*Accou
 		}
 		schedulingAcquireMu.Lock()
 		picked := &accountPickTrace{}
-		a, kind, err := pickAccountForModel(model, attempted, preferred, !sticky, false, picked)
+		// A valid binding takes precedence inside the picker; fallback candidates
+		// are load-aware within the same site and eligibility policy in one pass.
+		a, kind, err := pickAccountForModel(model, attempted, preferred, true, false, picked)
 		if err != nil {
 			schedulingAcquireMu.Unlock()
 			return nil, "", nil, err
 		}
 		if sticky && a.Path != prefer {
-			// An ineligible or removed binding gets no grace period.
+			// Keep the picker's policy-compliant fallback, without a grace period.
 			sticky = false
-			a, kind, err = pickAccountForModel(model, attempted, "", true, false, picked)
-			if err != nil {
-				schedulingAcquireMu.Unlock()
-				return nil, "", nil, err
-			}
 		}
 		release, changed, err := limiter.tryAcquire(ctx, modelConcurrencyKey(a))
 		if err != nil {
@@ -125,6 +125,9 @@ func acquireScheduledAccount(r *http.Request, model string, attempted map[*Accou
 			accountMu.Unlock()
 			if !usable {
 				release()
+				// Eligibility may change after lookup. Do not repeatedly reserve
+				// the same rejected account for the rest of this request.
+				attempted[a] = true
 				schedulingAcquireMu.Unlock()
 				continue
 			}
