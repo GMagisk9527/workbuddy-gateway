@@ -1219,9 +1219,15 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	streamComplete := false
+	businessRejection := false
 	defer func() {
 		// Retain measured consumption even when conversion rejects the result.
 		// Completion and billing are independent; unknown usage stays unknown.
+		if len(state.usage) == 0 && !businessRejection {
+			if attempt := statsAttemptFor(r); attempt != nil {
+				attempt.settleUnknown = true
+			}
+		}
 		statsObserveUsage(r, state.usage, streamComplete)
 		observeModelCredit(acc, modelName, state.usage, reqID)
 		recordModelTokens(modelName, state.usage, reqID)
@@ -1229,6 +1235,7 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	}()
 	if err := scanUpstreamSSE(body, state, nil); err != nil {
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+			businessRejection = true
 			return
 		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{

@@ -817,6 +817,11 @@ func initHTTPClient() {
 	jar, _ := cookiejar.New(nil)
 	headerTimeout, _, _ := upstreamSettings()
 	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
 		MaxIdleConns:        50,
 		IdleConnTimeout:     90 * time.Second,
 		MaxIdleConnsPerHost: 10,
@@ -4317,6 +4322,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 	defer session.Close()
 	r = session.request
 	guard := session.guard
+	expectedChoices := requestedChatChoices(upstreamBytes)
 	replayBudget := 0
 	if upstreamBytes != nil && currentFirstByteRetry() {
 		replayBudget = 1
@@ -4333,6 +4339,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			frame := make([]byte, 0, 8*1024)
 			mode := fastPathMode.Load()
 			finishReason := ""
+			choiceProgress := newChatChoiceProgress(expectedChoices)
 			sawDone := false
 			commentLines, metadataLines := 0, 0
 			streamComplete := false
@@ -4386,6 +4393,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 					var fastOK bool
 					frame, fastOK = cleanChunkInto(frame, cleanData, &meta)
 					if fastOK {
+						choiceProgress.observeMeta(meta.choices)
 						if meta.firstToken {
 							observeFirstTokenFlag(body)
 						}
@@ -4400,6 +4408,10 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 						// 可透传的扩展数据，否则后续 finish 会把残缺流标成成功。
 						var chunk map[string]any
 						if json.Unmarshal(cleanData, &chunk) != nil {
+							invalidDataErr = errInvalidUpstreamChunk
+							break
+						}
+						if !choiceProgress.observeChunk(chunk) {
 							invalidDataErr = errInvalidUpstreamChunk
 							break
 						}
@@ -4420,6 +4432,10 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 					// 原路径（WBG_FASTPATH=off 或 shadow）
 					var chunk map[string]any
 					if json.Unmarshal(cleanData, &chunk) != nil {
+						invalidDataErr = errInvalidUpstreamChunk
+						break
+					}
+					if !choiceProgress.observeChunk(chunk) {
 						invalidDataErr = errInvalidUpstreamChunk
 						break
 					}
@@ -4470,7 +4486,8 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			if canReplayStream(scanErr, guard.hasData(), replays < replayBudget, r.Context().Err() != nil) {
 				return true
 			}
-			streamComplete = scanErr == nil && finishReason != ""
+			choicesComplete := choiceProgress.complete()
+			streamComplete = scanErr == nil && choicesComplete
 			completeTokenStream(body, streamComplete)
 			if scanErr != nil {
 				// 流被中断（上游卡死 / 超时 / 客户端取消）时，绝不补发 [DONE]：
@@ -4497,25 +4514,32 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 				})
 				_ = guard.writeData(string(errPayload))
 				log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流式读取 账号=%s 异常=%v 业务影响=本次响应不完整，已向客户端下发中断错误而非伪造结束", debugTraceID(r), reqID, acc.Path, scanErr)
-			} else if finishReason == "" {
-				// 连接是正常关掉的（没有读错误），但整段流没有非空 finish_reason。
+			} else if !choicesComplete {
+				failureCode, failureReason := "stream_closed_without_finish", errStreamClosedWithoutFinish.Error()
+				if expectedChoices > 1 || len(choiceProgress.finished) > 1 {
+					failureCode = "stream_choices_incomplete"
+					failureReason = "上游流结束但候选回复没有全部结束，本次响应不完整"
+				}
+				// 连接正常结束，但至少一个候选缺少结束原因或完全缺失。
 				// 这不是成功：不能补 [DONE]，也不能记成 stream_response_completed。
-				debugEvent(r, "error", "stream_closed_without_finish", map[string]any{
-					"error_type":      "stream_closed_without_finish",
-					"finish_reason":   "",
-					"saw_done":        sawDone,
-					"business_impact": "上游干净结束但没有 finish_reason，已拒绝当成成功，未补发 [DONE]",
+				debugEvent(r, "error", failureCode, map[string]any{
+					"error_type":       failureCode,
+					"finish_reason":    finishReason,
+					"saw_done":         sawDone,
+					"expected_choices": expectedChoices,
+					"seen_choices":     len(choiceProgress.finished),
+					"business_impact":  "上游干净结束但候选没有全部结束，未补发 [DONE]",
 				})
 				errPayload, _ := json.Marshal(map[string]any{
 					"error": map[string]any{
-						"message": errStreamClosedWithoutFinish.Error(),
+						"message": failureReason,
 						"type":    "upstream_stream_incomplete",
-						"code":    "stream_closed_without_finish",
+						"code":    failureCode,
 					},
 				})
 				_ = guard.writeData(string(errPayload))
-				log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流结束 账号=%s 结果=拒绝当成成功 原因=连接正常关闭但没有非空 finish_reason 是否看到DONE=%t 业务影响=不补发 [DONE]，客户端收到 stream_closed_without_finish 是否已处理=是",
-					debugTraceID(r), reqID, acc.Path, sawDone)
+				log.Printf("[异常] traceId=%s requestId=%d 发生阶段=上游流结束 账号=%s 结果=拒绝当成成功 原因=候选没有全部结束 是否看到DONE=%t 错误码=%s 业务影响=不补发 [DONE] 是否已处理=是",
+					debugTraceID(r), reqID, acc.Path, sawDone, failureCode)
 			} else {
 				if sawDone {
 					if err := guard.writeData("[DONE]"); err != nil {
@@ -4529,7 +4553,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 					"saw_done":      sawDone,
 				})
 			}
-			if scanErr == nil && finishReason != "" {
+			if streamComplete {
 				log.Printf("[#%d] 流式输出完成 (账号 %s [%s], 结束原因=%s, 耗时 %v, 首Token(v2) %s)", reqID, acc.Path, prof.Label, finishReason, time.Since(startTime), body.text())
 			}
 			return false
@@ -4999,10 +5023,10 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		if errors.Is(err, errInvalidUpstreamChunk) {
 			return nil, &aggregateUsageError{usage: usage, cause: err}
 		}
-		return nil, fmt.Errorf("读取上游流失败: %w", err)
+		return nil, &aggregateUsageError{usage: usage, cause: fmt.Errorf("读取上游流失败: %w", err)}
 	}
 	if finish == "" {
-		return nil, errStreamClosedWithoutFinish
+		return nil, &aggregateUsageError{usage: usage, cause: errStreamClosedWithoutFinish}
 	}
 	if err := validateMergedToolIdentity(toolCalls, toolOrder); err != nil {
 		return nil, &aggregateToolIdentityError{usage: usage}
