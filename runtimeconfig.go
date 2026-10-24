@@ -70,6 +70,12 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if _, err := normalizeRequestProfile(c.Upstream.RequestProfile); err != nil {
 		return c, err
 	}
+	if c.Admission.MaxActive < 0 || c.Admission.MaxActive > 1024 || c.Admission.MaxWaiting != nil && (*c.Admission.MaxWaiting < 0 || *c.Admission.MaxWaiting > 10000) || c.Admission.WaitTimeoutMs < 0 || c.Admission.WaitTimeoutMs > 600000 {
+		return c, errors.New("admission 并发需为 0～1024，排队需为 0～10000，等待时间需为 0～600000 毫秒")
+	}
+	if c.Scheduling.AffinityWaitMs < 0 || c.Scheduling.AffinityWaitMs > 60000 || c.Scheduling.WaitTimeoutMs < 0 || c.Scheduling.WaitTimeoutMs > 600000 {
+		return c, errors.New("scheduling 亲和等待需为 0～60000 毫秒，总等待需为 0～600000 毫秒")
+	}
 	return c, nil
 }
 
@@ -181,6 +187,9 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	setCreditConfig(creditFetch, c.Credits.ExpiringFirst, c.Credits.WindowDays)
 	setIdentityConfig(c.Identity)
 	modelConcurrency.configure(c.Concurrent)
+	ingressAdmission.configure(c.Admission)
+	setSchedulingConfig(c.Scheduling)
+	logGatewayControls(trace)
 	logConcurrentConfig(trace)
 	identityEnabled, _, identityRuleCount := identitySettingsSummary()
 	log.Printf("[身份替换配置] traceId=%s 启用=%t 规则数=%d 说明=仅处理非代码身份文本；不记录替换内容，热加载只影响后续请求", trace, identityEnabled, identityRuleCount)

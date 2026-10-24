@@ -15,6 +15,16 @@
     "MaxAcc": 4,
     "MaxGlobal": 0
   },
+  "admission": {
+    "maxActive": 2,
+    "maxWaiting": 8,
+    "waitTimeoutMs": 15000
+  },
+  "scheduling": {
+    "loadAware": true,
+    "affinityWaitMs": 250,
+    "waitTimeoutMs": 15000
+  },
   "debug": {
     "enabled": false
   },

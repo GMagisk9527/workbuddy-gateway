@@ -74,6 +74,8 @@ type runtimeFileConfig struct {
 	// Omitted identity settings preserve the fork's existing neutral prefix.
 	Identity   runtimeIdentityConfig `json:"identity"`
 	Concurrent concurrentFileConfig  `json:"concurrent"`
+	Admission  admissionFileConfig   `json:"admission"`
+	Scheduling schedulingFileConfig  `json:"scheduling"`
 	Debug      struct {
 		Enabled bool `json:"enabled"`
 	} `json:"debug"`

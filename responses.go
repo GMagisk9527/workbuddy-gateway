@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -895,25 +893,16 @@ func numOr0(v any) float64 {
 // streamResponsesResponse 将上游 Chat Completions SSE 实时转译为 Responses 语义事件流。
 func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time) {
 	defer resp.Body.Close()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
+	session, ok := startModelStream(w, r, resp.Body)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming_unsupported", "服务器不支持流式响应 Flush")
 		return
 	}
 	// 上游首字节可能很慢：先下发 SSE 注释心跳，避免边缘节点静默期重置连接。
 	// 所有协议事件都经同一把写锁写出，心跳不会与事件帧交错。
-	streamContext, cancelStream := context.WithCancel(r.Context())
-	defer cancelStream()
-	r = r.WithContext(streamContext)
-	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancelStream}
-	guard.setBody(resp.Body)
-	heartbeat := startStreamHeartbeat(guard, currentStreamKeepalive())
-	defer heartbeat.Stop()
+	defer session.Close()
+	r = session.request
+	guard := session.guard
 	// response.created / in_progress 不是模型有效数据，不能停掉心跳。
 	out := controlWriter{guard}
 
@@ -1070,8 +1059,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 
 	body := newTTFTReader(resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	sse := newUpstreamSSEReader(body)
 	mode := fastPathMode.Load()
 	var view respChunkView
 	var usageRaw []byte
@@ -1095,30 +1083,13 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	deltaBuf := make([]byte, 0, 512)
 	var streamRejection *upstreamStreamRejection
 	var invalidDataErr error
-	for sseWriteErr == nil && pendingIdentityErr == nil && scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
+	for sseWriteErr == nil && pendingIdentityErr == nil && sse.Next() {
+		if sse.comment {
 			continue
 		}
-		// SSE comments and control fields carry no JSON payload. Keep the legacy
-		// bare-object form, but never silently skip malformed data.
-		if line[0] == ':' ||
-			(!bytes.HasPrefix(line, []byte("data:")) && line[0] != '{' && !bytes.Equal(line, doneMarker)) {
-			continue
-		}
-		data := stripDataPrefixBytes(line)
-		if len(data) == 0 {
-			continue
-		}
+		data := sse.data
 		// 上游已经有数据流动，停止心跳；心跳只覆盖首字节前的静默期。
 		guard.markEffectiveData()
-		if bytes.Equal(data, doneMarker) {
-			sawDone = true
-			continue
-		}
-		if streamRejection = detectUpstreamStreamRejection(data); streamRejection != nil {
-			break
-		}
 		if mode == int32(fastPathOn) && !json.Valid(data) {
 			// parseResponsesChunk only scans the fields it needs; malformed
 			// literals or escapes in skipped fields must still fail the stream.
@@ -1299,7 +1270,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		log.Printf("[#%d] 下游写入失败，已终止本次流 (账号 %s)", reqID, acc.Path)
 		return
 	}
-	scanErr := scanner.Err()
+	sawDone = sse.done
+	scanErr := sse.Err()
 	if scanErr == nil {
 		scanErr = invalidDataErr
 	}
@@ -1473,7 +1445,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		return
 	}
 
-	if err := writeSSE(w, flusher, []byte("data: [DONE]\n\n")); err != nil {
+	if err := guard.writeData("[DONE]"); err != nil {
 		writeFailed(err)
 		return
 	}

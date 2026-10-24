@@ -22,6 +22,7 @@
 go vet ./...
 go test ./...
 go test -run '^TestConfigEditor' -count=1
+go test -run 'TestAdmission|TestScheduling|TestCommonStream|TestGatewayControl' -count=1
 go test -run 'TestOfficial|TestRequestProfile|TestHarnessProtocol' -count=1
 go test -run 'TestMessages(ThinkingDisplay|ToolReference|ClaudeCodeCompleteShape|UpstreamRefusal)|TestResponses(Output|EncryptedReasoning|UnsupportedCapabilities)|TestProtocolReasoning' -count=1
 go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMarshalConverted|TestMessages.*(ToolIdentity|ConversionLimit|RequestLimit|ToolReference)|TestResponses.*ToolIdentity|TestPendingTool|TestInvalidToolIdentity' -count=1

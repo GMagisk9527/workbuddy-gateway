@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/subtle"
@@ -664,6 +663,7 @@ func main() {
 		// Config is loaded before logging is initialized. Persist its effective
 		// concurrency limits now as well, rather than leaving them console-only.
 		logConcurrentConfig(newTraceID())
+		logGatewayControls(newTraceID())
 	}
 	closeDebug := func() {}
 	if serveCommand {
@@ -1395,8 +1395,20 @@ func nextAccountForModel(model string, attempted map[*Account]bool) (*Account, a
 // nextAccountForModelPrefer 与原函数语义完全一致，只是当 preferPath 对应的账号
 // 通过**同样的资格检查**时优先选它（Prompt Cache 亲和）。亲和不是特权：
 // 模型名单、免费站点优先、冷却、配额、探测状态任一不满足就回退到原轮询。
-func nextAccountForModelPrefer(model string, attempted map[*Account]bool, preferPath string) (*Account, accountSelectionKind, error) { // 站点优先级必须在加锁前计算：preferredFreeSites 会读取账号账本并自行获取 accountMu，
-	// 若在持锁期间调用会自锁。语义：该模型「一个站点免费、另一个站点收费」时优先用免费站点，
+func nextAccountForModelPrefer(model string, attempted map[*Account]bool, preferPath string) (*Account, accountSelectionKind, error) {
+	return pickAccountForModel(model, attempted, preferPath, false, true, nil)
+}
+
+// Scheduling uses a side-effect-free candidate lookup; probe reservations and
+// round-robin progress are committed only after acquiring the model permit.
+type accountPickTrace struct{ expiring bool }
+
+func pickAccountForModel(model string, attempted map[*Account]bool, preferPath string, loadAware, reserveProbe bool, picked *accountPickTrace) (*Account, accountSelectionKind, error) {
+	if picked != nil {
+		picked.expiring = false
+	}
+	// preferredFreeSites 会读取账号账本并自行获取 accountMu，必须在加锁前计算。
+	// 语义：该模型「一个站点免费、另一个站点收费」时优先用免费站点，
 	// 直到该站点账号全部不可用；其余情况不搞优先，正常轮询。
 	preferred := preferredFreeSites(model)
 
@@ -1427,22 +1439,51 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 		}
 	}
 
+	var loads map[string]int
+	if loadAware {
+		loads = modelConcurrency.accountLoads()
+	}
+	reserve := func(acc *Account, kind accountSelectionKind) {
+		if !reserveProbe {
+			return
+		}
+		if kind == selectionProbeExhausted {
+			modelStateLocked(acc, model).NextProbeAt = now.Add(modelProbeDelay)
+		}
+		for i, a := range accounts {
+			if a == acc {
+				rrIndex = (i + 1) % len(accounts)
+				break
+			}
+		}
+	}
 	pick := func(siteFilter func(string) bool) (*Account, accountSelectionKind, bool) {
 		for _, wanted := range []accountSelectionKind{selectionFreeExhausted, selectionNormal, selectionProbeExhausted} {
+			minLoad := int(^uint(0) >> 1)
+			if loadAware {
+				for _, a := range accounts {
+					if attempted != nil && attempted[a] {
+						continue
+					}
+					if ok, _ := modelAccountAllowed(model, a, accounts); !ok {
+						continue
+					}
+					if siteFilter != nil && !siteFilter(accSiteLocked(a)) {
+						continue
+					}
+					if kind, ok := usableForModelLocked(a, model, now); ok && kind == wanted {
+						if n := loads[modelConcurrencyKey(a)]; n < minLoad {
+							minLoad = n
+						}
+					}
+				}
+			}
 			// 亲和账号优先，但必须通过与本轮其它账号完全相同的检查。
 			if preferAcc != nil && (attempted == nil || !attempted[preferAcc]) {
 				if ok, _ := modelAccountAllowed(model, preferAcc, accounts); ok &&
 					(siteFilter == nil || siteFilter(accSiteLocked(preferAcc))) {
 					if kind, usable := usableForModelLocked(preferAcc, model, now); usable && kind == wanted {
-						if kind == selectionProbeExhausted {
-							modelStateLocked(preferAcc, model).NextProbeAt = now.Add(modelProbeDelay)
-						}
-						for i, acc := range accounts {
-							if acc == preferAcc {
-								rrIndex = (i + 1) % len(accounts)
-								break
-							}
-						}
+						reserve(preferAcc, kind)
 						return preferAcc, kind, true
 					}
 				}
@@ -1451,6 +1492,9 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 			// 已有绑定的会话必须保住缓存，不能为了烧临期积分把长对话搬走。
 			if preferAcc == nil {
 				eligible := func(a *Account) bool {
+					if loadAware && loads[modelConcurrencyKey(a)] != minLoad {
+						return false
+					}
 					if attempted != nil && attempted[a] {
 						return false
 					}
@@ -1464,22 +1508,22 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 					return ok && k == wanted
 				}
 				if ea, _ := expiringCandidateLocked(accounts, eligible, now); ea != nil {
-					if kind, _ := usableForModelLocked(ea, model, now); kind == selectionProbeExhausted {
-						modelStateLocked(ea, model).NextProbeAt = now.Add(modelProbeDelay)
+					if picked != nil {
+						picked.expiring = true
 					}
-					for i, a := range accounts {
-						if a == ea {
-							rrIndex = (i + 1) % len(accounts)
-							break
-						}
+					reserve(ea, wanted)
+					if reserveProbe {
+						creditPicked.Add(1)
 					}
-					creditPicked.Add(1)
 					return ea, wanted, true
 				}
 			}
 			for i := 0; i < len(accounts); i++ {
 				idx := (rrIndex + i) % len(accounts)
 				acc := accounts[idx]
+				if loadAware && loads[modelConcurrencyKey(acc)] != minLoad {
+					continue
+				}
 				if attempted != nil && attempted[acc] {
 					continue
 				}
@@ -1493,10 +1537,7 @@ func nextAccountForModelPrefer(model string, attempted map[*Account]bool, prefer
 				if !ok || kind != wanted {
 					continue
 				}
-				if kind == selectionProbeExhausted {
-					modelStateLocked(acc, model).NextProbeAt = now.Add(modelProbeDelay)
-				}
-				rrIndex = (idx + 1) % len(accounts)
+				reserve(acc, kind)
 				return acc, kind, true
 			}
 		}
@@ -3871,8 +3912,14 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 	affKey := affinityKeyFor(r, modelName, upstreamBytes)
 	preferPath := affinityLookup(affKey)
 	for attempt := 0; attempt < poolSize; attempt++ {
-		acc, selection, err := nextAccountForModelPrefer(modelName, attempted, preferPath)
+		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID)
 		if err != nil {
+			if errors.Is(err, errSchedulingTimeout) || r.Context().Err() != nil {
+				recordModelFailure(modelName, "concurrent_wait_canceled")
+				w.Header().Set("Retry-After", "1")
+				writeUpstreamError(w, r, http.StatusServiceUnavailable, "concurrent_wait_canceled", "等待可用账号超时或请求已取消，未调用上游")
+				return nil, nil, nil, false
+			}
 			if errors.Is(err, errModelAccountPolicy) {
 				log.Printf("[请求被拒绝] traceId=%s requestId=%d 模型=%s 原因=账号黑白名单没有匹配的凭据 返回状态码=403 业务影响=未进入上游", traceID, reqID, modelName)
 				debugEvent(r, "warn", "model_account_policy_rejected", map[string]any{
@@ -3901,6 +3948,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			return nil, nil, nil, false
 		}
 		attempted[acc] = true
+		affinityDecision := ""
 		if affKey != "" {
 			decision := ""
 			if preferPath != "" {
@@ -3913,9 +3961,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 					affinityLogLine("回退", affKey, acc.Path)
 				}
 			}
-			if p := statsAttemptFor(r); p != nil {
-				p.affinity = decision
-			}
+			affinityDecision = decision
 		}
 		debugSetAccount(r, acc.Path)
 		debugEvent(r, "debug", "account_selected", map[string]any{
@@ -3934,12 +3980,6 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			log.Printf("[FreeModel] requestId=%d 请求的是已知免费模型 %s，选择付费余额耗尽账号 %s 发起请求", reqID, modelName, acc.Path)
 		case selectionProbeExhausted:
 			log.Printf("[ModelProbe] requestId=%d 账号 %s 付费余额已耗尽，但模型 %s 收费属性未知；执行一次受控探测，5分钟内不重复探测", reqID, acc.Path, modelName)
-		}
-		releaseSlot, slotErr := acquireModelConcurrency(r, acc, reqID, traceID)
-		if slotErr != nil {
-			recordModelFailure(modelName, "concurrent_wait_canceled")
-			writeUpstreamError(w, r, http.StatusServiceUnavailable, "concurrent_wait_canceled", "等待模型并发名额时请求已取消，未发送上游")
-			return nil, nil, nil, false
 		}
 		if err := lockModelAccountWithContext(r.Context(), acc); err != nil {
 			releaseSlot()
@@ -3970,6 +4010,9 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		})
 		// 注入 CodeBuddy 凭据与指纹 Header
 		statsSelectAccount(r, acc, modelName)
+		if p := statsAttemptFor(r); p != nil {
+			p.affinity = affinityDecision
+		}
 		resp, upstreamCancel, err := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
 		if err != nil {
 			acc.lock.RUnlock()
@@ -4265,24 +4308,15 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			_ = resp.Body.Close()
 		}
 	}()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
+	session, ok := startModelStream(w, r, resp.Body)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "streaming_unsupported", "服务器不支持流式响应 Flush")
 		return
 	}
 
-	streamContext, cancelStream := context.WithCancel(r.Context())
-	defer cancelStream()
-	r = r.WithContext(streamContext)
-	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancelStream}
-	guard.setBody(resp.Body)
-	heartbeat := startStreamHeartbeat(guard, currentStreamKeepalive())
-	defer heartbeat.Stop()
+	defer session.Close()
+	r = session.request
+	guard := session.guard
 	replayBudget := 0
 	if upstreamBytes != nil && currentFirstByteRetry() {
 		replayBudget = 1
@@ -4292,8 +4326,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 		replay := func() bool {
 			body := newTTFTReader(resp.Body, startTime)
 			defer finishFirstToken(r, modelName, reqID, body)
-			scanner := bufio.NewScanner(body)
-			scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+			sse := newUpstreamSSEReader(body)
 			var usage map[string]any
 			var usageRaw []byte
 			meta := chunkMeta{usage: make([]byte, 0, 256)}
@@ -4318,35 +4351,15 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			}()
 			var streamRejection *upstreamStreamRejection
 			var invalidDataErr error
-			for guard.err() == nil && scanner.Scan() {
-				line := bytes.TrimSpace(scanner.Bytes())
-				if len(line) == 0 {
-					continue
-				}
-				if line[0] == ':' {
+			for guard.err() == nil && sse.Next() {
+				if sse.comment {
 					commentLines++
-					if guard.writeUpstreamComment(string(line)) != nil {
+					if guard.writeUpstreamComment(string(sse.data)) != nil {
 						return false
 					}
 					continue
 				}
-				if !bytes.HasPrefix(line, []byte("data:")) && line[0] != '{' && !bytes.Equal(line, doneMarker) {
-					metadataLines++
-					continue
-				}
-				cleanData := stripDataPrefixBytes(line)
-				if len(cleanData) == 0 {
-					continue
-				}
-				if bytes.Equal(cleanData, doneMarker) {
-					// 先记住，等确认有真实 finish_reason 再转发。
-					// 没有结束原因时转发 [DONE]，等于告诉客户端这次是正常结束。
-					sawDone = true
-					break
-				}
-				if streamRejection = detectUpstreamStreamRejection(cleanData); streamRejection != nil {
-					break
-				}
+				cleanData := sse.data
 
 				if mode == int32(fastPathShadow) {
 					// 影子模式：额外跑一遍快路径并与原实现比对，输出仍走原实现。
@@ -4435,7 +4448,9 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			if guard.err() != nil {
 				return false
 			}
-			scanErr := scanner.Err()
+			sawDone = sse.done
+			metadataLines = sse.metadata
+			scanErr := sse.Err()
 			if scanErr == nil {
 				scanErr = invalidDataErr
 			}
@@ -4444,6 +4459,9 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 					"comment_lines": commentLines, "metadata_lines": metadataLines,
 					"business_impact": "心跳按SSE注释转发，元数据不包装为JSON数据帧，不记录正文",
 				})
+			}
+			if streamRejection == nil {
+				errors.As(scanErr, &streamRejection)
 			}
 			if streamRejection != nil {
 				scanErr = streamRejection
@@ -4925,25 +4943,14 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	toolCalls := map[int]*mergedToolCall{}
 	var toolOrder []int
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// SSE comments and control fields carry no JSON payload. Keep the
-		// legacy bare-object form, but never silently skip malformed data.
-		if line == "" || strings.HasPrefix(line, ":") ||
-			(!strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "{")) {
+	sse := newUpstreamSSEReader(r)
+	for sse.Next() {
+		if sse.comment {
 			continue
 		}
-		data := stripDataPrefix(line)
-		if data == "" || data == "[DONE]" {
-			continue
-		}
-		if rejection := detectUpstreamStreamRejection([]byte(data)); rejection != nil {
-			return nil, rejection
-		}
+		data := sse.data
 		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
+		if json.Unmarshal(data, &chunk) != nil {
 			// A malformed chunk is not an ignorable extension: dropping it would
 			// let a later finish_reason turn a truncated response into success.
 			return nil, &aggregateUsageError{usage: usage, cause: errInvalidUpstreamChunk}
@@ -4984,7 +4991,14 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 			finish = noteFinishReason(finish, map[string]any{"choices": []any{choice}})
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := sse.Err(); err != nil {
+		var rejection *upstreamStreamRejection
+		if errors.As(err, &rejection) {
+			return nil, rejection
+		}
+		if errors.Is(err, errInvalidUpstreamChunk) {
+			return nil, &aggregateUsageError{usage: usage, cause: err}
+		}
 		return nil, fmt.Errorf("读取上游流失败: %w", err)
 	}
 	if finish == "" {

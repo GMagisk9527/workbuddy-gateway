@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -70,9 +69,9 @@ func anthropicErrType(errType string) string {
 		return "authentication_error"
 	case "model_disabled", "model_account_disabled":
 		return "permission_error"
-	case "model_rate_limited", "all_accounts_cooldown":
+	case "model_rate_limited", "all_accounts_cooldown", "request_queue_full", "request_queue_timeout":
 		return "rate_limit_error"
-	case "no_available_account", "model_requires_quota":
+	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled":
 		return "overloaded_error"
 	case "invalid_request_encoding", "unsupported_content_encoding":
 		// 请求体格式/编码问题是调用方错误，不能退化成服务端 api_error
@@ -1096,24 +1095,14 @@ func (s *anthropicStreamState) thinkingSignature(slot *anthropicTextSlot) string
 // scanUpstreamSSE 逐行扫描上游 SSE 并把每个 chunk 喂给状态机。
 // 返回 scanner 错误（nil 表示干净 EOF）。
 func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]byte) bool) error {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		// SSE comments and control fields carry no JSON payload. Keep accepting
-		// the legacy bare-object form, but never silently drop a malformed data.
-		if !strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "{") {
+	sse := newUpstreamSSEReader(body)
+	for sse.Next() {
+		if sse.comment {
 			continue
 		}
-		data := stripDataPrefix(line)
-		if data == "" || data == "[DONE]" {
-			continue
-		}
-		if rejection := detectUpstreamStreamRejection([]byte(data)); rejection != nil {
-			return rejection
-		}
+		data := sse.data
 		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
+		if json.Unmarshal(data, &chunk) != nil {
 			return fmt.Errorf("上游 SSE data 包含无效 JSON，本次回复不完整")
 		}
 		observeFirstToken(body, chunk)
@@ -1127,7 +1116,7 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 			}
 		}
 	}
-	err := scanner.Err()
+	err := sse.Err()
 	if err == nil && state.finish != "" {
 		err = state.validateToolInputs()
 	}
@@ -1138,25 +1127,16 @@ func scanUpstreamSSE(body io.Reader, state *anthropicStreamState, sink func([]by
 // streamMessagesResponse 将上游流式响应实时回译为 Anthropic SSE。
 func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time, wantThinking bool) {
 	defer resp.Body.Close()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	flusher, ok := w.(http.Flusher)
+	session, ok := startModelStream(w, r, resp.Body)
 	if !ok {
 		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "服务器不支持流式响应 Flush")
 		return
 	}
 	// 等待上游首个字节期间下发 SSE 注释心跳，避免边缘节点因长时间静默重置连接；
 	// 心跳与数据帧共用同一把写锁，net/http 不保证 ResponseWriter 并发安全。
-	streamContext, cancelStream := context.WithCancel(r.Context())
-	defer cancelStream()
-	r = r.WithContext(streamContext)
-	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancelStream}
-	guard.setBody(resp.Body)
-	heartbeat := startStreamHeartbeat(guard, currentStreamKeepalive())
-	defer heartbeat.Stop()
+	defer session.Close()
+	r = session.request
+	guard := session.guard
 	writeFailed := false
 	writeEvent := func(b []byte) bool {
 		if len(b) == 0 {
