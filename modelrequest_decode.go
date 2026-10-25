@@ -1,23 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 )
 
 // Preserve JSON numbers in schemas, tool data and extension fields. Standard
 // scalar generation options retain their previous float64 representation.
 func decodeModelRequestBody(raw []byte, body *map[string]any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(body); err != nil {
+	if err := decodeRequestJSONNumbers(raw, body); err != nil {
 		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("请求体必须是单个 JSON 对象")
 	}
 	for _, key := range []string{
 		"max_tokens", "max_completion_tokens", "max_output_tokens",

@@ -1,23 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 )
 
 // Keep numbers inside tool arguments and schemas exact. Only the known scalar
 // generation options use the converter's existing float64 representation.
 func decodeAnthropicMessageBody(raw []byte, body *map[string]any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(body); err != nil {
+	if err := decodeRequestJSONNumbers(raw, body); err != nil {
 		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return fmt.Errorf("请求体必须是单个 JSON 对象")
 	}
 	for _, key := range []string{"max_tokens", "temperature", "top_p", "top_k"} {
 		if n, ok := (*body)[key].(json.Number); ok {

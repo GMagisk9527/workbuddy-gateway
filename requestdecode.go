@@ -94,7 +94,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		r.Body = io.NopCloser(bytes.NewReader(decoded))
+		r.Body = newDecodedRequestBody(decoded)
 		// 请求体已还原成明文：这两个头必须去掉，否则下游按压缩数据理解。
 		r.Header.Del("Content-Encoding")
 		r.Header.Del("Content-Length")
