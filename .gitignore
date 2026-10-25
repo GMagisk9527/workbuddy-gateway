@@ -13,6 +13,8 @@ stats.json
 keyledger.snapshot.json
 keyledger.wal
 keyledger.state.json
+checkin-state.json
+.checkin-state-*.tmp
 .env
 .env.*
 !.env.example
