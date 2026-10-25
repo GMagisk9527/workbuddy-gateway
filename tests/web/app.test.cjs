@@ -82,6 +82,7 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map(),
     , openAddAccount, startAddAccount, pollAddAccount, closeAddAccount, accountRowActions
     , initStatsFilter, writeStatsFilterCookie, readStatsFilterCookie, bindStatsChartHover
     , openKeyEditor, closeKeyEditor, submitKeyForm
+    , renderPerformance, loadPerformance
   };})();`);
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -1755,4 +1756,44 @@ test("告警条目排成一行且不再有日志跳转；统计范围可按站�
   assert(meta.includes('target="_blank"'), "必须在新标签页打开");
   assert(meta.includes('rel="noreferrer"'), "必须带 rel=noreferrer");
   audit("告警行重排与站点筛选通过", {jump_removed: true, site_scope: true, chip_link: true});
+});
+
+test("分阶段性能按协议显示，未知值和零值区分，文本转义", async () => {
+  const payload = {protocols: [{protocol: "all", requests: 3, failed: 1, upstreamAttempts: 4,
+    transportRetries: 1, connections: 4, reusedConnections: 2, connectionReuseRate: 0.5,
+    phases: [{name: "dns", label: '<img src=x>', samples: 0, failed: 0, averageMs: null, p95Ms: null, p99Ms: null},
+      {name: "total", label: "总耗时", samples: 3, failed: 1, averageMs: 0, p95Ms: 0.25, p99Ms: 10}]},
+    {protocol: "messages", requests: 1, phases: []}]};
+  const calls = [];
+  const f = fixture(async url => { calls.push(url); return response(200, payload); });
+  f.review.state.apiKey = "synthetic-admin";
+  await f.review.loadPerformance();
+  const html = f.element("performanceTable").innerHTML;
+  assert(html.includes("&lt;img") && !html.includes("<img"));
+  assert(html.includes("—") && html.includes("0.000 ms") && html.includes("0.250 ms"));
+  assert.match(f.element("performanceSummary").textContent, /已结束请求 3/);
+  assert.match(f.element("performanceSummary").textContent, /50.0%/);
+  f.element("performanceProtocol").value = "messages";
+  f.review.renderPerformance(payload);
+  assert.match(f.element("performanceSummary").textContent, /已结束请求 1/);
+  assert(calls.includes("/admin/api/performance"));
+  assert(!calls.some(url => url.includes("start=") || url.includes("account=")), "实时指标不能混入历史筛选");
+});
+
+test("锁定页面使在途性能请求失效，失败保留旧结果", async () => {
+  let resolve;
+  const f = fixture(() => new Promise(done => { resolve = done; }));
+  f.review.state.apiKey = "synthetic-admin";
+  const pending = f.review.loadPerformance();
+  f.review.lockDashboard();
+  resolve(response(200, {protocols: [{protocol: "all", requests: 999, phases: []}]}));
+  await pending;
+  assert.equal(f.review.state.lastPerformance, null);
+  assert(!f.element("performanceSummary").textContent.includes("999"));
+  const failed = fixture(async () => response(500, {}));
+  failed.review.state.apiKey = "synthetic-admin";
+  failed.element("performanceTable").innerHTML = "previous rows";
+  await failed.review.loadPerformance();
+  assert.equal(failed.element("performanceTable").innerHTML, "previous rows");
+  assert.match(failed.element("performanceInfo").textContent, /保留上次/);
 });

@@ -215,19 +215,33 @@ func recordModelCostClass(model, edition string, free bool) {
 const ttftMetric = "first_token_v2"
 
 type ttftReader struct {
-	r        io.Reader
-	start    time.Time
-	once     sync.Once
-	d        time.Duration
-	complete bool
+	r           io.Reader
+	start       time.Time
+	once        sync.Once
+	d           time.Duration
+	complete    bool
+	performance *requestPerformance
 }
 
 func newTTFTReader(r io.Reader, start time.Time) *ttftReader {
 	return &ttftReader{r: r, start: start}
 }
 
+func newRequestTTFTReader(req *http.Request, r io.Reader, start time.Time) *ttftReader {
+	t := newTTFTReader(r, start)
+	t.performance = performanceFor(req)
+	return t
+}
+
 func (t *ttftReader) Read(p []byte) (int, error) {
-	return t.r.Read(p) // 原始字节不代表Token，禁止在这里计时。
+	// Raw bytes are not tokens; only measure the read operation here.
+	if t.performance == nil {
+		return t.r.Read(p)
+	}
+	started := time.Now()
+	n, err := t.r.Read(p)
+	t.performance.observe(phaseUpstreamRead, time.Since(started), err != nil && err != io.EOF)
+	return n, err
 }
 
 func (t *ttftReader) duration() time.Duration { return t.d }
@@ -270,8 +284,12 @@ func hasFirstTokenDelta(chunk map[string]any) bool {
 
 func observeFirstToken(reader io.Reader, chunk map[string]any) {
 	if t, ok := reader.(*ttftReader); ok && hasFirstTokenDelta(chunk) {
-		t.once.Do(func() { t.d = time.Since(t.start) })
+		t.observeFirstToken()
 	}
+}
+
+func (t *ttftReader) observeFirstToken() {
+	t.once.Do(func() { t.d = time.Since(t.start); t.performance.observe(phaseFirstToken, t.d, false) })
 }
 
 func completeTokenStream(reader io.Reader, complete bool) {
@@ -285,6 +303,7 @@ func completeTokenStream(reader io.Reader, complete bool) {
 // 不得因为事后看到请求 Context 已取消而追溯抹掉首 Token 样本。
 func finishFirstToken(r *http.Request, model string, reqID uint64, body *ttftReader) {
 	complete := body.complete
+	body.performance.streamCompletion(complete)
 	known := complete && body.duration() > 0
 	if known {
 		recordModelTTFT(model, body.duration())

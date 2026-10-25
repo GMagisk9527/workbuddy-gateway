@@ -72,6 +72,7 @@ func registerWebUIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/tasks", handleWebUITasks)
 	mux.HandleFunc("/admin/api/rate-detail", handleWebUIRateDetail)
 	mux.HandleFunc("/admin/api/stats", handleWebUIStats)
+	mux.HandleFunc("/admin/api/performance", handleWebUIPerformance)
 	mux.HandleFunc("/admin/api/account-alerts", handleWebUIAccountAlerts)
 	mux.HandleFunc("/admin/api/account-add", handleWebUIAccountAdd)
 	mux.HandleFunc("/admin/api/account-cancel", handleWebUIAccountCancel)

@@ -184,7 +184,9 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 	// 兼容直接调用与测试；正常入口已经在协议转换前准备完成。只生成一次，不能在 try 循环里重建。
 	prepareConversationContext(r, nil)
 	profile := requestProfileFor(r)
+	encodeStarted := performanceStarted(r)
 	wireBytes, encodeErr := encodeModelRequest(upstreamBytes, profile, prof)
+	recordPerformance(r, phaseEncode, encodeStarted, encodeErr != nil)
 	if encodeErr != nil {
 		log.Printf("[出站兼容] traceId=%s requestId=%d 阶段=请求编码 结果=失败 业务影响=未发送上游", traceID, reqID)
 		debugEvent(r, "error", "upstream_body_encode_failed", map[string]any{"status_code": 502})
@@ -210,6 +212,15 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 					bodyWritten.Store(true)
 				}
 			},
+		}
+		var timingTrace *performanceTrace
+		if p := performanceFor(r); p != nil {
+			var hooks *httptrace.ClientTrace
+			timingTrace, hooks = newPerformanceTrace(p)
+			nativeWrote, metricsWrote := trace.WroteRequest, hooks.WroteRequest
+			hooks.WroteHeaders = trace.WroteHeaders
+			hooks.WroteRequest = func(info httptrace.WroteRequestInfo) { nativeWrote(info); metricsWrote(info) }
+			trace = hooks
 		}
 		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(upstreamCtx, trace), http.MethodPost, prof.chatURL(), bytes.NewReader(wireBytes))
 		if err != nil {
@@ -238,7 +249,11 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 				traceID, reqID, acc.Path, try, retries, safeDebugError(lastErr))
 		}
 
+		performanceFor(r).networkAttempt(try > 0)
 		resp, err := cfg.HttpClient.Do(req)
+		if timingTrace != nil {
+			timingTrace.finish(err != nil)
+		}
 		if err == nil {
 			return resp, upstreamCancel, nil
 		}
@@ -3593,7 +3608,8 @@ func backgroundTokenRefresher() {
 
 type auditResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status      int
+	performance *requestPerformance
 }
 
 func (w *auditResponseWriter) WriteHeader(status int) {
@@ -3605,7 +3621,16 @@ func (w *auditResponseWriter) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	return w.ResponseWriter.Write(data)
+	if w.performance == nil {
+		return w.ResponseWriter.Write(data)
+	}
+	started := time.Now()
+	n, err := w.ResponseWriter.Write(data)
+	w.performance.observe(phaseDownstream, time.Since(started), err != nil || n != len(data))
+	if err != nil || n != len(data) {
+		w.performance.downstreamError()
+	}
+	return n, err
 }
 
 func (w *auditResponseWriter) Flush() {
@@ -3613,7 +3638,14 @@ func (w *auditResponseWriter) Flush() {
 		w.status = http.StatusOK
 	}
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		var started time.Time
+		if w.performance != nil {
+			started = time.Now()
+		}
 		flusher.Flush()
+		if w.performance != nil {
+			w.performance.observe(phaseDownstream, time.Since(started), false)
+		}
 	}
 }
 
@@ -3627,6 +3659,7 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Trace-ID", traceID)
 		// 普通落盘审计也需要稳定的 TraceID / requestID；不能依赖可选 JSON 日志。
 		ensureDebugRequestContext(r, traceID, start)
+		r, performance := withRequestPerformance(r, start)
 		r = r.WithContext(context.WithValue(r.Context(), statsRequestContextKey{}, &statsAttempt{}))
 		// 鉴权层通过这个持有者回填身份，外层结算才能读到（否则成功请求不入账）。
 		r = r.WithContext(context.WithValue(r.Context(), keyIdentityHolderKey{}, &keyIdentityHolder{}))
@@ -3635,13 +3668,28 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 				"message": "请求已进入网关，准备执行中间件与路由处理",
 			})
 		}
-		aw := &auditResponseWriter{ResponseWriter: w}
+		aw := &auditResponseWriter{ResponseWriter: w, performance: performance}
+		performanceFinished := false
+		defer func() {
+			if performance != nil && !performanceFinished {
+				// Account for an aborted handler without intercepting its panic or
+				// changing settlement/response behavior.
+				performance.endPrepare(true)
+				performance.finish(phaseMetrics, http.StatusInternalServerError, r.Context().Err() != nil, time.Now())
+			}
+		}()
 		log.Printf("[请求到达] traceId=%s 方法=%s 路径=%s 来源=%s 说明=请求已进入网关", traceID, r.Method, r.URL.Path, r.RemoteAddr)
 		next.ServeHTTP(aw, r)
 		if aw.status == 0 {
 			aw.status = http.StatusOK
 		}
+		performance.endPrepare(aw.status >= 400)
 		statsFinishAttempt(r, aw.status)
+		performance.finish(phaseMetrics, aw.status, r.Context().Err() != nil, time.Now())
+		performanceFinished = true
+		if performance != nil && debugLoggingEnabled() {
+			debugEvent(r, "debug", "request_performance", performance.debugFields())
+		}
 		debugEvent(r, "info", "response_returned", map[string]any{
 			"status_code": aw.status,
 			"result":      http.StatusText(aw.status),
@@ -3762,6 +3810,7 @@ func authRequired() bool {
 // 成功时返回 200 响应（调用方负责关闭 Body）与命中的账号/站点；失败时函数内部已写回
 // 错误响应并返回 ok=false。Chat Completions 与 Responses 两个入口共用此逻辑。
 func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelName string, upstreamBytes []byte, startTime time.Time) (*http.Response, *Account, *upstreamProfile, bool) {
+	performanceFor(r).endPrepare(false)
 	prepareConversationContext(r, nil)
 	traceID := w.Header().Get("X-Trace-ID")
 	log.Printf("[业务入口] traceId=%s requestId=%d 业务=上游模型调用 请求体字节数=%d", traceID, reqID, len(upstreamBytes))
@@ -3787,7 +3836,9 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 	affKey := affinityKeyFor(r, modelName, upstreamBytes)
 	preferPath := affinityLookup(affKey)
 	for attempt := 0; attempt < poolSize; attempt++ {
+		accountStarted := performanceStarted(r)
 		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID)
+		recordPerformance(r, phaseAccount, accountStarted, err != nil)
 		if err != nil {
 			if errors.Is(err, errSchedulingTimeout) || r.Context().Err() != nil {
 				recordModelFailure(modelName, "concurrent_wait_canceled")
@@ -3856,7 +3907,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		case selectionProbeExhausted:
 			log.Printf("[ModelProbe] requestId=%d 账号 %s 付费余额已耗尽，但模型 %s 收费属性未知；执行一次受控探测，5分钟内不重复探测", reqID, acc.Path, modelName)
 		}
-		if err := lockModelAccountWithContext(r.Context(), acc); err != nil {
+		credentialStarted := performanceStarted(r)
+		credentialErr := lockModelAccountWithContext(r.Context(), acc)
+		recordPerformance(r, phaseCredential, credentialStarted, credentialErr != nil)
+		if err := credentialErr; err != nil {
 			releaseSlot()
 			if r.Context().Err() != nil {
 				recordModelFailure(modelName, "请求已取消")
@@ -3911,7 +3965,9 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				defer acc.lock.RUnlock()
 				statsFinishAttempt(r, resp.StatusCode)
 				// 错误体只用于分类和提示；限制上限，避免异常上游把整段大响应读进内存。
-				errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				readStarted := performanceStarted(r)
+				errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				recordPerformance(r, phaseUpstreamRead, readStarted, readErr != nil)
 				resp.Body.Close()
 				upstreamCancel()
 				errStr := string(errBody)
@@ -4009,7 +4065,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		// 重放一次；外层持有并发名额直到重放和响应体关闭，重放不会换号。
 		if firstByteReplayPath(r.URL.Path) && currentFirstByteRetry() {
 			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func(replayCtx context.Context) (*http.Response, error) {
-				if err := lockModelAccountWithContext(replayCtx, acc); err != nil {
+				credentialStarted := performanceStarted(r)
+				credentialErr := lockModelAccountWithContext(replayCtx, acc)
+				recordPerformance(r, phaseCredential, credentialStarted, credentialErr != nil)
+				if err := credentialErr; err != nil {
 					return nil, err
 				}
 				defer acc.lock.RUnlock()
@@ -4087,6 +4146,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	decodeStarted := time.Now()
 	decodeErr := decodeModelRequestBody(bodyBytes, &reqObj)
 	decodeDuration := time.Since(decodeStarted)
+	performanceFor(r).observe(phaseDecode, decodeDuration, decodeErr != nil)
+	if decodeErr == nil {
+		performanceFor(r).beginPrepare()
+	}
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_json", "无效的 JSON 请求体")
@@ -4200,7 +4263,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 	replays := 0
 	for {
 		replay := func() bool {
-			body := newTTFTReader(resp.Body, startTime)
+			body := newRequestTTFTReader(r, resp.Body, startTime)
 			defer finishFirstToken(r, modelName, reqID, body)
 			sse := newUpstreamSSEReader(body)
 			var usage map[string]any
@@ -4456,7 +4519,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 // writeChatAggregate 聚合上游 SSE 为完整 Chat Completions JSON 响应。
 func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time) {
 	defer resp.Body.Close()
-	body := newTTFTReader(resp.Body, startTime)
+	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {

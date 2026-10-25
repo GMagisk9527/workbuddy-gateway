@@ -24,6 +24,7 @@ go test ./...
 go test -run '^TestConfigEditor' -count=1
 go test -run 'TestAdmission|TestScheduling|TestCommonStream|TestGatewayControl' -count=1
 go test -run '^TestMemory' -count=1
+go test -run '^TestPerformance' -count=1
 go test -run 'TestLargeContext|TestDecodedRequestBody|TestReadModelRequestBody' -count=1
 go test -run 'TestUpstreamTLSHandshake|TestAggregate.*(Failure|Settlement|Rejection|MissingFinish)|TestMessages.*(MissingUsage|UnknownFailures)|TestChatMultiChoice' -count=1
 go test -run 'TestOfficial|TestRequestProfile|TestHarnessProtocol' -count=1
@@ -37,6 +38,7 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 内存准入测试使用合成 Go / cgroup 信号与临时 v1/v2 层级文件，覆盖水位恢复、排队复核、
 在途字节预算、未知长度与压缩输入、热加载、并发释放及三协议拒绝前零上游调用/零记账。
 大上下文的解码差分、缓冲交接和性能基准见[性能回归说明](../docs/performance.md)。
+分阶段指标的固定窗口、请求内累计与失败口径见[请求性能说明](../docs/request-performance.md)。
 异常结算回归覆盖三协议的读取失败、缺少结束原因与坏 JSON，区分已知费用、零费用和未知费用；
 本地 TLS 黑洞测试验证握手独立超时，多候选流测试覆盖乱序、缺失、重复与快路径回退。
 出站兼容测试覆盖三协议 × 流式/聚合、gzip、显式参数保留、热加载及请求身份。

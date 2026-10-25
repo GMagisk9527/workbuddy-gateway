@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 type fastPathModeT int32
@@ -729,7 +728,7 @@ func stripDataPrefixBytes(s []byte) []byte {
 // observeFirstTokenFlag 在快路径下记录首 token 时间，语义与 observeFirstToken 一致。
 func observeFirstTokenFlag(reader any) {
 	if t, ok := reader.(*ttftReader); ok {
-		t.once.Do(func() { t.d = time.Since(t.start) })
+		t.observeFirstToken()
 	}
 }
 

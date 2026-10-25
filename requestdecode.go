@@ -71,7 +71,9 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		readStarted := performanceStarted(r)
 		raw, err := io.ReadAll(io.LimitReader(r.Body, requestCompressedLimit+1))
+		recordPerformance(r, phaseRead, readStarted, err != nil || len(raw) > requestCompressedLimit)
 		if err != nil {
 			if writeRequestMemoryError(w, r, err) {
 				return
@@ -85,6 +87,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 		}
 		start := time.Now()
 		decoded, err := decodeCompressedBodyWithMemory(encoding, raw, memoryLeaseFor(r))
+		recordPerformance(r, phaseDecompress, start, err != nil)
 		if err != nil {
 			if writeRequestMemoryError(w, r, err) {
 				return
