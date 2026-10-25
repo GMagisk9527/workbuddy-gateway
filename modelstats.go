@@ -222,6 +222,7 @@ type ttftReader struct {
 	complete    bool
 	performance *requestPerformance
 	output      *outputLease
+	firstToken  *firstTokenBudget
 }
 
 func newTTFTReader(r io.Reader, start time.Time) *ttftReader {
@@ -232,16 +233,27 @@ func newRequestTTFTReader(req *http.Request, r io.Reader, start time.Time) *ttft
 	t := newTTFTReader(r, start)
 	t.performance = performanceFor(req)
 	t.output = outputFor(req)
+	t.firstToken = firstTokenFor(req)
 	return t
 }
 
 func (t *ttftReader) Read(p []byte) (int, error) {
+	if err := t.firstToken.err(); err != nil {
+		return 0, err
+	}
 	// Raw bytes are not tokens; only measure the read operation here.
 	if t.performance == nil {
-		return t.r.Read(p)
+		n, err := t.r.Read(p)
+		if waitErr := t.firstToken.err(); waitErr != nil {
+			err = waitErr
+		}
+		return n, err
 	}
 	started := time.Now()
 	n, err := t.r.Read(p)
+	if waitErr := t.firstToken.err(); waitErr != nil {
+		err = waitErr
+	}
 	t.performance.observe(phaseUpstreamRead, time.Since(started), err != nil && err != io.EOF)
 	return n, err
 }
@@ -291,7 +303,13 @@ func observeFirstToken(reader io.Reader, chunk map[string]any) {
 }
 
 func (t *ttftReader) observeFirstToken() {
-	t.once.Do(func() { t.d = time.Since(t.start); t.performance.observe(phaseFirstToken, t.d, false) })
+	t.once.Do(func() {
+		if t.firstToken.finish() != nil {
+			return
+		}
+		t.d = time.Since(t.start)
+		t.performance.observe(phaseFirstToken, t.d, false)
+	})
 }
 
 func completeTokenStream(reader io.Reader, complete bool) {

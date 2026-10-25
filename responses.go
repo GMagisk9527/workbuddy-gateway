@@ -646,6 +646,9 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	if err != nil {
 		_ = resp.Body.Close()
 		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
+		if writeFirstTokenTimeout(w, r, err) {
+			return
+		}
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}
@@ -1294,6 +1297,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 			break
 		}
 	}
+	session.heartbeat.Stop()
 	if sseWriteErr != nil || guard.err() != nil {
 		// 客户端已断开：关闭响应体会取消上游请求，停止继续消耗额度。
 		_ = resp.Body.Close()
@@ -1360,6 +1364,9 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", upstreamIdleTimeout)
+		}
+		if errors.Is(scanErr, errFirstTokenTimeout) {
+			reason, code = errFirstTokenTimeout.Error(), "upstream_first_token_timeout"
 		}
 		failed := buildResponsesEnvelopeForRequest(r, respID, modelName, created)
 		failed["status"] = "failed"

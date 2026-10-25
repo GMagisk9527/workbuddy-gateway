@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,13 +18,16 @@ import (
 // net/http 不保证 ResponseWriter 并发安全，心跳 goroutine 与主流读取
 // 必须共用同一把锁。
 type streamWriteGuard struct {
-	mu       sync.Mutex
-	w        http.ResponseWriter
-	flusher  http.Flusher
-	dataSeen bool
-	writeErr error
-	body     io.Closer
-	cancel   context.CancelFunc
+	mu                sync.Mutex
+	w                 http.ResponseWriter
+	flusher           http.Flusher
+	dataSeen          bool
+	lastWrite         time.Time
+	heartbeatInterval time.Duration
+	heartbeatStopped  bool
+	writeErr          error
+	body              io.Closer
+	cancel            context.CancelFunc
 }
 
 func (g *streamWriteGuard) setBody(body io.Closer) {
@@ -40,7 +44,7 @@ func (g *streamWriteGuard) setBody(body io.Closer) {
 // behind the same lock so a replay never races with the heartbeat goroutine.
 func (g *streamWriteGuard) write(frame []byte, data, heartbeat bool) error {
 	g.mu.Lock()
-	if g.writeErr != nil || (heartbeat && g.dataSeen) {
+	if g.writeErr != nil || (heartbeat && (g.heartbeatStopped || !g.lastWrite.IsZero() && time.Since(g.lastWrite) < g.heartbeatInterval)) {
 		err := g.writeErr
 		g.mu.Unlock()
 		return err
@@ -61,6 +65,7 @@ func (g *streamWriteGuard) write(frame []byte, data, heartbeat bool) error {
 		g.writeErr, closeBody = err, g.body
 	} else {
 		g.dataSeen = g.dataSeen || data
+		g.lastWrite = time.Now()
 	}
 	g.mu.Unlock()
 	if err != nil && g.cancel != nil {
@@ -89,7 +94,22 @@ func (g *streamWriteGuard) writeHeartbeat() error {
 	return g.write([]byte(": keepalive\n\n"), false, true)
 }
 
-// markEffectiveData 标记已收到有效上游数据，心跳随即停止。
+func (g *streamWriteGuard) stopHeartbeats() {
+	g.mu.Lock()
+	g.heartbeatStopped = true
+	g.mu.Unlock()
+}
+
+func (g *streamWriteGuard) nextHeartbeatDelay(now time.Time) (time.Duration, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.heartbeatStopped || g.writeErr != nil {
+		return 0, false
+	}
+	return max(g.heartbeatInterval-now.Sub(g.lastWrite), time.Nanosecond), true
+}
+
+// markEffectiveData 标记已收到有效上游数据，供安全重放判断使用。
 // Responses 会在读取上游前先写 response.created，这类协议事件不算有效数据。
 func (g *streamWriteGuard) markEffectiveData() {
 	g.mu.Lock()
@@ -123,30 +143,42 @@ func (g *streamWriteGuard) hasData() bool {
 }
 
 type streamHeartbeat struct {
-	stop chan struct{}
-	done chan struct{}
-	once sync.Once
+	guard *streamWriteGuard
+	stop  chan struct{}
+	done  chan struct{}
+	once  sync.Once
 }
 
-// startStreamHeartbeat 在首个有效 data 前周期性下发 SSE 注释；Stop 会等待
+// startStreamHeartbeat 在整个流的静默期下发 SSE 注释；Stop 会等待
 // goroutine 退出，避免 handler 返回后仍写 ResponseWriter。
 func startStreamHeartbeat(g *streamWriteGuard, interval time.Duration) *streamHeartbeat {
 	if interval <= 0 {
 		return nil
 	}
-	h := &streamHeartbeat{stop: make(chan struct{}), done: make(chan struct{})}
+	g.mu.Lock()
+	g.heartbeatInterval = interval
+	if g.lastWrite.IsZero() {
+		g.lastWrite = time.Now()
+	}
+	g.mu.Unlock()
+	h := &streamHeartbeat{guard: g, stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(h.done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 		for {
 			select {
 			case <-h.stop:
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				if g.writeHeartbeat() != nil {
 					return
 				}
+				delay, active := g.nextHeartbeatDelay(time.Now())
+				if !active {
+					return
+				}
+				timer.Reset(delay)
 			}
 		}
 	}()
@@ -157,7 +189,7 @@ func (h *streamHeartbeat) Stop() {
 	if h == nil {
 		return
 	}
-	h.once.Do(func() { close(h.stop) })
+	h.once.Do(func() { h.guard.stopHeartbeats(); close(h.stop) })
 	<-h.done
 }
 
@@ -177,8 +209,10 @@ func firstByteReplayPath(path string) bool {
 // 位置是否停在完整行边界：半行已经被读取器缓存，替换上游后继续读取会把
 // 旧半行和新数据拼成一行，因此不重放。
 type firstByteDataDetector struct {
-	state   uint8
-	matched uint8
+	state      uint8
+	matched    uint8
+	bomMatched uint8
+	prefixDone bool
 }
 
 const (
@@ -190,20 +224,33 @@ const (
 
 func (d *firstByteDataDetector) reset() {
 	d.state, d.matched = firstByteLineStart, 0
+	d.bomMatched, d.prefixDone = 0, false
 }
 
 func (d *firstByteDataDetector) feed(p []byte) bool {
 	const dataField = "data:"
 	for _, c := range p {
+		if !d.prefixDone {
+			bom := []byte{0xef, 0xbb, 0xbf}
+			if c == bom[d.bomMatched] {
+				d.bomMatched++
+				if d.bomMatched == 3 {
+					d.prefixDone = true
+				}
+				continue
+			}
+			d.prefixDone = true
+			if d.bomMatched != 0 {
+				return true
+			} // malformed prefix cannot be replayed safely
+		}
 		switch d.state {
 		case firstByteLineStart:
 			switch c {
 			case ' ', '\t':
 				// Handlers trim leading whitespace before recognizing fields and
 				// legacy bare JSON, so the detector must do the same.
-			case '\r':
-				// tolerate CR in CRLF
-			case '\n':
+			case '\n', '\r':
 				d.state = firstByteLineStart
 			case ':':
 				d.state = firstByteSkipLine
@@ -223,22 +270,22 @@ func (d *firstByteDataDetector) feed(p []byte) bool {
 				}
 				continue
 			}
-			if c == '\n' {
+			if c == '\n' || c == '\r' {
 				d.state, d.matched = firstByteLineStart, 0
 			} else {
 				d.state = firstByteSkipLine
 			}
 		case firstByteDataPayload:
 			switch c {
-			case ' ', '\t', '\r':
+			case ' ', '\t':
 				// Optional space after "data:".
-			case '\n':
+			case '\n', '\r':
 				d.state, d.matched = firstByteLineStart, 0
 			default:
 				return true
 			}
 		case firstByteSkipLine:
-			if c == '\n' {
+			if c == '\n' || c == '\r' {
 				d.state, d.matched = firstByteLineStart, 0
 			}
 		}
@@ -298,7 +345,7 @@ func (b *firstByteReplayBody) Read(p []byte) (int, error) {
 		if !b.delivered && b.detector.feed(p[:n]) {
 			b.delivered = true
 		}
-		b.atLineBoundary = p[n-1] == '\n'
+		b.atLineBoundary = p[n-1] == '\n' || p[n-1] == '\r'
 		b.mu.Unlock()
 		// io.Reader may legally return data and an error together. If the
 		// bytes are only comments/empty data and end at a line boundary, the
@@ -384,7 +431,7 @@ func (b *firstByteReplayBody) tryReplay(readErr error) (bool, error) {
 		return false, readErr
 	}
 	old := b.reader
-	b.reader = resp.Body
+	b.reader = &replayBOMBody{body: resp.Body, reader: bufio.NewReader(resp.Body)}
 	b.detector.reset()
 	b.atLineBoundary = true
 	b.inflightCancel = nil
@@ -402,6 +449,26 @@ func (b *firstByteReplayBody) tryReplay(readErr error) (bool, error) {
 		debugTraceID(b.r), b.reqID, b.model)
 	return true, nil
 }
+
+// A replay is a new upstream byte stream. Ignore its optional BOM even when
+// an earlier attempt left comment/metadata lines in the shared SSE scanner.
+type replayBOMBody struct {
+	body    io.ReadCloser
+	reader  *bufio.Reader
+	checked bool
+}
+
+func (b *replayBOMBody) Read(p []byte) (int, error) {
+	if !b.checked {
+		prefix, _ := b.reader.Peek(3)
+		if bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+			_, _ = b.reader.Discard(3)
+		}
+		b.checked = true
+	}
+	return b.reader.Read(p)
+}
+func (b *replayBOMBody) Close() error { return b.body.Close() }
 
 // finishReplay 结束一次在途重放：清空取消入口、释放 context 并结束 WaitGroup。
 // 调用前必须已关闭或安装新响应体。
@@ -484,6 +551,13 @@ func replayUpstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, mo
 	if ok {
 		return resp, acc, prof, true
 	}
+	// The downstream is already SSE/200, but an unsent/rejected replay must
+	// settle with its actual failure status rather than become another unknown.
+	failureStatus := captured.status
+	if failureStatus < 400 {
+		failureStatus = http.StatusBadGateway
+	}
+	statsFinishAttempt(r, failureStatus)
 	payload := bytes.TrimSpace(captured.body.Bytes())
 	if len(payload) == 0 || !json.Valid(payload) {
 		status := captured.status
@@ -499,6 +573,7 @@ func replayUpstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, mo
 			},
 		})
 	}
+	guard.stopHeartbeats()
 	guard.writeData(string(payload))
 	log.Printf("[异常] traceId=%s requestId=%d 发生阶段=首字节前重放 模型=%s 结果=重放未取得可用上游响应 业务影响=已通过SSE错误事件通知客户端，不伪造[DONE]",
 		debugTraceID(r), reqID, modelName)

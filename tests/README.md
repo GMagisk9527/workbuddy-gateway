@@ -54,6 +54,10 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 取消退避、并发文件轮转和配置最后有效值。运行方式及口径见
 [资源预算说明](../docs/resource-budgets.md)。
 
+`first_token_timeout_test.go`、`sse_liveness_test.go`、`sse_framing_http_test.go` 覆盖
+静默保活、首增量期限、重放取消与结算、SSE 事件分帧和网络分段模糊测试；
+语义及兼容边界见 [SSE 稳定性说明](../docs/sse-liveness.md)。
+
 ## 网页
 
 ```bash

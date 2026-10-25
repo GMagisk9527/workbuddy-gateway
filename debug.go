@@ -92,10 +92,12 @@ type runtimeFileConfig struct {
 		HeaderTimeoutSeconds int `json:"headerTimeoutSeconds"`
 		// IdleTimeoutSeconds：流式响应体的空闲读超时（持续有数据则不超时）。
 		IdleTimeoutSeconds int `json:"idleTimeoutSeconds"`
+		// FirstTokenTimeoutSeconds: 成功响应头到首个有效增量；省略300秒，0关闭。
+		FirstTokenTimeoutSeconds *int `json:"firstTokenTimeoutSeconds"`
 		// TransientRetries：请求体发送阶段遇到瞬时网络错误的额外重试次数。
 		// 用指针区分「未配置」（用默认值）与「显式设为 0」（禁用重试）。
 		TransientRetries *int `json:"transientRetries"`
-		// StreamKeepaliveSeconds：等待上游首字节期间的 SSE 注释间隔；<=0 或省略用默认值。
+		// StreamKeepaliveSeconds：流式下游静默期间的 SSE 注释间隔；<=0 或省略用默认值。
 		StreamKeepaliveSeconds int `json:"streamKeepaliveSeconds"`
 		// EnableFirstByteRetry：是否允许首字节前对瞬时网络中断安全重放一次。
 		// 指针区分「未配置」（默认开启）与显式 false（关闭）。

@@ -1474,7 +1474,7 @@ func TestAggregateCompletionToolCalls(t *testing.T) {
 		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]}}]}`,
 		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 		`data: [DONE]`,
-	}, "\n")
+	}, "\n\n") + "\n\n"
 
 	out, err := aggregateCompletion(strings.NewReader(sse), "hy3-preview")
 	if err != nil {

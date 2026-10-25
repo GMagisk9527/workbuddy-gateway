@@ -62,6 +62,7 @@
     "requestProfile": "official",
     "headerTimeoutSeconds": 300,
     "idleTimeoutSeconds": 120,
+    "firstTokenTimeoutSeconds": 300,
     "transientRetries": 2,
     "streamKeepaliveSeconds": 15,
     "enableFirstByteRetry": true

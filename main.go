@@ -76,7 +76,7 @@ const (
 	// upstreamRetryBackoff 是两次重试之间的等待，给上游边缘节点留出恢复时间。
 	upstreamRetryBackoffDefault = 300 * time.Millisecond
 
-	// streamKeepaliveDefault 是等待上游首个有效数据期间向下游发送 SSE 注释的间隔。
+	// streamKeepaliveDefault 是整条流的下游静默期补发 SSE 注释的间隔。
 	// 腾讯边缘节点对「响应头已发出但长时间无首个字节」的连接较敏感，默认 15s。
 	streamKeepaliveDefault = 15 * time.Second
 	// enableFirstByteRetryDefault 允许在客户端尚未收到任何有效数据时安全重放一次。
@@ -3720,6 +3720,9 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 			var retries *requestRetryScope
 			r, retries = withRetryScope(r)
 			defer retries.close()
+			var firstToken *firstTokenBudget
+			r, firstToken = withFirstTokenBudget(r)
+			defer firstToken.close()
 		}
 		r = r.WithContext(context.WithValue(r.Context(), statsRequestContextKey{}, &statsAttempt{}))
 		// 鉴权层通过这个持有者回填身份，外层结算才能读到（否则成功请求不入账）。
@@ -3736,7 +3739,7 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 				// Account for an aborted handler without intercepting its panic or
 				// changing settlement/response behavior.
 				performance.endPrepare(true)
-				performance.finish(phaseMetrics, http.StatusInternalServerError, r.Context().Err() != nil, time.Now())
+				performance.finish(phaseMetrics, http.StatusInternalServerError, r.Context().Err() != nil && !errors.Is(context.Cause(r.Context()), errFirstTokenTimeout), time.Now())
 			}
 		}()
 		log.Printf("[请求到达] traceId=%s 方法=%s 路径=%s 来源=%s 说明=请求已进入网关", traceID, r.Method, r.URL.Path, r.RemoteAddr)
@@ -3746,7 +3749,7 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 		}
 		performance.endPrepare(aw.status >= 400)
 		statsFinishAttempt(r, aw.status)
-		performance.finish(phaseMetrics, aw.status, r.Context().Err() != nil, time.Now())
+		performance.finish(phaseMetrics, aw.status, r.Context().Err() != nil && !errors.Is(context.Cause(r.Context()), errFirstTokenTimeout), time.Now())
 		performanceFinished = true
 		if performance != nil && debugLoggingEnabled() {
 			debugEvent(r, "debug", "request_performance", performance.debugFields())
@@ -4135,6 +4138,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		}
 
 		acc.lock.RUnlock()
+		firstTokenFor(r).arm()
 		debugEvent(r, "info", "upstream_response_received", map[string]any{
 			"upstream_host": prof.chatURL(),
 			"status_code":   resp.StatusCode,
@@ -4503,6 +4507,7 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			if canReplayStream(scanErr, guard.hasData(), replays < replayBudget, r.Context().Err() != nil) {
 				return true
 			}
+			session.heartbeat.Stop()
 			choicesComplete := choiceProgress.complete()
 			streamComplete = scanErr == nil && choicesComplete
 			completeTokenStream(body, streamComplete)
@@ -4515,7 +4520,13 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 					"error":      safeDebugError(scanErr),
 				})
 				reason := "上游流式响应中断，本次回复不完整"
+				if errors.Is(scanErr, errFirstTokenTimeout) {
+					reason = errFirstTokenTimeout.Error()
+				}
 				code := "stream_interrupted"
+				if errors.Is(scanErr, errFirstTokenTimeout) {
+					code = "upstream_first_token_timeout"
+				}
 				if streamRejection != nil {
 					reason, code = streamRejection.clientMessage(), streamRejection.info.Code
 				}
@@ -4581,7 +4592,16 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 		// Finish the real attempt before upstreamChat selects and replaces it.
 		// No usage means unknown credit, never a fabricated zero-cost request.
 		statsFinishAttempt(r, http.StatusOK)
-		if guard.err() != nil || r.Context().Err() != nil {
+		if guard.err() != nil {
+			return
+		}
+		if err := firstTokenFor(r).err(); err != nil {
+			session.heartbeat.Stop()
+			payload, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "upstream_first_token_timeout", "type": "upstream_stream_interrupted", "message": err.Error()}})
+			_ = guard.writeData(string(payload))
+			return
+		}
+		if r.Context().Err() != nil {
 			return
 		}
 		replays++
@@ -4609,6 +4629,9 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	if err != nil {
 		_ = resp.Body.Close()
 		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
+		if writeFirstTokenTimeout(w, r, err) {
+			return
+		}
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
 		}

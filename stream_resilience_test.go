@@ -102,7 +102,7 @@ func waitForTestCondition(t *testing.T, timeout time.Duration, condition func() 
 	t.Fatal("condition not reached before timeout")
 }
 
-func TestStreamHeartbeatWritesCommentBeforeDataAndStops(t *testing.T) {
+func TestStreamHeartbeatWritesCommentAndStops(t *testing.T) {
 	writer := newLockedResponseWriter()
 	guard := &streamWriteGuard{w: writer, flusher: writer}
 	heartbeat := startStreamHeartbeat(guard, 5*time.Millisecond)
@@ -110,10 +110,11 @@ func TestStreamHeartbeatWritesCommentBeforeDataAndStops(t *testing.T) {
 		return strings.Contains(writer.String(), ": keepalive")
 	})
 	guard.writeData(`{"choices":[]}`)
+	heartbeat.Stop()
 	count := strings.Count(writer.String(), ": keepalive")
 	time.Sleep(20 * time.Millisecond)
 	if got := strings.Count(writer.String(), ": keepalive"); got != count {
-		t.Fatalf("heartbeat continued after data: before=%d after=%d", count, got)
+		t.Fatalf("heartbeat continued after Stop: before=%d after=%d", count, got)
 	}
 	heartbeat.Stop()
 	if !strings.Contains(writer.String(), "data: {\"choices\":[]}") {
