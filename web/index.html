@@ -100,6 +100,21 @@
           <tbody><tr><td colspan="11" class="empty">等待统计</td></tr></tbody>
         </table></div>
       </div>
+      <details class="card">
+        <summary class="card-title">链路分阶段性能 <span class="hint">点击展开</span></summary>
+        <p class="hint">最近 5 个自然分钟内结束的请求，含当前分钟。当前进程重启后重新累计，不受上方历史筛选影响。</p>
+        <div class="stats-controls">
+          <label>协议<select id="performanceProtocol"><option value="all">全部协议</option><option value="messages">Messages</option><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
+          <button id="performanceRefresh" type="button">读取链路性能</button>
+        </div>
+        <p id="performanceInfo" class="hint" role="status" aria-live="polite">点击读取当前性能指标。</p>
+        <div id="performanceSummary" class="hint"></div>
+        <p class="hint">P95/P99 为固定桶上界估计。阶段可能重叠；多次上游尝试的耗时在请求内累计，不能将各阶段直接相加。未经过的阶段显示“—”。</p>
+        <div class="table-wrap"><table id="performanceTable">
+          <thead><tr><th>阶段</th><th>样本请求</th><th>异常样本</th><th>平均</th><th>P95</th><th>P99</th></tr></thead>
+          <tbody><tr><td colspan="6" class="empty">等待指标</td></tr></tbody>
+        </table></div>
+      </details>
     </section>
     <div class="card">
       <div class="card-title">运行信息</div>

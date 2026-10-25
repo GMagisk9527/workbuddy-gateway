@@ -20,7 +20,9 @@ func newDecodedRequestBody(data []byte) *decodedRequestBody {
 func (b *decodedRequestBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
 func (*decodedRequestBody) Close() error                 { return nil }
 
-func readModelRequestBody(r *http.Request) ([]byte, error) {
+func readModelRequestBody(r *http.Request) (data []byte, readErr error) {
+	started := performanceStarted(r)
+	defer func() { recordPerformance(r, phaseRead, started, readErr != nil) }()
 	if body, ok := r.Body.(*decodedRequestBody); ok {
 		remaining := body.data[len(body.data)-body.reader.Len():]
 		_, err := body.reader.Seek(0, io.SeekEnd)

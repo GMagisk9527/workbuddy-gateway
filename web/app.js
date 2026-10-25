@@ -44,6 +44,9 @@
     statsVersion: 0,
     statsLastPoll: 0,
     lastStats: null,
+    performanceVersion: 0,
+    performancePending: false,
+    lastPerformance: null,
     accountAlertsPending: false,
     accountAlertsLastPoll: 0,
     accountAlertsGeneration: 0,
@@ -138,6 +141,12 @@
     state.statsVersion++;
     state.statsLastPoll = 0;
     state.lastStats = null;
+    state.performanceVersion++;
+    state.performancePending = false;
+    state.lastPerformance = null;
+    $("performanceInfo").textContent = "登录后读取链路性能。";
+    $("performanceSummary").textContent = "";
+    $("performanceTable").querySelector("tbody").innerHTML = "";
     hideAllStatsChartHover();
     statsChartControllers = [];
     ["usageSummary", "usageChart", "latencyChart", "statsInfo", "statsRange"].forEach(function (id) {
@@ -838,6 +847,51 @@
         esc(statsDuration(tokenTime(m))) + "</td><td class='hint'>" + esc("Token " + m.tokenSamples + "/" + m.requests +
           " · 积分 " + m.creditSamples + "/" + m.requests + " · TTFT " + (currentTTFT ? m.ttftSamples : 0) + "/" + m.requests) + "</td></tr>";
     }).join("") : '<tr><td colspan="11" class="empty">所选范围没有模型调用记录</td></tr>';
+  }
+
+  function performanceTime(value) {
+    return typeof value === "number" && isFinite(value) ? value.toFixed(3) + " ms" : "—";
+  }
+
+  function renderPerformance(data) {
+    var protocol = $("performanceProtocol").value || "all";
+    var rows = data && Array.isArray(data.protocols) ? data.protocols : [];
+    var selected = rows.filter(function (row) { return row.protocol === protocol; })[0];
+    if (!selected) {
+      $("performanceTable").querySelector("tbody").innerHTML = '<tr><td colspan="6" class="empty">暂无该协议指标</td></tr>';
+      $("performanceSummary").textContent = "";
+      return;
+    }
+    $("performanceSummary").textContent = "已结束请求 " + count(selected.requests) + " · 失败 " + count(selected.failed) +
+      " · 取消 " + count(selected.canceled) + " · 流不完整 " + count(selected.incompleteStreams) +
+      " · 下游写入错误 " + count(selected.downstreamErrors) + " · 上游尝试 " + count(selected.upstreamAttempts) +
+      " · 安全网络重试 " + count(selected.transportRetries) + " · 连接复用率 " +
+      (typeof selected.connectionReuseRate === "number" ? (selected.connectionReuseRate * 100).toFixed(1) + "%" : "—") +
+      " · 未完整观测回调 " + count(selected.droppedTraceEvents);
+    var html = (selected.phases || []).map(function (phase) {
+      return "<tr><td>" + esc(phase.label || phase.name) + "</td><td>" + esc(count(phase.samples)) +
+        "</td><td>" + esc(count(phase.failed)) + "</td><td>" + esc(performanceTime(phase.averageMs)) +
+        "</td><td>" + esc(performanceTime(phase.p95Ms)) + "</td><td>" + esc(performanceTime(phase.p99Ms)) + "</td></tr>";
+    }).join("");
+    $("performanceTable").querySelector("tbody").innerHTML = html || '<tr><td colspan="6" class="empty">暂无阶段样本</td></tr>';
+  }
+
+  function loadPerformance() {
+    if (!state.apiKey || state.performancePending) return Promise.resolve();
+    var version = ++state.performanceVersion, key = state.apiKey;
+    state.performancePending = true;
+    $("performanceInfo").textContent = "正在读取链路性能…";
+    return api("/admin/api/performance").then(function (data) {
+      if (version !== state.performanceVersion || key !== state.apiKey) return;
+      state.lastPerformance = data;
+      renderPerformance(data);
+      var asOf = typeof data.asOf === "number" ? "（截至 " + new Date(data.asOf).toLocaleTimeString("zh-CN", {hour12: false}) + "）" : "";
+      $("performanceInfo").textContent = "已更新" + asOf + "；统计窗口含当前分钟，进程重启后重新累计。";
+    }).catch(function () {
+      if (version === state.performanceVersion && key === state.apiKey) $("performanceInfo").textContent = "性能指标读取失败，保留上次结果。";
+    }).finally(function () {
+      if (version === state.performanceVersion) state.performancePending = false;
+    });
   }
 
   function loadStats(force) {
@@ -2369,6 +2423,8 @@
     initTheme();
     $("saveKey").addEventListener("click", saveKey);
     $("statsApply").addEventListener("click", function () { changeStatsFilter(false); });
+    $("performanceRefresh").addEventListener("click", loadPerformance);
+    $("performanceProtocol").addEventListener("change", function () { if (state.lastPerformance) renderPerformance(state.lastPerformance); });
     $("statsPeriod").addEventListener("change", function () { changeStatsFilter(true); });
     $("statsAccount").addEventListener("change", function () { changeStatsFilter(false); });
     // 图表 viewBox 跟随容器宽度，窗口尺寸变化后重绘一次（用 rAF 合并连续事件）。

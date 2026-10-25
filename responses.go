@@ -53,6 +53,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	decodeStarted := time.Now()
 	decodeErr := decodeModelRequestBody(bodyBytes, &respReq)
 	decodeDuration := time.Since(decodeStarted)
+	performanceFor(r).observe(phaseDecode, decodeDuration, decodeErr != nil)
+	if decodeErr == nil {
+		performanceFor(r).beginPrepare()
+	}
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_json", "无效的 JSON 请求体")
@@ -636,7 +640,7 @@ func convertResponsesToolChoiceWithMap(tc any, tools map[string]responsesToolMet
 // writeResponsesAggregate 聚合上游 SSE 后转换为 Responses 非流式响应。
 func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time) {
 	defer resp.Body.Close()
-	body := newTTFTReader(resp.Body, startTime)
+	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
@@ -1056,7 +1060,7 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	sawDone := false
 	streamComplete := false
 
-	body := newTTFTReader(resp.Body, startTime)
+	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	sse := newUpstreamSSEReader(body)
 	mode := fastPathMode.Load()

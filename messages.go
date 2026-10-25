@@ -112,6 +112,10 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	decodeStarted := time.Now()
 	decodeErr := decodeAnthropicMessageBody(bodyBytes, &msgReq)
 	decodeDuration := time.Since(decodeStarted)
+	performanceFor(r).observe(phaseDecode, decodeDuration, decodeErr != nil)
+	if decodeErr == nil {
+		performanceFor(r).beginPrepare()
+	}
 	if decodeErr != nil {
 		debugBodyReadCompleted(r, bodyBytes, readDuration, decodeDuration, false, decodeErr)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "无效的 JSON 请求体")
@@ -1152,7 +1156,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 
 	state := newAnthropicStreamState(modelName, wantThinking)
 	applyAnthropicThinkingPolicy(state, r)
-	body := newTTFTReader(resp.Body, startTime)
+	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	streamComplete := false
 	defer func() {
@@ -1216,7 +1220,7 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	state := newAnthropicStreamState(modelName, wantThinking)
 	state.aggregateOnly = true
 	applyAnthropicThinkingPolicy(state, r)
-	body := newTTFTReader(resp.Body, startTime)
+	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
 	streamComplete := false
 	businessRejection := false

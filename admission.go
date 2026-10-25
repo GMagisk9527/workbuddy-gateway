@@ -157,6 +157,7 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 		started := time.Now()
 		gate := ingressAdmission
 		release, err := gate.acquire(r.Context())
+		recordPerformance(r, phaseAdmission, started, err != nil)
 		if err != nil {
 			if writeRequestMemoryError(w, r, err) {
 				return
