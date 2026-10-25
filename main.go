@@ -4033,12 +4033,26 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				defer acc.lock.RUnlock()
 				statsFinishAttempt(r, resp.StatusCode)
 				performanceFor(r).setLivePhase(liveResponding)
-				// 错误体只用于分类和提示；限制上限，避免异常上游把整段大响应读进内存。
+				// 错误体同时限制字节数与总读取时间，避免卡住或滴流持有账号名额。
 				readStarted := performanceStarted(r)
-				errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+				errBody, readErr := readUpstreamErrorBody(resp.Body, upstreamCancel, 1<<20)
 				recordPerformance(r, phaseUpstreamRead, readStarted, readErr != nil)
-				resp.Body.Close()
-				upstreamCancel()
+				if readErr != nil {
+					status, code, message := http.StatusBadGateway, "upstream_error_body_read_failed", "上游错误响应读取失败，请稍后重试"
+					if errors.Is(readErr, errUpstreamErrorBodyTimeout) {
+						status, code, message = http.StatusGatewayTimeout, "upstream_error_body_timeout", errUpstreamErrorBodyTimeout.Error()
+					}
+					if r.Context().Err() != nil {
+						status, code, message = http.StatusRequestTimeout, "request_canceled", "请求已取消，上游错误响应未读取完整"
+					}
+					debugEvent(r, "error", "upstream_error_body_read_failed", map[string]any{
+						"status_code": resp.StatusCode, "error_type": debugErrorType(readErr), "body_bytes": len(errBody),
+					})
+					log.Printf("[上游错误响应] traceId=%s requestId=%d HTTP=%d 结果=%s 已读字节=%d 说明=已关闭上游，不按残缺正文变更账号状态或换号", traceID, reqID, resp.StatusCode, code, len(errBody))
+					recordModelFailure(modelName, code)
+					writeUpstreamError(w, r, status, code, message)
+					return false
+				}
 				errStr := string(errBody)
 				// Raw upstream error bodies can contain account identifiers or
 				// token fragments. Keep them for classification, but never put

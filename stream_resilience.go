@@ -364,9 +364,11 @@ func (b *firstByteReplayBody) tryReplay(readErr error) (bool, error) {
 			b.finishReplay(cancelReplay)
 			return false, readErr
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
+		body, bodyErr := readUpstreamErrorBody(resp.Body, cancelReplay, 64<<10)
 		b.finishReplay(cancelReplay)
+		if bodyErr != nil {
+			return false, fmt.Errorf("首字节前重放失败：上游错误响应未读取完整: %w", bodyErr)
+		}
 		if rejection := detectUpstreamStreamRejection(body); rejection != nil {
 			return false, rejection
 		}
