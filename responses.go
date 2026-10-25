@@ -644,6 +644,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		_ = resp.Body.Close()
 		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
@@ -663,6 +664,8 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	recordModelLatency(modelName, time.Since(startTime))
 	out, err := chatCompletionToResponsesForRequest(r, completionJSON, modelName, responsesToolMapFor(r))
 	if err != nil {
+		completeTokenStream(body, false)
+		statsObserveUsage(r, usage, false)
 		debugEvent(r, "error", "response_translation_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),
@@ -692,6 +695,9 @@ func chatCompletionToResponsesWithTools(chatJSON []byte, modelName string, toolM
 }
 
 func chatCompletionToResponsesForRequest(r *http.Request, chatJSON []byte, modelName string, toolMap map[string]responsesToolMeta) ([]byte, error) {
+	if err := outputFor(r).temp(int64(len(chatJSON))); err != nil {
+		return nil, err
+	}
 	var chat map[string]any
 	if err := json.Unmarshal(chatJSON, &chat); err != nil {
 		return nil, err
@@ -779,7 +785,7 @@ func chatCompletionToResponsesForRequest(r *http.Request, chatJSON []byte, model
 	if usage, ok := chat["usage"].(map[string]any); ok {
 		result["usage"] = toResponsesUsage(usage)
 	}
-	return json.Marshal(result)
+	return marshalBudgetedOutput(outputFor(r), result)
 }
 
 // A clean upstream EOF can still carry truncated output. Keep that distinction
@@ -912,6 +918,8 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	seq := 0
 	var eventBuf []byte
 	var sseWriteErr error
+	var pendingIdentityErr error
+	outputBudget := outputFor(r)
 	writeFailed := func(err error) {
 		sseWriteErr = err
 		_ = resp.Body.Close()
@@ -920,11 +928,15 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		if sseWriteErr != nil {
 			return
 		}
+		if errors.Is(pendingIdentityErr, errOutputBudget) {
+			return
+		}
 		data["type"] = eventType
 		data["sequence_number"] = seq
 		seq++
-		b, err := json.Marshal(data)
+		b, err := marshalBudgetedOutput(outputBudget, data)
 		if err != nil {
+			pendingIdentityErr = err
 			return
 		}
 		eventBuf = append(eventBuf[:0], "event: "...)
@@ -965,7 +977,6 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	tcIndex := map[int]int{}
 	tcMeta := map[int]responsesToolMeta{}
 	var pendingToolArgs pendingToolArgumentBudget
-	var pendingIdentityErr error
 	reserveToolArgs := func(index int, id, name string, argumentBytes int) bool {
 		if call := toolCalls[index]; call != nil {
 			if id == "" {
@@ -1111,6 +1122,18 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				finishReason = view.finish
 			}
 			for c := 0; c < view.nChoices && pendingIdentityErr == nil; c++ {
+				retained := len(view.reasoning[c]) + len(view.content[c]) + len(view.refusal[c])
+				for j := 0; j < view.toolCnt[c]; j++ {
+					tv := &view.tools[view.toolOff[c]+j]
+					retained += len(tv.args) + len(tv.id) + len(tv.name)
+					if toolCalls[tv.index] == nil {
+						retained += 512
+					}
+				}
+				if err := outputBudget.add(retained); err != nil {
+					pendingIdentityErr = err
+					break
+				}
 				if sseWriteErr != nil {
 					break
 				}
@@ -1208,6 +1231,10 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 				continue
 			}
 			delta, _ := choice["delta"].(map[string]any)
+			if err := reserveOutputDelta(outputBudget, delta, true, true, true, toolCalls); err != nil {
+				pendingIdentityErr = err
+				break
+			}
 			if delta == nil {
 				continue
 			}
@@ -1301,11 +1328,25 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 		usageRaw = nil
 	}
-	messageText := decodeJSONBody(msgRaw)
-	refusalText := decodeJSONBody(refusalRaw)
-	reasoningText := decodeJSONBody(reasoningRaw)
+	var messageText, refusalText, reasoningText string
+	if scanErr == nil {
+		if err := outputBudget.temp(int64(len(msgRaw)) + int64(len(refusalRaw)) + int64(len(reasoningRaw))); err != nil {
+			scanErr = err
+			streamComplete = false
+			completeTokenStream(body, false)
+		} else {
+			messageText = decodeJSONBody(msgRaw)
+			refusalText = decodeJSONBody(refusalRaw)
+			reasoningText = decodeJSONBody(reasoningRaw)
+		}
+	}
 	messageChars, reasoningChars := len(messageText), len(reasoningText)
 	if scanErr != nil {
+		if errors.Is(scanErr, errOutputBudget) {
+			_ = resp.Body.Close()
+			_ = writeResponsesOutputBudgetFailure(guard, respID, &seq)
+			return
+		}
 		debugEvent(r, "error", "stream_response_failed", map[string]any{
 			"error_type": debugErrorType(scanErr),
 			"error":      safeDebugError(scanErr),
@@ -1444,6 +1485,13 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		final["usage"] = toResponsesUsage(usage)
 	}
 	emit("response."+status, map[string]any{"response": final})
+	if errors.Is(pendingIdentityErr, errOutputBudget) {
+		_ = resp.Body.Close()
+		streamComplete = false
+		completeTokenStream(body, false)
+		_ = writeResponsesOutputBudgetFailure(guard, respID, &seq)
+		return
+	}
 	if sseWriteErr != nil {
 		return
 	}
@@ -1456,6 +1504,14 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		debugEvent(r, "info", "stream_response_completed", map[string]any{"status_code": http.StatusOK})
 	}
 	log.Printf("[#%d] Responses 流式输出完成 (账号 %s [%s], 耗时 %v, 首Token(v2) %s)", reqID, acc.Path, prof.Label, time.Since(startTime), body.text())
+}
+
+func writeResponsesOutputBudgetFailure(guard *streamWriteGuard, id string, seq *int) error {
+	data, _ := json.Marshal(map[string]any{"type": "response.failed", "sequence_number": *seq, "response": map[string]any{"id": id, "object": "response", "status": "failed", "error": map[string]any{"code": "output_budget_exceeded", "message": errOutputBudget.Error()}}})
+	*seq++
+	frame := append([]byte("event: response.failed\ndata: "), data...)
+	frame = append(frame, '\n', '\n')
+	return guard.writeFrame(frame)
 }
 
 // compactUUID 返回去掉连字符的随机 UUID。

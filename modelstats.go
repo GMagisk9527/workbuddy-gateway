@@ -221,6 +221,7 @@ type ttftReader struct {
 	d           time.Duration
 	complete    bool
 	performance *requestPerformance
+	output      *outputLease
 }
 
 func newTTFTReader(r io.Reader, start time.Time) *ttftReader {
@@ -230,6 +231,7 @@ func newTTFTReader(r io.Reader, start time.Time) *ttftReader {
 func newRequestTTFTReader(req *http.Request, r io.Reader, start time.Time) *ttftReader {
 	t := newTTFTReader(r, start)
 	t.performance = performanceFor(req)
+	t.output = outputFor(req)
 	return t
 }
 

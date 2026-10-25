@@ -48,6 +48,15 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if _, err := normalizeServiceTimeouts(c.Downstream, c.Server); err != nil {
 		return c, err
 	}
+	if _, err := normalizeRetry(c.Retry); err != nil {
+		return c, err
+	}
+	if _, err := normalizeLogBudget(c.Logs); err != nil {
+		return c, err
+	}
+	if c.Output.MaxRequestBytes < 0 || c.Output.MaxRequestBytes > 1<<40 || c.Output.MaxSharedBytes < 0 || c.Output.MaxSharedBytes > 1<<40 {
+		return c, errors.New("output 预算需为0～1099511627776字节，0自动计算")
+	}
 	apiPort := g.APIPort
 	if cfg.PortExplicit {
 		apiPort = cfg.Port
@@ -256,6 +265,10 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	enableFirstByteRetry = firstByteRetry
 	upstreamConfigMu.Unlock()
 	serviceTimeouts.Store(&timeouts)
+	retainedOutputs.configure(c.Output)
+	upstreamRetries.configure(c.Retry)
+	logLimits, _ := normalizeLogBudget(c.Logs)
+	logBudgetConfig.Store(&logLimits)
 	if hot {
 		log.Printf("[配置热加载] traceId=%s 结果=成功 模型黑名单=%d 模型白名单=%d 账号规则=%d 调试日志=%t 日志保留天数=%d 响应头超时=%v 流空闲超时=%v 重试次数=%d 流心跳=%v 首字节重放=%t 说明=后续请求使用新配置，凭据及历史账本保留，端口变更需重启",
 			trace, len(c.Models.Blocklist), len(c.Models.Allowlist), len(c.Models.Accounts), c.Debug.Enabled, c.Logs.RetentionDays, header, idle, retries, keepalive, firstByteRetry)

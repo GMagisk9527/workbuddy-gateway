@@ -49,6 +49,11 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 合成数据，全部夹具在本地构造，不读取用户会话或凭据。
 可选历史采集离线重放见[出站兼容说明](../docs/outbound-compatibility.md#验证与边界)，默认不会读取私有材料。
 
+输出、额外尝试和日志边界回归集中在 `output_budget_test.go`、`retry_budget_test.go`、
+`log_budget_test.go`、`resource_budgets_test.go`。覆盖三协议实测费用保留、统一重放预算、
+取消退避、并发文件轮转和配置最后有效值。运行方式及口径见
+[资源预算说明](../docs/resource-budgets.md)。
+
 ## 网页
 
 ```bash

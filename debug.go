@@ -78,12 +78,12 @@ type runtimeFileConfig struct {
 	Scheduling schedulingFileConfig  `json:"scheduling"`
 	Downstream downstreamFileConfig  `json:"downstream"`
 	Server     serverFileConfig      `json:"server"`
+	Output     outputFileConfig      `json:"output"`
+	Retry      retryFileConfig       `json:"retry"`
 	Debug      struct {
 		Enabled bool `json:"enabled"`
 	} `json:"debug"`
-	Logs struct {
-		RetentionDays int `json:"retentionDays"` // 0 保留全部；正数保留含今天在内的 N 个日历日。
-	} `json:"logs"`
+	Logs logFileConfig `json:"logs"`
 	// Upstream 段可选，用于按网络状况调整上游超时和流式行为。
 	Upstream struct {
 		// RequestProfile: legacy（省略/空值）保留旧行为；official 使用已抓取的国内桌面兼容参数。

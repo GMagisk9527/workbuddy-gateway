@@ -165,20 +165,40 @@ func (s *livePerformance) snapshot(now time.Time) [len(performanceProtocols) + 1
 }
 
 type liveRuntimeSnapshot struct {
-	AdmissionActive     int   `json:"admissionActive"`
-	AdmissionLimit      int   `json:"admissionLimit"`
-	AdmissionWaiting    int   `json:"admissionWaiting"`
-	AdmissionQueueLimit int   `json:"admissionQueueLimit"`
-	BodyBytes           int64 `json:"bodyBytes"`
-	BodyBudget          int64 `json:"bodyBudget"`
-	MemoryPressure      bool  `json:"memoryPressure"`
-	Draining            bool  `json:"draining"`
+	AdmissionActive     int    `json:"admissionActive"`
+	AdmissionLimit      int    `json:"admissionLimit"`
+	AdmissionWaiting    int    `json:"admissionWaiting"`
+	AdmissionQueueLimit int    `json:"admissionQueueLimit"`
+	BodyBytes           int64  `json:"bodyBytes"`
+	BodyBudget          int64  `json:"bodyBudget"`
+	MemoryPressure      bool   `json:"memoryPressure"`
+	Draining            bool   `json:"draining"`
+	OutputBytes         int64  `json:"outputBytes"`
+	OutputBudget        int64  `json:"outputBudget"`
+	OutputRejected      uint64 `json:"outputRejected"`
+	RetryActive         int    `json:"retryActive"`
+	RetryLimit          int    `json:"retryLimit"`
+	RetryRejected       uint64 `json:"retryRejected"`
+	LogSampled          uint64 `json:"logSampled"`
+	LogRejected         uint64 `json:"logRejected"`
 }
 
 func snapshotLiveRuntime(r *http.Request) liveRuntimeSnapshot {
 	l, active, waiting := ingressAdmission.snapshot()
 	used, budget, pressure := ingressAdmission.memory.snapshot()
 	out := liveRuntimeSnapshot{AdmissionActive: active, AdmissionLimit: l.active, AdmissionWaiting: waiting, AdmissionQueueLimit: l.waiting, BodyBytes: used, BodyBudget: budget, MemoryPressure: pressure}
+	sample := retainedOutputs.sample()
+	retainedOutputs.mu.Lock()
+	_, out.OutputBudget = retainedOutputs.limitsLocked(sample)
+	out.OutputBytes, out.OutputRejected = retainedOutputs.used, retainedOutputs.rejected
+	retainedOutputs.mu.Unlock()
+	upstreamRetries.mu.Lock()
+	out.RetryActive, out.RetryLimit, out.RetryRejected = upstreamRetries.active, upstreamRetries.allowanceLocked(), upstreamRetries.denied
+	upstreamRetries.mu.Unlock()
+	routineLogs.mu.Lock()
+	out.LogSampled = routineLogs.skipped
+	out.LogRejected = logBudgetRejected.Load()
+	routineLogs.mu.Unlock()
 	if life := lifecycleFor(r); life != nil {
 		out.Draining = life.isDraining()
 	}

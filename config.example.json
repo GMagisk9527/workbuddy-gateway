@@ -40,7 +40,23 @@
     "shutdownCleanupSeconds": 15
   },
   "logs": {
-    "retentionDays": 0
+    "retentionDays": 0,
+    "maxFileBytes": 8388608,
+    "maxTotalBytes": 67108864,
+    "maxFiles": 16,
+    "sampleFirst": 20,
+    "sampleEvery": 100
+  },
+  "output": {
+    "maxRequestBytes": 0,
+    "maxSharedBytes": 0
+  },
+  "retry": {
+    "maxExtraAttempts": 4,
+    "maxConcurrent": 2,
+    "ratioPercent": 20,
+    "minAllowance": 2,
+    "backoffMaxMs": 2000
   },
   "upstream": {
     "requestProfile": "official",

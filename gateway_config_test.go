@@ -34,6 +34,12 @@ func isolatedGatewayConfig(t *testing.T) {
 	authSwitchMu.Unlock()
 	oldCfg := cfg
 	oldServiceTimeouts := serviceTimeouts.Load()
+	oldOutput, oldRetries := retainedOutputs, upstreamRetries
+	retainedOutputs = newOutputAdmission()
+	retainedOutputs.sample = func() memorySample { return memorySample{} }
+	upstreamRetries = newRetryAdmission()
+	oldLogBudget := logBudgetConfig.Load()
+	logBudgetConfig.Store(nil)
 	serviceTimeouts.Store(nil)
 	gatewayConfigMu.Lock()
 	oldSettings := gatewaySettings
@@ -54,6 +60,8 @@ func isolatedGatewayConfig(t *testing.T) {
 	}
 	closeLog := initFileLogging("gateway-config-test")
 	t.Cleanup(func() {
+		retainedOutputs, upstreamRetries = oldOutput, oldRetries
+		logBudgetConfig.Store(oldLogBudget)
 		serviceTimeouts.Store(oldServiceTimeouts)
 		closeLog()
 		log.SetOutput(oldWriter)

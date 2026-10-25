@@ -71,7 +71,7 @@ func anthropicErrType(errType string) string {
 		return "permission_error"
 	case "model_rate_limited", "all_accounts_cooldown", "request_queue_full", "request_queue_timeout":
 		return "rate_limit_error"
-	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled", "request_memory_pressure", "request_body_budget_exceeded", "gateway_draining":
+	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled", "request_memory_pressure", "request_body_budget_exceeded", "gateway_draining", "upstream_retry_budget_exhausted":
 		return "overloaded_error"
 	case "invalid_request_encoding", "unsupported_content_encoding":
 		// 请求体格式/编码问题是调用方错误，不能退化成服务端 api_error
@@ -653,6 +653,7 @@ type anthropicStreamState struct {
 	pendingEventErr   error
 	pendingToolArgs   pendingToolArgumentBudget
 	aggregateOnly     bool
+	output            *outputLease
 }
 
 func newAnthropicStreamState(modelName string, wantThinking bool) *anthropicStreamState {
@@ -694,6 +695,9 @@ func (s *anthropicStreamState) emit(eventType string, data map[string]any) []byt
 	}
 	frame := appendAnthropicFrame(nil, eventType, b)
 	if queued {
+		if !s.reserveOutput(len(frame)) {
+			return nil
+		}
 		s.pendingEvents = append(s.pendingEvents, anthropicPendingEvent{index: index, data: frame})
 		s.pendingEventBytes += len(frame)
 		return nil
@@ -727,6 +731,7 @@ func (s *anthropicStreamState) flushPendingToolEvents() []byte {
 	for _, event := range s.pendingEvents {
 		if s.pendingToolIndex < 0 || event.index < s.pendingToolIndex {
 			out = append(out, event.data...)
+			s.output.remove(len(event.data))
 			s.pendingEventBytes -= len(event.data)
 		} else {
 			kept = append(kept, event)
@@ -821,10 +826,16 @@ func (s *anthropicStreamState) stopThinking(out []byte) []byte {
 }
 
 func (s *anthropicStreamState) appendThinking(rc string) []byte {
+	if !s.reserveOutput(len(rc)) {
+		return nil
+	}
 	var out []byte
 	// 思维链只出现在正文前；若正文块开着，先收口再开新的 thinking 块。
 	out = s.stopText(out)
 	if s.thinking == nil || !s.thinking.open {
+		if !s.reserveOutput(512) {
+			return nil
+		}
 		s.thinking = &anthropicTextSlot{open: true, index: s.blockIndex}
 		s.blockIndex++
 		s.blocks = append(s.blocks, anthropicContentSlot{kind: "thinking", text: s.thinking})
@@ -848,9 +859,15 @@ func (s *anthropicStreamState) appendThinking(rc string) []byte {
 }
 
 func (s *anthropicStreamState) appendText(out []byte, ct string) []byte {
+	if s.aggregateOnly && !s.reserveOutput(len(ct)) {
+		return nil
+	}
 	// 正文开始：先收口 thinking 块，保证块顺序 thinking -> text。
 	out = s.stopThinking(out)
 	if s.text == nil || !s.text.open {
+		if !s.reserveOutput(512) {
+			return nil
+		}
 		s.text = &anthropicTextSlot{open: true, index: s.blockIndex}
 		s.blockIndex++
 		s.blocks = append(s.blocks, anthropicContentSlot{kind: "text", text: s.text})
@@ -874,6 +891,16 @@ func (s *anthropicStreamState) appendToolCall(tc map[string]any) []byte {
 		idx = int(v)
 	}
 	slot, exists := s.tools[idx]
+	additional := len(strOf(tc["id"]))
+	if fn, ok := tc["function"].(map[string]any); ok {
+		additional += len(strOf(fn["name"])) + len(strOf(fn["arguments"]))
+	}
+	if !exists {
+		additional += 512
+	}
+	if !s.reserveOutput(additional) {
+		return nil
+	}
 	if !exists {
 		slot = &anthropicToolSlot{index: s.blockIndex}
 		s.blockIndex++
@@ -1022,6 +1049,9 @@ func (s *anthropicStreamState) validateToolInputs() error {
 			continue
 		}
 		trimmed := strings.TrimSpace(args)
+		if err := s.output.temp(int64(len(args))); err != nil {
+			return err
+		}
 		if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid([]byte(trimmed)) {
 			return fmt.Errorf("上游工具参数不是完整的 JSON 对象，本次回复不完整")
 		}
@@ -1083,6 +1113,10 @@ func anthropicSignature(s string) string {
 
 func (s *anthropicStreamState) thinkingSignature(slot *anthropicTextSlot) string {
 	if slot.signature == "" {
+		if err := s.output.temp(3*int64(slot.buf.Len()) + 512); err != nil {
+			s.pendingEventErr = err
+			return ""
+		}
 		if s.hiddenThinking != nil {
 			slot.signature = s.hiddenThinking.seal(slot.buf.String())
 		} else {
@@ -1090,6 +1124,17 @@ func (s *anthropicStreamState) thinkingSignature(slot *anthropicTextSlot) string
 		}
 	}
 	return slot.signature
+}
+
+func (s *anthropicStreamState) reserveOutput(n int) bool {
+	if s.pendingEventErr != nil {
+		return false
+	}
+	if err := s.output.add(n); err != nil {
+		s.pendingEventErr = err
+		return false
+	}
+	return true
 }
 
 // -----------------------------------------------------------------------------
@@ -1155,6 +1200,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 	}
 
 	state := newAnthropicStreamState(modelName, wantThinking)
+	state.output = outputFor(r)
 	applyAnthropicThinkingPolicy(state, r)
 	body := newRequestTTFTReader(r, resp.Body, startTime)
 	defer finishFirstToken(r, modelName, reqID, body)
@@ -1173,6 +1219,9 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 	}
 	streamComplete = scanErr == nil && state.finish != ""
 	if scanErr != nil {
+		if errors.Is(scanErr, errOutputBudget) {
+			_ = resp.Body.Close()
+		}
 		debugEvent(r, "error", "stream_response_failed", map[string]any{
 			"error_type": debugErrorType(scanErr),
 			"error":      safeDebugError(scanErr),
@@ -1181,6 +1230,9 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		// 结果。改为下发 error 事件并直接返回，明确告知本次响应不完整。
 		reason := "上游流式响应中断，本次回复不完整"
 		code := "stream_interrupted"
+		if errors.Is(scanErr, errOutputBudget) {
+			reason, code = errOutputBudget.Error(), "output_budget_exceeded"
+		}
 		if rejection := reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr); rejection != nil {
 			reason, code = rejection.clientMessage(), rejection.info.Code
 		}
@@ -1207,7 +1259,15 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		return
 	}
 
-	if !writeEvent(state.finishEvents()) {
+	finalEvents := state.finishEvents()
+	if state.pendingEventErr != nil {
+		_ = resp.Body.Close()
+		streamComplete = false
+		completeTokenStream(body, false)
+		writeEvent(state.emit("error", map[string]any{"error": map[string]any{"type": "api_error", "code": "output_budget_exceeded", "message": state.pendingEventErr.Error()}}))
+		return
+	}
+	if !writeEvent(finalEvents) {
 		return
 	}
 	debugEvent(r, "info", "stream_response_completed", map[string]any{"status_code": http.StatusOK})
@@ -1218,6 +1278,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.Response, modelName string, reqID uint64, acc *Account, prof *upstreamProfile, startTime time.Time, wantThinking bool) {
 	defer resp.Body.Close()
 	state := newAnthropicStreamState(modelName, wantThinking)
+	state.output = outputFor(r)
 	state.aggregateOnly = true
 	applyAnthropicThinkingPolicy(state, r)
 	body := newRequestTTFTReader(r, resp.Body, startTime)
@@ -1238,6 +1299,7 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 		recordModelLatency(modelName, time.Since(startTime))
 	}()
 	if err := scanUpstreamSSE(body, state, nil); err != nil {
+		_ = resp.Body.Close()
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			businessRejection = true
 			return
@@ -1258,13 +1320,25 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "上游流结束但没有 finish_reason，本次回复不完整")
 		return
 	}
-	streamComplete = true
 	msg := state.aggregate()
-	out, err := json.Marshal(msg)
-	if err != nil {
-		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "序列化响应失败")
+	if state.pendingEventErr != nil {
+		completeTokenStream(body, false)
+		_ = resp.Body.Close()
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", state.pendingEventErr.Error())
 		return
 	}
+	out, err := marshalBudgetedOutput(state.output, msg)
+	if err != nil {
+		completeTokenStream(body, false)
+		_ = resp.Body.Close()
+		message := "序列化响应失败"
+		if errors.Is(err, errOutputBudget) {
+			message = err.Error()
+		}
+		writeAnthropicError(w, http.StatusInternalServerError, "api_error", message)
+		return
+	}
+	streamComplete = true
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
