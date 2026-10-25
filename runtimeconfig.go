@@ -45,6 +45,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if err != nil {
 		return c, err
 	}
+	if _, err := normalizeServiceTimeouts(c.Downstream, c.Server); err != nil {
+		return c, err
+	}
 	apiPort := g.APIPort
 	if cfg.PortExplicit {
 		apiPort = cfg.Port
@@ -167,6 +170,10 @@ func loadRuntimeConfig(path string) error {
 
 // 调用前已完整校验。热加载不修改监听端口，不中断正在输出的流。
 func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
+	timeouts, err := normalizeServiceTimeouts(c.Downstream, c.Server)
+	if err != nil {
+		return err
+	}
 	profile, err := normalizeRequestProfile(c.Upstream.RequestProfile)
 	if err != nil {
 		return err
@@ -248,6 +255,7 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	streamKeepalive = keepalive
 	enableFirstByteRetry = firstByteRetry
 	upstreamConfigMu.Unlock()
+	serviceTimeouts.Store(&timeouts)
 	if hot {
 		log.Printf("[配置热加载] traceId=%s 结果=成功 模型黑名单=%d 模型白名单=%d 账号规则=%d 调试日志=%t 日志保留天数=%d 响应头超时=%v 流空闲超时=%v 重试次数=%d 流心跳=%v 首字节重放=%t 说明=后续请求使用新配置，凭据及历史账本保留，端口变更需重启",
 			trace, len(c.Models.Blocklist), len(c.Models.Allowlist), len(c.Models.Accounts), c.Debug.Enabled, c.Logs.RetentionDays, header, idle, retries, keepalive, firstByteRetry)

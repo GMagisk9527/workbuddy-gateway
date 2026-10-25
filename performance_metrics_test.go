@@ -152,6 +152,7 @@ func TestPerformanceSafeRetryStillHonorsWrittenHeaders(t *testing.T) {
 			upstreamTransientRetries, upstreamRetryBackoff = 1, time.Millisecond
 			t.Cleanup(func() { upstreamTransientRetries, upstreamRetryBackoff = oldRetries, oldBackoff })
 			r, p := withRequestPerformance(httptest.NewRequest("POST", "/v1/messages", nil), time.Now())
+			defer func() { p.finish(phaseMetrics, 200, false, time.Now()) }()
 			calls := 0
 			cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
 				calls++

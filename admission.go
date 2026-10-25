@@ -155,6 +155,7 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 func requestAdmissionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		performanceFor(r).setLivePhase(liveAdmission)
 		gate := ingressAdmission
 		release, err := gate.acquire(r.Context())
 		recordPerformance(r, phaseAdmission, started, err != nil)
@@ -180,6 +181,7 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		defer release()
+		performanceFor(r).setLivePhase(livePreparing)
 		lease := &requestMemoryLease{gate: gate.memory}
 		defer lease.release()
 		r = r.WithContext(context.WithValue(r.Context(), requestMemoryContextKey{}, lease))

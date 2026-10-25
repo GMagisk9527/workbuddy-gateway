@@ -108,6 +108,15 @@
           <button id="performanceRefresh" type="button">读取链路性能</button>
         </div>
         <p id="performanceInfo" class="hint" role="status" aria-live="polite">点击读取当前性能指标。</p>
+        <div class="card-title">进行中的请求</div>
+        <p class="hint">读取时刻的快照，不受五分钟窗口影响。阶段人数互斥；活跃流、等待首增量、写入中可能重叠。</p>
+        <div id="performanceLiveSummary" class="hint"></div>
+        <div id="performanceRuntime" class="hint"></div>
+        <div class="table-wrap"><table id="performanceLiveTable">
+          <thead><tr><th>当前阶段</th><th>请求数</th><th>本阶段最长停留</th></tr></thead>
+          <tbody><tr><td colspan="3" class="empty">等待指标</td></tr></tbody>
+        </table></div>
+        <div class="card-title">已结束请求：最近五个自然分钟</div>
         <div id="performanceSummary" class="hint"></div>
         <p class="hint">P95/P99 为固定桶上界估计。阶段可能重叠；多次上游尝试的耗时在请求内累计，不能将各阶段直接相加。未经过的阶段显示“—”。</p>
         <div class="table-wrap"><table id="performanceTable">

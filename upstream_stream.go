@@ -91,7 +91,12 @@ func startModelStream(w http.ResponseWriter, r *http.Request, body io.ReadCloser
 	ctx, cancel := context.WithCancel(r.Context())
 	r = r.WithContext(ctx)
 	guard := &streamWriteGuard{w: w, flusher: flusher, cancel: cancel}
+	performanceFor(r).setLiveStream(true)
 	guard.setBody(body)
 	return &modelStreamSession{request: r, guard: guard, heartbeat: startStreamHeartbeat(guard, currentStreamKeepalive()), cancel: cancel}, true
 }
-func (s *modelStreamSession) Close() { s.heartbeat.Stop(); s.cancel() }
+func (s *modelStreamSession) Close() {
+	s.heartbeat.Stop()
+	s.cancel()
+	performanceFor(s.request).setLiveStream(false)
+}

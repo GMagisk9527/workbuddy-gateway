@@ -1790,10 +1790,32 @@ test("锁定页面使在途性能请求失效，失败保留旧结果", async ()
   await pending;
   assert.equal(f.review.state.lastPerformance, null);
   assert(!f.element("performanceSummary").textContent.includes("999"));
+  assert.equal(f.element("performanceLiveSummary").textContent, "");
+  assert.equal(f.element("performanceRuntime").textContent, "");
   const failed = fixture(async () => response(500, {}));
   failed.review.state.apiKey = "synthetic-admin";
   failed.element("performanceTable").innerHTML = "previous rows";
   await failed.review.loadPerformance();
   assert.equal(failed.element("performanceTable").innerHTML, "previous rows");
   assert.match(failed.element("performanceInfo").textContent, /保留上次/);
+});
+
+test("在途性能独立于完成窗口，协议切换、零值、空值与转义正确", () => {
+  const f = fixture();
+  const payload = {protocols: [{protocol:"all",requests:0,inFlight:{active:2,activeStreams:1,waitingFirstToken:1,writingDownstream:0,oldestRequestMs:1500,longestWriteMs:null,
+    stages:[{label:'<script>synthetic</script>',requests:1,longestMs:0}]}},
+    {protocol:"messages",requests:0,inFlight:{active:1,activeStreams:1,waitingFirstToken:1,writingDownstream:0,stages:[]}}],
+    runtime:{admissionActive:1,admissionLimit:2,admissionWaiting:1,admissionQueueLimit:8,bodyBytes:0,bodyBudget:12345,memoryPressure:false,draining:false}};
+  f.review.renderPerformance(payload);
+  assert.match(f.element("performanceLiveSummary").textContent,/进行中 2/);
+  assert.match(f.element("performanceSummary").textContent,/已结束请求 0/);
+  assert.match(f.element("performanceRuntime").textContent,/排队 1\/8/);
+  assert.match(f.element("performanceRuntime").textContent,/内存压力 否/);
+  const html=f.element("performanceLiveTable").innerHTML;
+  assert(html.includes("&lt;script&gt;") && !html.includes("<script>"));
+  assert(html.includes("0.000 ms"));
+  assert.match(f.element("performanceLiveSummary").textContent,/最久写入 —/);
+  f.element("performanceProtocol").value="messages";
+  f.review.renderPerformance(payload);
+  assert.match(f.element("performanceLiveSummary").textContent,/进行中 1/);
 });
