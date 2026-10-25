@@ -98,10 +98,18 @@ func (c *conversionJSONCounter) string(text string) error {
 			}
 			i++
 		case b < utf8.RuneSelf:
-			if err := c.add(1, 1); err != nil {
+			start, end := i, len(text)
+			// Bound the scan by the remaining budget too: huge rejected ASCII
+			// values must not be scanned to the end just to discover overflow.
+			if remaining := c.limit - c.plain; remaining < end-i {
+				end = i + remaining + 1
+			}
+			for i < end && conversionSafeASCII(text[i]) {
+				i++
+			}
+			if err := c.add(i-start, i-start); err != nil {
 				return err
 			}
-			i++
 		default:
 			r, size := utf8.DecodeRuneInString(text[i:])
 			plain, quoted := size, size
@@ -117,6 +125,10 @@ func (c *conversionJSONCounter) string(text string) error {
 		}
 	}
 	return nil
+}
+
+func conversionSafeASCII(b byte) bool {
+	return b >= 0x20 && b < utf8.RuneSelf && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&'
 }
 
 func (c *conversionJSONCounter) value(value any, depth int) error {
