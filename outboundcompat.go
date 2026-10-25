@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"log"
@@ -256,7 +255,8 @@ func encodeModelRequest(raw []byte, profile string, prof *upstreamProfile) ([]by
 		return raw, nil
 	}
 	var buf bytes.Buffer
-	writer := gzip.NewWriter(&buf)
+	writer := modelGzipWriters.acquire(&buf)
+	defer modelGzipWriters.release(writer)
 	if _, err := writer.Write(raw); err != nil {
 		return nil, err
 	}

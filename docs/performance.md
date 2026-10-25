@@ -53,6 +53,42 @@ benchtime=500ms、每项五次取中位数：
 计时受本机负载影响，分配量更适合作为本次回归指标；这些数字不代表上游推理或网络变快。
 可用 `go test -run '^$' -bench '^BenchmarkMessagesStream$' -benchmem` 复测。
 
+## 出站 gzip 复用与统计快照
+
+国内站 `upstream.requestProfile: "official"` 的模型请求压缩器最多缓存两个空闲实例。
+取用前重置到当前输出，归还前重置到 `io.Discard`，输出正文缓冲仍由单次请求独占。
+缓存为空时按原方式创建，满时丢弃额外实例，不增加排队；默认压缩级别、压缩字节和
+重试正文保持不变。legacy 与国际站的原样正文路径不受影响。
+
+这会保留至多两个压缩器的工作区，交换更少的重复分配；缓存不是活跃请求并发上限。
+不能将分配下降解释为常驻内存下降，尤其应结合低内存主机的现有准入水位观察。
+
+统计持久化在锁内捕获版本号和稳定快照，随后释放统计锁再执行 JSON 编码。
+账号及模型状态 map 单独复制；明细和其中的可选数值在发布后保持不可变，因此只固定
+有界历史视图，不复制全部请求明细。追加与裁剪不得改写旧行，快照也不保留追加容量。
+`statsWriteMu` 保证一次只有一份落盘快照；保存完成仅推进其捕获的版本，期间新增记录
+继续等待下一次保存。文件大小保护、原子替换、sync 和计费 WAL 保持原有语义。
+
+2026-10-25，同机 Go 1.27.3，以 main b93524e 为基线，400ms × 3 取中位数：
+
+| gzip 合成正文约大小 | 累计分配：前 → 后 | 分配次数：前 → 后 |
+|---|---|---|
+| 1 KiB | 1,076,889 → 880 B | 18 → 4 |
+| 128 KiB | 1,206,929 → 130,928 B | 25 → 11 |
+| 1 MiB | 2,124,435 → 1,048,432 B | 28 → 14 |
+
+这是热复用时 `encodeModelRequest` 的隔离基准，每次仍创建独立输出缓冲；冷启动或并发
+缓存未命中仍有构造成本。大正文的压缩 CPU 时间可能基本不变，不能推算模型总耗时。
+
+单账号、单模型状态、2 万条明细的 JSON 编码原先位于锁内，基准约 19.2ms；现在编码
+在锁外，快照获取（含锁操作）约 0.42µs、1,280 B，1 千条明细也为 1,280 B。
+该数字不包含原有账号状态捕获、锁竞争、编码或文件 I/O；账号/模型数量增加仍会增加
+map 复制成本。查询聚合路径仍沿用原逻辑。
+
+复测：`go test -run '^$' -bench 'Benchmark(OfficialGzipEncoding|StatsDocumentEncode|StatsSnapshotCriticalSection)' -benchmem`。
+生命周期设计参考 [Caddy 编码器复用](https://github.com/caddyserver/caddy/blob/master/modules/caddyhttp/encode/encode.go)，
+短锁后处理的思路参考 [Prometheus Gather](https://github.com/prometheus/client_golang/blob/main/prometheus/registry.go)。
+
 独立读取约 4 MiB 正文的累计分配：已知长度路径约 9.99 → 4.20 MB；
 已验证的解压正文交接约 9.99 MB → 80 B。后者是缓冲所有权交接，不报告字节吞吐。
 普通 ASCII 大小预检耗时中位数约 2.02 → 0.91 ms；纯转义输入在本次样本中约有 3% 波动。
