@@ -31,6 +31,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 | 测试入口与说明 | [tests/README.md](tests/README.md) |
 | 请求分阶段性能、连接复用与百分位口径 | [docs/request-performance.md](docs/request-performance.md) |
 | 下游写入超时、在途指标与停机收尾 | [docs/stream-lifecycle.md](docs/stream-lifecycle.md) |
+| 输出保留、统一额外尝试与日志大小预算 | [docs/resource-budgets.md](docs/resource-budgets.md) |
 | 多 Harness 出站对齐、协议参数与兼容边界 | [docs/outbound-compatibility.md](docs/outbound-compatibility.md) |
 | Messages / Responses 转换能力及推理回传 | [Messages](docs/messages-chat-compatibility.md) / [Responses](docs/responses-chat-compatibility.md) |
 | DSH 历史回放、GUI 环境句与 11128 兼容说明 | [docs/11128-dsh-history.md](docs/11128-dsh-history.md) |

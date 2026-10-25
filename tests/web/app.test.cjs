@@ -82,7 +82,7 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map(),
     , openAddAccount, startAddAccount, pollAddAccount, closeAddAccount, accountRowActions
     , initStatsFilter, writeStatsFilterCookie, readStatsFilterCookie, bindStatsChartHover
     , openKeyEditor, closeKeyEditor, submitKeyForm
-    , renderPerformance, loadPerformance
+    , renderPerformance, loadPerformance, loadLogSettings
   };})();`);
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -1805,12 +1805,15 @@ test("在途性能独立于完成窗口，协议切换、零值、空值与转�
   const payload = {protocols: [{protocol:"all",requests:0,inFlight:{active:2,activeStreams:1,waitingFirstToken:1,writingDownstream:0,oldestRequestMs:1500,longestWriteMs:null,
     stages:[{label:'<script>synthetic</script>',requests:1,longestMs:0}]}},
     {protocol:"messages",requests:0,inFlight:{active:1,activeStreams:1,waitingFirstToken:1,writingDownstream:0,stages:[]}}],
-    runtime:{admissionActive:1,admissionLimit:2,admissionWaiting:1,admissionQueueLimit:8,bodyBytes:0,bodyBudget:12345,memoryPressure:false,draining:false}};
+    runtime:{admissionActive:1,admissionLimit:2,admissionWaiting:1,admissionQueueLimit:8,bodyBytes:0,bodyBudget:12345,memoryPressure:false,draining:false,outputBytes:1024,outputBudget:8192,outputRejected:2,retryActive:1,retryLimit:2,retryRejected:3,logSampled:4,logRejected:5}};
   f.review.renderPerformance(payload);
   assert.match(f.element("performanceLiveSummary").textContent,/进行中 2/);
   assert.match(f.element("performanceSummary").textContent,/已结束请求 0/);
   assert.match(f.element("performanceRuntime").textContent,/排队 1\/8/);
   assert.match(f.element("performanceRuntime").textContent,/内存压力 否/);
+  assert.match(f.element("performanceRuntime").textContent,/输出预算 1024\/8192/);
+  assert.match(f.element("performanceRuntime").textContent,/重试预算拒绝 3/);
+  assert.match(f.element("performanceRuntime").textContent,/日志预算写入拒绝 5/);
   const html=f.element("performanceLiveTable").innerHTML;
   assert(html.includes("&lt;script&gt;") && !html.includes("<script>"));
   assert(html.includes("0.000 ms"));
@@ -1818,4 +1821,22 @@ test("在途性能独立于完成窗口，协议切换、零值、空值与转�
   f.element("performanceProtocol").value="messages";
   f.review.renderPerformance(payload);
   assert.match(f.element("performanceLiveSummary").textContent,/进行中 1/);
+});
+
+test("日志大小限制可见，退出使在途设置响应失效",async()=>{
+  const f=fixture(async()=>response(200,{retentionDays:0,maxFileBytes:1024,maxTotalBytes:8192,maxFiles:8,sampleFirst:20,sampleEvery:100}));
+  f.review.state.apiKey="synthetic-admin";
+  await f.review.loadLogSettings();
+  assert.match(f.element("logBudgetInfo").textContent,/单文件上限 1024 字节/);
+  assert.match(f.element("logBudgetInfo").textContent,/日志总量 8192 字节/);
+  assert.match(f.element("logBudgetInfo").textContent,/前 20 条，其后每 100 条/);
+  let resolve;
+  const pending=fixture(()=>new Promise(done=>{resolve=done}));
+  pending.review.state.apiKey="synthetic-admin";
+  const done=pending.review.loadLogSettings();
+  pending.review.lockDashboard();
+  resolve(response(200,{retentionDays:123,maxFileBytes:999}));
+  await done;
+  assert.equal(pending.review.state.logSettings,null);
+  assert.equal(pending.element("logBudgetInfo").textContent,"");
 });

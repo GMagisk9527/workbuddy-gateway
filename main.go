@@ -172,6 +172,11 @@ var legacyLargeBodyWarned atomic.Bool
 //
 // 返回的 cancel 用于在流式读取结束后取消上游 context（调用方负责）。
 func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, upstreamBytes []byte, reqID uint64, traceID string) (*http.Response, context.CancelFunc, error) {
+	scope := retryScopeFor(r)
+	if scope == nil {
+		scope = upstreamRetries.scope()
+		defer scope.close()
+	}
 	performanceFor(r).setLivePhase(liveFirstToken)
 	// A consistent credential snapshot is shared by all retries of this request.
 	// Hot reload must not mix token fields across concurrent sends.
@@ -242,6 +247,11 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 			req.Header.Set("X-Trace-ID", debugTraceID(r))
 			req.Header.Set("X-Parent-Request-ID", strconv.FormatUint(reqID, 10))
 		}
+		releaseRetry, budgetErr := scope.begin(r.Context())
+		if budgetErr != nil {
+			upstreamCancel()
+			return nil, nil, budgetErr
+		}
 		if try > 0 {
 			// 重试时不复用已被对端关闭的空闲连接。
 			req.Close = true
@@ -252,6 +262,13 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 
 		performanceFor(r).networkAttempt(try > 0)
 		resp, err := cfg.HttpClient.Do(req)
+		if releaseRetry != nil {
+			if err == nil {
+				resp.Body = newAccountStreamBody(resp.Body, releaseRetry)
+			} else {
+				releaseRetry()
+			}
+		}
 		if timingTrace != nil {
 			timingTrace.finish(err != nil)
 		}
@@ -277,11 +294,6 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 				"retry": try + 1, "reason": "request_headers_not_written",
 				"business_impact": "换新连接重试尚未发出的模型请求",
 			})
-			select {
-			case <-r.Context().Done():
-				return nil, nil, err
-			case <-time.After(upstreamRetryBackoff):
-			}
 		}
 	}
 	return nil, nil, lastErr
@@ -3702,6 +3714,12 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 			defer downstreamCancel()
 			r = r.WithContext(ctx)
 			writeTimeout = currentServiceTimeouts().write
+			var output *outputLease
+			r, output = withOutputLease(r)
+			defer output.close()
+			var retries *requestRetryScope
+			r, retries = withRetryScope(r)
+			defer retries.close()
 		}
 		r = r.WithContext(context.WithValue(r.Context(), statsRequestContextKey{}, &statsAttempt{}))
 		// 鉴权层通过这个持有者回填身份，外层结算才能读到（否则成功请求不入账）。
@@ -3991,6 +4009,11 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		if err != nil {
 			acc.lock.RUnlock()
 			releaseSlot()
+			if errors.Is(err, errRetryBudget) {
+				w.Header().Set("Retry-After", "1")
+				writeUpstreamError(w, r, http.StatusServiceUnavailable, "upstream_retry_budget_exhausted", err.Error())
+				return nil, nil, nil, false
+			}
 			debugEvent(r, "error", "upstream_request_failed", map[string]any{
 				"upstream_host": prof.chatURL(),
 				"error_type":    debugErrorType(err),
@@ -4570,6 +4593,7 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 	defer finishFirstToken(r, modelName, reqID, body)
 	completionJSON, err := aggregateCompletion(body, modelName)
 	if err != nil {
+		_ = resp.Body.Close()
 		observeAggregateFailureUsage(r, acc, modelName, reqID, startTime, err)
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			return
@@ -4941,7 +4965,9 @@ func noteFinishReason(current string, chunk map[string]any) string {
 }
 
 func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
-	var content, refusal, reasoning, role, respModel, respID, finish string
+	var content, refusal, reasoning strings.Builder
+	var role, respModel, respID, finish string
+	output := outputForReader(r)
 	var created int64
 	var usage map[string]any
 	toolCalls := map[int]*mergedToolCall{}
@@ -4976,17 +5002,20 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		for _, c := range choices {
 			choice, _ := c.(map[string]any)
 			if delta, ok := choice["delta"].(map[string]any); ok {
+				if err := reserveOutputDelta(output, delta, true, true, false, toolCalls); err != nil {
+					return nil, &aggregateUsageError{usage: usage, cause: err}
+				}
 				if v, ok := delta["role"].(string); ok && v != "" {
 					role = v
 				}
 				if v, ok := delta["content"].(string); ok {
-					content += v
+					content.WriteString(v)
 				}
 				if v, ok := delta["refusal"].(string); ok {
-					refusal += v
+					refusal.WriteString(v)
 				}
 				if v, ok := delta["reasoning_content"].(string); ok {
-					reasoning += v
+					reasoning.WriteString(v)
 				}
 				if tcs, ok := delta["tool_calls"].([]any); ok {
 					applyToolCallDelta(toolCalls, &toolOrder, tcs)
@@ -5011,14 +5040,12 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	if err := validateMergedToolIdentity(toolCalls, toolOrder); err != nil {
 		return nil, &aggregateToolIdentityError{usage: usage}
 	}
-	completeTokenStream(r, true)
-
-	message := map[string]any{"role": ifEmpty(role, "assistant"), "content": content}
-	if refusal != "" {
-		message["refusal"] = refusal
+	message := map[string]any{"role": ifEmpty(role, "assistant"), "content": content.String()}
+	if refusal.Len() > 0 {
+		message["refusal"] = refusal.String()
 	}
-	if reasoning != "" {
-		message["reasoning_content"] = reasoning
+	if reasoning.Len() > 0 {
+		message["reasoning_content"] = reasoning.String()
 	}
 	if len(toolOrder) > 0 {
 		calls := make([]map[string]any, 0, len(toolOrder))
@@ -5053,7 +5080,12 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	if usage != nil {
 		result["usage"] = usage
 	}
-	return json.Marshal(result)
+	encoded, err := marshalBudgetedOutput(output, result)
+	if err != nil {
+		return nil, &aggregateUsageError{usage: usage, cause: err}
+	}
+	completeTokenStream(r, true)
+	return encoded, nil
 }
 
 // cleanChunkJSON 清洗单个上游 chat 分片，使其符合 OpenAI 流式分片规范后再透传。

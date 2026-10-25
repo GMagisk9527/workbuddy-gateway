@@ -268,7 +268,8 @@
   <section id="panel-logs" class="panel">
     <div class="card settings-card">
       <div class="card-title">日志保留与清理</div>
-      <p class="hint">0 表示保留全部；7 表示保留今天及此前 6 天。保存会写入 config.json 并自动清理过期日志，删除不可撤销。只处理项目日志，不删除配置或凭据。</p>
+      <p class="hint">0 关闭按天清理；7 保留今天及此前 6 天。日志仍受文件大小、总量与份数限制，旧分段会自动回收。只处理项目日志，不触及配置、凭据或计费账本。</p>
+      <p id="logBudgetInfo" class="hint"></p>
       <div class="settings-row">
         <label for="logRetentionDays">日志保留天数</label>
         <input id="logRetentionDays" type="number" min="0" max="36500" step="1" value="0">

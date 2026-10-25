@@ -353,6 +353,20 @@ func TestResponsesReplayPreservesBusinessRejection(t *testing.T) {
 
 // 下游写失败触发关闭时，若重放还在建立连接，账号锁必须保持到重放真正结束，
 // 且 Close 之后返回的响应体必须关闭。
+type replayAwareFailWriter struct {
+	*httptest.ResponseRecorder
+	ready <-chan struct{}
+}
+
+func (w *replayAwareFailWriter) Write(p []byte) (int, error) {
+	select {
+	case <-w.ready:
+		return 0, io.ErrClosedPipe
+	default:
+		return w.ResponseRecorder.Write(p)
+	}
+}
+
 func TestMessagesCloseDuringReplayKeepsAccountLock(t *testing.T) {
 	withStreamTestAccount(t)
 	setTestStreamKeepalive(t, 5*time.Millisecond)
@@ -382,7 +396,7 @@ func TestMessagesCloseDuringReplayKeepsAccountLock(t *testing.T) {
 	})}
 	t.Cleanup(func() { cfg.HttpClient = oldClient })
 
-	writer := &settlementFailWriter{ResponseRecorder: httptest.NewRecorder()}
+	writer := &replayAwareFailWriter{ResponseRecorder: httptest.NewRecorder(), ready: replayStarted}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

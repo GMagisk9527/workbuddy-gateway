@@ -55,20 +55,11 @@ func (w *dailyLogWriter) rotate(now time.Time) error {
 	}
 	activeLogsMu.Lock()
 	defer activeLogsMu.Unlock()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
+	if err := refreshLogDiskLocked(filepath.Dir(path), true); err != nil {
 		return err
 	}
-	activeLogs[path]++
-	if w.file != nil {
-		_ = w.file.Close()
-		activeLogs[w.path]--
-		if activeLogs[w.path] == 0 {
-			delete(activeLogs, w.path)
-		}
-	}
-	w.file, w.path, w.day = f, path, day
-	return nil
+	path = newestLogPathLocked(filepath.Dir(path), w.prefix, w.extension, day)
+	return w.openLogLocked(path, day)
 }
 
 func (w *dailyLogWriter) Write(data []byte) (int, error) {
@@ -80,7 +71,29 @@ func (w *dailyLogWriter) Write(data []byte) (int, error) {
 	if err := w.rotate(time.Now()); err != nil {
 		return 0, err
 	}
-	return w.file.Write(data)
+	activeLogsMu.Lock()
+	defer activeLogsMu.Unlock()
+	if err := refreshLogDiskLocked(filepath.Dir(w.path), false); err != nil {
+		return 0, err
+	}
+	limits := currentLogLimits()
+	if int64(len(data)) > limits.file {
+		logBudgetRejected.Add(1)
+		return 0, errors.New("单条日志超过文件大小上限")
+	}
+	if size := managedLogDisk.files[filepath.Base(w.path)].size; size > 0 && int64(len(data)) > limits.file-size {
+		if err := w.rollSizeLocked(); err != nil {
+			return 0, err
+		}
+	}
+	if err := trimLogDiskLocked(int64(len(data))); err != nil {
+		logBudgetRejected.Add(1)
+		return 0, err
+	}
+	n, err := w.file.Write(data)
+	old := managedLogDisk.files[filepath.Base(w.path)].size
+	recordLogSizeLocked(w.path, old+int64(n))
+	return n, err
 }
 
 func (w *dailyLogWriter) Close() error {
@@ -99,7 +112,7 @@ func (w *dailyLogWriter) Close() error {
 	return w.file.Close()
 }
 
-var managedLogPattern = regexp.MustCompile(`^(gateway-\d{4}-\d{2}-\d{2}\.log|debug-\d{4}-\d{2}-\d{2}\.jsonl|deployment-\d{4}-\d{2}-\d{2}\.jsonl|frontend-\d{4}-\d{2}-\d{2}\.log)$`)
+var managedLogPattern = regexp.MustCompile(`^((gateway|frontend)-\d{4}-\d{2}-\d{2}(\.part-\d{6})?\.log|(debug|deployment)-\d{4}-\d{2}-\d{2}(\.part-\d{6})?\.jsonl)$`)
 var logDatePattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
 
 type logCleanupResult struct {
@@ -198,6 +211,10 @@ func cleanupLogs(now time.Time, days int, trace string, schedule ...time.Time) (
 		removeErr := statErr
 		if statErr == nil {
 			removeErr = root.Remove(name)
+			if removeErr == nil && managedLogDisk.root == filepath.Dir(fullPath) {
+				managedLogDisk.bytes -= managedLogDisk.files[name].size
+				delete(managedLogDisk.files, name)
+			}
 		}
 		activeLogsMu.Unlock()
 		if removeErr != nil {
@@ -251,7 +268,13 @@ func saveLogRetention(days int, trace string) error {
 	if err != nil {
 		return err
 	}
-	doc["logs"], _ = json.Marshal(map[string]int{"retentionDays": days})
+	var logDocument map[string]json.RawMessage
+	_ = json.Unmarshal(doc["logs"], &logDocument)
+	if logDocument == nil {
+		logDocument = map[string]json.RawMessage{}
+	}
+	logDocument["retentionDays"], _ = json.Marshal(days)
+	doc["logs"], _ = json.Marshal(logDocument)
 	log.Printf("[日志设置] traceId=%s 阶段=配置写入 旧保留天数=%d 新保留天数=%d 说明=其他配置段原样保留", trace, logRetentionDays.Load(), days)
 	return persistRuntimeDocument(doc, old, trace)
 }
@@ -260,7 +283,8 @@ func handleWebUILogSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		log.Printf("[日志设置] traceId=%s 阶段=读取 保留天数=%d 结果=成功", debugTraceID(r), logRetentionDays.Load())
-		writeJSON(w, http.StatusOK, map[string]any{"retentionDays": logRetentionDays.Load()})
+		limits := currentLogLimits()
+		writeJSON(w, http.StatusOK, map[string]any{"retentionDays": logRetentionDays.Load(), "maxFileBytes": limits.file, "maxTotalBytes": limits.total, "maxFiles": limits.files, "sampleFirst": limits.first, "sampleEvery": limits.every})
 	case http.MethodPost:
 		var input struct {
 			Days *int `json:"retentionDays"`

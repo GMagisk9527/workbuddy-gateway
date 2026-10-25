@@ -144,6 +144,9 @@
     state.performanceVersion++;
     state.performancePending = false;
     state.lastPerformance = null;
+	state.logSettingsVersion++;
+	state.logSettings=null;
+	$("logBudgetInfo").textContent="";
     $("performanceInfo").textContent = "登录后读取链路性能。";
     $("performanceSummary").textContent = "";
     $("performanceTable").querySelector("tbody").innerHTML = "";
@@ -879,6 +882,8 @@
     $("performanceRuntime").textContent = rt ? "全局准入 " + count(rt.admissionActive) + "/" + count(rt.admissionLimit) +
       " · 排队 " + count(rt.admissionWaiting) + "/" + count(rt.admissionQueueLimit) +
       " · 输入预算 " + count(rt.bodyBytes) + "/" + count(rt.bodyBudget) + " 字节 · 内存压力 " + (rt.memoryPressure ? "是" : "否") +
+	  " · 输出预算 " + count(rt.outputBytes) + "/" + count(rt.outputBudget) + " 字节 · 输出预算拒绝 " + count(rt.outputRejected) +
+	  " · 额外尝试 " + count(rt.retryActive) + "/" + count(rt.retryLimit) + " · 重试预算拒绝 " + count(rt.retryRejected) + " · 普通日志采样省略 " + count(rt.logSampled) + " · 日志预算写入拒绝 " + count(rt.logRejected) +
       " · 停机排空 " + (rt.draining ? "是" : "否") : "";
     $("performanceSummary").textContent = "已结束请求 " + count(selected.requests) + " · 失败 " + count(selected.failed) +
       " · 取消 " + count(selected.canceled) + " · 流不完整 " + count(selected.incompleteStreams) +
@@ -1976,6 +1981,7 @@
       if (version !== state.logSettingsVersion) return;
       state.logSettings = data;
       $("logRetentionDays").value = data.retentionDays;
+      $("logBudgetInfo").textContent = typeof data.maxFileBytes === "number" ? "单文件上限 " + count(data.maxFileBytes) + " 字节 · 日志总量 " + count(data.maxTotalBytes) + " 字节 · 最多 " + count(data.maxFiles) + " 份 · 每秒普通诊断前 " + count(data.sampleFirst) + " 条，其后每 " + count(data.sampleEvery) + " 条保留一条。错误与账本不采样。" : "";
     }).catch(function () {}).then(function () {
       if (version !== state.logSettingsVersion) return;
       $("logRetentionDays").disabled = false;
@@ -1987,7 +1993,7 @@
   function saveLogSettings() {
     var days = Number($("logRetentionDays").value);
     if ($("logRetentionDays").value.trim() === "" || !Number.isInteger(days) || days < 0 || days > 36500) {
-      showAlert("保留天数必须是 0～36500 的整数，0 表示保留全部。");
+      showAlert("保留天数必须是 0～36500 的整数，0 关闭按天清理。");
       reportUIEvent("log_validation_failed", "/admin/api/log-settings", 0, traceID());
       return;
     }
@@ -1996,14 +2002,14 @@
     return api("/admin/api/log-settings", {method: "POST", body: {retentionDays: days}})
       .then(function (data) {
         state.logSettings = data;
-        $("logCleanupResult").textContent = "已写入 config.json。保留天数：" + days + (days === 0 ? "（不自动清理）。" : " 天，自动清理已启用。");
+        $("logCleanupResult").textContent = "已写入 config.json。保留天数：" + days + (days === 0 ? "（按天清理关闭，大小限制仍生效）。" : " 天，自动清理已启用。");
       }).catch(function () {}).then(function () { $("saveLogSettings").disabled = false; });
   }
 
   function cleanupExpiredLogs() {
     var days = state.logSettings && state.logSettings.retentionDays;
     if (!days) {
-      $("logCleanupResult").textContent = "当前配置保留全部，不会删除任何日志。请先保存正数保留天数。";
+      $("logCleanupResult").textContent = "当前未启用按天清理，大小与份数限制仍生效。请先保存正数保留天数。";
       reportUIEvent("log_validation_failed", "/admin/api/log-cleanup", 0, traceID());
       return;
     }

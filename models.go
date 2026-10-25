@@ -987,7 +987,7 @@ func siteKnownFree(site, modelID string) bool {
 		defer func() {
 			accountMu.Unlock()
 			if skipped > 0 {
-				log.Printf("[站点免费判断] 站点=%s 模型=%s 跳过不可调度账号=%d 有效账号免费记录=%t 说明=空账号、失效标记及缺少凭据的账号不参与判断",
+				logRoutine(routineSiteEligibility, "[站点免费判断] 站点=%s 模型=%s 跳过不可调度账号=%d 有效账号免费记录=%t 说明=空账号、失效标记及缺少凭据的账号不参与判断",
 					site, modelID, skipped, knownFree)
 			}
 		}()
