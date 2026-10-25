@@ -688,7 +688,7 @@ func (s *anthropicStreamState) emit(eventType string, data map[string]any) []byt
 	if err != nil {
 		return nil
 	}
-	frame := []byte("event: " + eventType + "\ndata: " + string(b) + "\n\n")
+	frame := appendAnthropicFrame(nil, eventType, b)
 	if queued {
 		s.pendingEvents = append(s.pendingEvents, anthropicPendingEvent{index: index, data: frame})
 		s.pendingEventBytes += len(frame)
@@ -771,11 +771,11 @@ func (s *anthropicStreamState) feed(chunk map[string]any) []byte {
 				out = append(out, s.appendThinking(rc)...)
 			}
 			if ct, ok := delta["content"].(string); ok && ct != "" {
-				out = append(out, s.appendText(ct)...)
+				out = s.appendText(out, ct)
 			}
 			if refusal, ok := delta["refusal"].(string); ok && refusal != "" {
 				s.refused = true
-				out = append(out, s.appendText(refusal)...)
+				out = s.appendText(out, refusal)
 			}
 			if tcs, ok := delta["tool_calls"].([]any); ok {
 				for _, tcAny := range tcs {
@@ -843,8 +843,7 @@ func (s *anthropicStreamState) appendThinking(rc string) []byte {
 	return out
 }
 
-func (s *anthropicStreamState) appendText(ct string) []byte {
-	var out []byte
+func (s *anthropicStreamState) appendText(out []byte, ct string) []byte {
 	// 正文开始：先收口 thinking 块，保证块顺序 thinking -> text。
 	out = s.stopThinking(out)
 	if s.text == nil || !s.text.open {
@@ -856,12 +855,13 @@ func (s *anthropicStreamState) appendText(ct string) []byte {
 			"content_block": map[string]any{"type": "text", "text": ""},
 		})...)
 	}
-	s.text.buf.WriteString(ct)
-	out = append(out, s.emit("content_block_delta", map[string]any{
-		"index": s.text.index,
-		"delta": map[string]any{"type": "text_delta", "text": ct},
-	})...)
-	return out
+	// Streaming sends text immediately (or retains its bounded pending event).
+	// Only non-streaming aggregation needs another copy of the full body.
+	if s.aggregateOnly {
+		s.text.buf.WriteString(ct)
+		return out
+	}
+	return s.appendTextDelta(out, s.text.index, ct)
 }
 
 func (s *anthropicStreamState) appendToolCall(tc map[string]any) []byte {
