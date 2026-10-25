@@ -34,6 +34,10 @@ func isolatedGatewayConfig(t *testing.T) {
 	authSwitchMu.Unlock()
 	oldCfg := cfg
 	oldServiceTimeouts := serviceTimeouts.Load()
+	oldFirstTokenTimeout := currentFirstTokenTimeout()
+	upstreamConfigMu.Lock()
+	firstTokenTimeout = firstTokenTimeoutDefault
+	upstreamConfigMu.Unlock()
 	oldOutput, oldRetries := retainedOutputs, upstreamRetries
 	retainedOutputs = newOutputAdmission()
 	retainedOutputs.sample = func() memorySample { return memorySample{} }
@@ -60,6 +64,9 @@ func isolatedGatewayConfig(t *testing.T) {
 	}
 	closeLog := initFileLogging("gateway-config-test")
 	t.Cleanup(func() {
+		upstreamConfigMu.Lock()
+		firstTokenTimeout = oldFirstTokenTimeout
+		upstreamConfigMu.Unlock()
 		retainedOutputs, upstreamRetries = oldOutput, oldRetries
 		logBudgetConfig.Store(oldLogBudget)
 		serviceTimeouts.Store(oldServiceTimeouts)

@@ -231,7 +231,7 @@ func TestResponsesWriteFailureClosesBeforeNextUpstreamRead(t *testing.T) {
 		allow int
 	}{
 		{name: "envelope"},
-		{name: "delta", first: `data: {"choices":[{"delta":{"content":"answer"}}]}` + "\n", allow: 4},
+		{name: "delta", first: `data: {"choices":[{"delta":{"content":"answer"}}]}` + "\n\n", allow: 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previousMode := fastPathMode.Load()

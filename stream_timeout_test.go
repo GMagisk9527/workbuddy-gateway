@@ -392,7 +392,7 @@ func TestAggregateCompletionWithoutFinishReasonIsNotSuccess(t *testing.T) {
 	sse := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"partial"},"finish_reason":""}]}`,
 		`data: [DONE]`,
-	}, "\n")
+	}, "\n\n") + "\n\n"
 	_, err := aggregateCompletion(strings.NewReader(sse), "m")
 	if !errors.Is(err, errStreamClosedWithoutFinish) {
 		t.Fatalf("没有 finish_reason 的聚合应失败，实际: %v", err)

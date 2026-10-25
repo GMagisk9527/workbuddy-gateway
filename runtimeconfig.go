@@ -51,6 +51,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if _, err := normalizeRetry(c.Retry); err != nil {
 		return c, err
 	}
+	if _, err := normalizeFirstTokenTimeout(c.Upstream.FirstTokenTimeoutSeconds); err != nil {
+		return c, err
+	}
 	if _, err := normalizeLogBudget(c.Logs); err != nil {
 		return c, err
 	}
@@ -179,6 +182,10 @@ func loadRuntimeConfig(path string) error {
 
 // 调用前已完整校验。热加载不修改监听端口，不中断正在输出的流。
 func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
+	firstTokenWait, err := normalizeFirstTokenTimeout(c.Upstream.FirstTokenTimeoutSeconds)
+	if err != nil {
+		return err
+	}
 	timeouts, err := normalizeServiceTimeouts(c.Downstream, c.Server)
 	if err != nil {
 		return err
@@ -263,6 +270,7 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	upstreamHeaderTimeout, upstreamIdleTimeout, upstreamTransientRetries = header, idle, retries
 	streamKeepalive = keepalive
 	enableFirstByteRetry = firstByteRetry
+	firstTokenTimeout = firstTokenWait
 	upstreamConfigMu.Unlock()
 	serviceTimeouts.Store(&timeouts)
 	retainedOutputs.configure(c.Output)
@@ -270,8 +278,8 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	logLimits, _ := normalizeLogBudget(c.Logs)
 	logBudgetConfig.Store(&logLimits)
 	if hot {
-		log.Printf("[配置热加载] traceId=%s 结果=成功 模型黑名单=%d 模型白名单=%d 账号规则=%d 调试日志=%t 日志保留天数=%d 响应头超时=%v 流空闲超时=%v 重试次数=%d 流心跳=%v 首字节重放=%t 说明=后续请求使用新配置，凭据及历史账本保留，端口变更需重启",
-			trace, len(c.Models.Blocklist), len(c.Models.Allowlist), len(c.Models.Accounts), c.Debug.Enabled, c.Logs.RetentionDays, header, idle, retries, keepalive, firstByteRetry)
+		log.Printf("[配置热加载] traceId=%s 结果=成功 模型黑名单=%d 模型白名单=%d 账号规则=%d 调试日志=%t 日志保留天数=%d 响应头超时=%v 流空闲超时=%v 重试次数=%d 流心跳=%v 首字节重放=%t 首增量期限=%v 说明=后续请求使用新配置，凭据及历史账本保留，端口变更需重启",
+			trace, len(c.Models.Blocklist), len(c.Models.Allowlist), len(c.Models.Accounts), c.Debug.Enabled, c.Logs.RetentionDays, header, idle, retries, keepalive, firstByteRetry, firstTokenWait)
 	}
 	return nil
 }

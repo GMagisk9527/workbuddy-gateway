@@ -499,6 +499,7 @@ workbuddy-gateway serve -models-refresh 0
 | TLS 握手 | 最多 10 秒，独立于响应头和流空闲超时，避免对端接通 TCP 后一直不完成握手 |
 | 等待响应头 | 请求发送完成后，`ResponseHeaderTimeout` 默认 300 秒。上游对大请求排队与预处理可能较慢；这项超时不覆盖建连与 TLS 握手 |
 | 流式响应体 | 空闲读超时默认 120 秒：持续有数据就永不超时，只有 120 秒无任何新数据才判定卡死并中断 |
+| 首个有效增量 | 首次上游成功响应头后默认最多等待 300 秒，心跳/角色/usage 不续期；收到有效增量即停止此期限，重放不重新计时。`firstTokenTimeoutSeconds: 0` 可关闭 |
 | HTTP 错误响应体 | 收到 HTTP 400 及以上状态后，读取错误正文的总时限固定为 10 秒，持续滴流也不延长；首次调用及首字节重放都生效。原有正文大小上限保留 |
 | 控制类短请求 | 令牌刷新 / 额度查询 / 模型目录等 60 秒超时 |
 | 服务端写响应 | 不设总时长上限（原 300 秒），长流不会被服务端截断 |
@@ -515,6 +516,7 @@ workbuddy-gateway serve -models-refresh 0
     "requestProfile": "official",
     "headerTimeoutSeconds": 300,
     "idleTimeoutSeconds": 120,
+    "firstTokenTimeoutSeconds": 300,
     "transientRetries": 2,
     "streamKeepaliveSeconds": 15,
     "enableFirstByteRetry": true
@@ -530,7 +532,7 @@ workbuddy-gateway serve -models-refresh 0
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| SSE 心跳 | 15 秒 | `upstream.streamKeepaliveSeconds` 可覆盖；省略或非正数使用默认值。等待首个有效 data 期间发送 `: keepalive` 注释，首个有效 data 后停止 |
+| SSE 心跳 | 15 秒 | `upstream.streamKeepaliveSeconds` 可覆盖；省略或非正数使用默认值。整条流的静默期间补发 `: keepalive` 注释，正常写入会延后心跳，终态前停止 |
 | 首字节前重放 | 开启 | `upstream.enableFirstByteRetry` 可显式设为 `false` 关闭。仅在客户端未收到任何有效 data、错误属于瞬时网络故障或上游空闲超时、且重放预算未用尽时重发一次 |
 | 重放上限 | 1 次 | 已下发任何有效 data、客户端主动取消、扫描器错误或非网络错误一律不重放 |
 
@@ -541,6 +543,9 @@ Chat 在协议层重放并按账号池重新选号；Messages 和 Responses 在�
 心跳是标准 SSE 注释，不会产生伪 token。重放可能额外消耗一次上游额度，但不会向客户端
 重复输出已生成的内容。重放与心跳都会写入现有 TraceID 日志；重放失败时沿用已建立的
 SSE 响应，以流内错误事件结束，不伪造 `[DONE]`。
+
+首增量期限的默认行为、热加载快照及 SSE 多行/BOM/事件大小边界见
+[SSE 稳定性说明](sse-liveness.md)。旧配置省略新期限字段也会启用默认 300 秒。
 
 重放的两次上游调用分别结算：第一次拿不到 usage，按未知用量计入；第二次按实测 usage
 计入。若第二次被上游拒绝或连接失败，按实际状态记录，不计为未知消费。

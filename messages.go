@@ -41,6 +41,9 @@ func withAnthropicErrFormat(ctx context.Context) context.Context {
 // writeUpstreamError 是 upstreamChat / 鉴权中间件的统一错误出口：
 // 请求来自 /v1/messages 时回 Anthropic 形状，否则回 OpenAI 形状。
 func writeUpstreamError(w http.ResponseWriter, r *http.Request, statusCode int, errType, message string) {
+	if firstTokenFor(r).err() != nil {
+		statusCode, errType, message = http.StatusGatewayTimeout, "upstream_first_token_timeout", errFirstTokenTimeout.Error()
+	}
 	// 鉴权发生在 handler 之前，此时还没有协议标记；精确匹配两个
 	// Anthropic 路由，避免错误响应退回 OpenAI 形状或误伤其他接口。
 	if r.Context().Value(anthropicErrFmtKey{}) == true ||
@@ -1212,6 +1215,7 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		recordModelLatency(modelName, time.Since(startTime))
 	}()
 	scanErr := scanUpstreamSSE(body, state, writeEvent)
+	session.heartbeat.Stop()
 	if writeFailed || guard.err() != nil {
 		writeFailed = true
 		log.Printf("[#%d] 下游写入失败，已终止 Messages 流 (账号 %s)", reqID, acc.Path)
@@ -1238,6 +1242,9 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", currentIdleTimeout())
+		}
+		if errors.Is(scanErr, errFirstTokenTimeout) {
+			reason, code = errFirstTokenTimeout.Error(), "upstream_first_token_timeout"
 		}
 		writeEvent(state.emit("error", map[string]any{
 			"error": map[string]any{"type": "api_error", "code": code, "message": reason},
@@ -1300,6 +1307,9 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 	}()
 	if err := scanUpstreamSSE(body, state, nil); err != nil {
 		_ = resp.Body.Close()
+		if writeFirstTokenTimeout(w, r, err) {
+			return
+		}
 		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
 			businessRejection = true
 			return
