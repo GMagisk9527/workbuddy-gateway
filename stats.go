@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net/http"
 	"os"
@@ -42,6 +43,9 @@ type statsAccount struct {
 	ModelStates map[string]modelStateSnapshot `json:"modelStates,omitempty"`
 }
 
+// Published rows and their optional scalar values are immutable. Writers only
+// append rows, slice off old prefixes, or replace the whole document. Readers
+// may therefore pin a bounded history without copying every row under the lock.
 type statsRequest struct {
 	Account      string   `json:"account"`
 	Model        string   `json:"model"`
@@ -80,6 +84,20 @@ var requestStats = struct {
 }{document: statsDocument{Schema: statsSchema, Accounts: map[string]statsAccount{}, Requests: []statsRequest{}}, mode: "pending"}
 
 var statsWriteMu sync.Mutex
+
+// Caller holds requestStats. Clone mutable account maps; share immutable rows
+// with append capacity removed. A flush pins at most one history because it is
+// serialized by statsWriteMu. Pruning must never overwrite published row data.
+func snapshotStatsDocumentLocked() statsDocument {
+	doc := requestStats.document
+	doc.Accounts = maps.Clone(doc.Accounts)
+	for id, account := range doc.Accounts {
+		account.ModelStates = maps.Clone(account.ModelStates)
+		doc.Accounts[id] = account
+	}
+	doc.Requests = doc.Requests[:len(doc.Requests):len(doc.Requests)]
+	return doc
+}
 
 // 调用方持有 accountMu。摘要不含 Token，续期不改变归属，企业/站点切换改变归属。
 func statsAccountIDLocked(acc *Account) (string, statsAccount) {
@@ -249,6 +267,10 @@ func validStatsDocument(doc statsDocument) bool {
 }
 
 func flushOptionalStats() error {
+	return flushOptionalStatsWithEncoder(func(doc statsDocument) ([]byte, error) { return json.Marshal(doc) })
+}
+
+func flushOptionalStatsWithEncoder(encode func(statsDocument) ([]byte, error)) error {
 	statsWriteMu.Lock()
 	defer statsWriteMu.Unlock()
 	accountMu.Lock()
@@ -260,8 +282,9 @@ func flushOptionalStats() error {
 		return nil
 	}
 	revision := requestStats.revision
-	raw, err := json.Marshal(requestStats.document)
+	doc := snapshotStatsDocumentLocked()
 	requestStats.Unlock()
+	raw, err := encode(doc)
 	if err == nil && len(raw) > statsMaxFileBytes {
 		err = errors.New("统计文件达到安全大小上限")
 	}
