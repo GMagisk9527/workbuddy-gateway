@@ -76,6 +76,8 @@ type runtimeFileConfig struct {
 	Concurrent concurrentFileConfig  `json:"concurrent"`
 	Admission  admissionFileConfig   `json:"admission"`
 	Scheduling schedulingFileConfig  `json:"scheduling"`
+	Downstream downstreamFileConfig  `json:"downstream"`
+	Server     serverFileConfig      `json:"server"`
 	Debug      struct {
 		Enabled bool `json:"enabled"`
 	} `json:"debug"`

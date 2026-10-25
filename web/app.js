@@ -147,6 +147,9 @@
     $("performanceInfo").textContent = "登录后读取链路性能。";
     $("performanceSummary").textContent = "";
     $("performanceTable").querySelector("tbody").innerHTML = "";
+    $("performanceLiveSummary").textContent = "";
+    $("performanceRuntime").textContent = "";
+    $("performanceLiveTable").querySelector("tbody").innerHTML = "";
     hideAllStatsChartHover();
     statsChartControllers = [];
     ["usageSummary", "usageChart", "latencyChart", "statsInfo", "statsRange"].forEach(function (id) {
@@ -860,8 +863,23 @@
     if (!selected) {
       $("performanceTable").querySelector("tbody").innerHTML = '<tr><td colspan="6" class="empty">暂无该协议指标</td></tr>';
       $("performanceSummary").textContent = "";
+      $("performanceLiveSummary").textContent = "";
+      $("performanceRuntime").textContent = "";
+      $("performanceLiveTable").querySelector("tbody").innerHTML = "";
       return;
     }
+    var live = selected.inFlight;
+    $("performanceLiveSummary").textContent = live ? "进行中 " + count(live.active) + " · 活跃流 " + count(live.activeStreams) +
+      " · 等待首增量 " + count(live.waitingFirstToken) + " · 写入中 " + count(live.writingDownstream) +
+      " · 最久请求 " + performanceTime(live.oldestRequestMs) + " · 最久写入 " + performanceTime(live.longestWriteMs) : "当前服务未提供在途指标。";
+    $("performanceLiveTable").querySelector("tbody").innerHTML = live && Array.isArray(live.stages) ? live.stages.map(function (stage) {
+      return "<tr><td>" + esc(stage.label || stage.name) + "</td><td>" + esc(count(stage.requests)) + "</td><td>" + esc(performanceTime(stage.longestMs)) + "</td></tr>";
+    }).join("") : '<tr><td colspan="3" class="empty">暂无在途指标</td></tr>';
+    var rt = data.runtime;
+    $("performanceRuntime").textContent = rt ? "全局准入 " + count(rt.admissionActive) + "/" + count(rt.admissionLimit) +
+      " · 排队 " + count(rt.admissionWaiting) + "/" + count(rt.admissionQueueLimit) +
+      " · 输入预算 " + count(rt.bodyBytes) + "/" + count(rt.bodyBudget) + " 字节 · 内存压力 " + (rt.memoryPressure ? "是" : "否") +
+      " · 停机排空 " + (rt.draining ? "是" : "否") : "";
     $("performanceSummary").textContent = "已结束请求 " + count(selected.requests) + " · 失败 " + count(selected.failed) +
       " · 取消 " + count(selected.canceled) + " · 流不完整 " + count(selected.incompleteStreams) +
       " · 下游写入错误 " + count(selected.downstreamErrors) + " · 上游尝试 " + count(selected.upstreamAttempts) +

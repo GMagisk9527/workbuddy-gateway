@@ -432,6 +432,7 @@ func statsFinishAttempt(r *http.Request, status int) {
 		return
 	}
 	performanceStartedAt := performanceStarted(r)
+	performanceFor(r).setLivePhase(liveSettlement)
 	defer func() { recordPerformance(r, phaseSettlement, performanceStartedAt, false) }()
 	cachedTokens, cacheSource, hasCached := statsCachedValue(p.usage)
 	var cachedPtr *int64

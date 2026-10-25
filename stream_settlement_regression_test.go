@@ -26,6 +26,70 @@ func (w *settlementFailWriter) Write(p []byte) (int, error) {
 	return w.ResponseRecorder.Write(p)
 }
 
+type settlementFlushFailWriter struct {
+	*httptest.ResponseRecorder
+	flushes, successfulFlushes int
+}
+
+func (w *settlementFlushFailWriter) FlushError() error {
+	w.flushes++
+	if w.flushes > w.successfulFlushes {
+		return io.ErrClosedPipe
+	}
+	w.ResponseRecorder.Flush()
+	return nil
+}
+
+func TestStreamFlushFailurePreservesUsageAcrossProtocols(t *testing.T) {
+	for _, mode := range []fastPathModeT{fastPathOff, fastPathOn} {
+		for _, protocol := range []string{"chat", "responses", "messages"} {
+			t.Run(map[fastPathModeT]string{fastPathOff: "slow", fastPathOn: "fast"}[mode]+"/"+protocol, func(t *testing.T) {
+				oldMode := fastPathMode.Load()
+				fastPathMode.Store(int32(mode))
+				t.Cleanup(func() { fastPathMode.Store(oldMode) })
+				dir := resetKeyWorld(t)
+				s := isolatedPerformance(t)
+				if err := ledgerLoad(dir); err != nil {
+					t.Fatal(err)
+				}
+				plain, key := mustCreateKey(t, keyCreateOptions{Name: "flush-failure", QuotaTotal: 10})
+				body := &trackingBody{r: strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":3}}\n\ndata: [DONE]\n\n")}
+				complete := true
+				h := requestAuditMiddleware(authMiddleware(keyAdmissionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					start := time.Now()
+					*statsAttemptFor(r) = statsAttempt{id: "synthetic-account", attemptID: "flush-failure", model: "synthetic", started: start}
+					resp := &http.Response{StatusCode: 200, Body: body}
+					acc := &Account{Path: "synthetic.json"}
+					switch protocol {
+					case "chat":
+						streamChatResponse(w, r, resp, "synthetic", 1, acc, &profileCN, start)
+					case "responses":
+						streamResponsesResponse(w, r, resp, "synthetic", 1, acc, &profileCN, start)
+					case "messages":
+						streamMessagesResponse(w, r, resp, "synthetic", 1, acc, &profileCN, start, false)
+					}
+					complete = statsAttemptFor(r).complete
+				}))))
+				route := map[string]string{"chat": "/v1/chat/completions", "responses": "/v1/responses", "messages": "/v1/messages"}[protocol]
+				r := httptest.NewRequest("POST", route, nil)
+				r.Header.Set("Authorization", "Bearer "+plain)
+				writer := &settlementFlushFailWriter{ResponseRecorder: httptest.NewRecorder()}
+				if protocol == "responses" {
+					writer.successfulFlushes = 2
+				}
+				h.ServeHTTP(writer, r)
+				key.mu.Lock()
+				usage := key.usage
+				key.mu.Unlock()
+				metrics := s.snapshot(time.Now()).Protocols[0]
+				if usage.Total != 3 || usage.Requests != 1 || usage.Unknown != 0 || complete || !body.closed || metrics.DownstreamErrors != 1 || metrics.Failed != 1 {
+					t.Fatalf("flush failure lost usage/status/cleanup: usage=%+v complete=%t closed=%t counters=%+v", usage, complete, body.closed, metrics.performanceCounters)
+				}
+			})
+		}
+	}
+}
+
 func TestStreamWriteFailurePreservesParsedCredit(t *testing.T) {
 	for _, mode := range []fastPathModeT{fastPathOff, fastPathOn} {
 		for _, protocol := range []string{"chat", "responses", "messages"} {

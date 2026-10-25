@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -32,18 +33,22 @@ func newAPIHandler() http.Handler {
 }
 
 func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {
+	return prepareGatewayServersWithLifecycle(newGatewayLifecycle())
+}
+
+func prepareGatewayServersWithLifecycle(life *gatewayLifecycle) ([]*http.Server, []net.Listener, error) {
 	if err := webUIPreflightError(); err != nil {
 		return nil, nil, err
 	}
 	servers := []*http.Server{{
-		Addr: net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)), Handler: newAPIHandler(),
+		Addr: net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)), Handler: life.handler(newAPIHandler()),
 		ReadTimeout: 120 * time.Second,
 		// 保留模型流无总写入时限，不把管理端限制扩散到模型 API。
 		WriteTimeout: 0,
 	}}
 	if cfg.WebUI {
 		servers = append(servers, &http.Server{
-			Addr: net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.WebPort)), Handler: newWebUIHandler(),
+			Addr: net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.WebPort)), Handler: life.handler(newWebUIHandler()),
 			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 		})
@@ -51,6 +56,7 @@ func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {
 	trace := newTraceID()
 	var listeners []net.Listener
 	for i, server := range servers {
+		server.BaseContext = func(net.Listener) context.Context { return life.ctx }
 		listener, err := net.Listen("tcp", server.Addr)
 		if err != nil {
 			for _, opened := range listeners {

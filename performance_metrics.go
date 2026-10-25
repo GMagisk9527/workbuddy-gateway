@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -67,6 +68,12 @@ type requestPerformance struct {
 	streamSeen, streamComplete, downstreamFailed bool
 	cells                                        [performancePhaseCount]performanceCell
 	counters                                     performanceCounters
+	live                                         *livePerformance
+	livePrev, liveNext                           *requestPerformance
+	liveRegistered, liveStream, liveFirstToken   bool
+	livePhase                                    livePhase
+	liveSince                                    time.Time
+	liveWriteSince                               atomic.Int64
 }
 
 type requestPerformanceKey struct{}
@@ -92,6 +99,7 @@ func withRequestPerformance(r *http.Request, start time.Time) (*http.Request, *r
 		return r, nil
 	}
 	p := &requestPerformance{protocol: protocol, start: start}
+	phaseMetrics.live.begin(p)
 	return r.WithContext(context.WithValue(r.Context(), requestPerformanceKey{}, p)), p
 }
 
@@ -132,6 +140,9 @@ func (p *requestPerformance) observe(phase performancePhase, duration time.Durat
 	}
 	c.duration += duration
 	c.seen, c.failed = true, c.failed || failed
+	if phase == phaseFirstToken {
+		p.firstLiveToken()
+	}
 }
 
 func (p *requestPerformance) beginPrepare() {
@@ -280,6 +291,7 @@ type performanceStore struct {
 	mu      sync.Mutex
 	started time.Time
 	minutes [performanceWindowMinutes]performanceMinute
+	live    livePerformance
 }
 
 var phaseMetrics = &performanceStore{started: time.Now()}
@@ -318,6 +330,7 @@ func (p *requestPerformance) finish(store *performanceStore, status int, cancele
 	}
 	counters, cells, protocol := p.counters, p.cells, p.protocol
 	p.mu.Unlock()
+	p.finishLive()
 	minute := now.Unix() / 60
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -350,6 +363,7 @@ type performanceProtocolSnapshot struct {
 	performanceCounters
 	ReuseRate *float64                   `json:"connectionReuseRate"`
 	Phases    []performancePhaseSnapshot `json:"phases"`
+	InFlight  liveProtocolSnapshot       `json:"inFlight"`
 }
 
 type performanceSnapshot struct {
@@ -360,6 +374,7 @@ type performanceSnapshot struct {
 }
 
 func (s *performanceStore) snapshot(now time.Time) performanceSnapshot {
+	live := s.live.snapshot(now)
 	minute := now.Unix() / 60
 	var merged [len(performanceProtocols) + 1]performanceAggregate
 	s.mu.Lock()
@@ -381,6 +396,7 @@ func (s *performanceStore) snapshot(now time.Time) performanceSnapshot {
 			name = performanceProtocols[i-1]
 		}
 		p := performanceProtocolSnapshot{Protocol: name, performanceCounters: a.counters}
+		p.InFlight = live[i]
 		if a.counters.Connections > 0 {
 			v := float64(a.counters.ReusedConnections) / float64(a.counters.Connections)
 			p.ReuseRate = &v
@@ -403,7 +419,10 @@ func handleWebUIPerformance(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "性能指标只支持 GET")
 		return
 	}
-	writeAdminData(w, r, phaseMetrics.snapshot(time.Now()))
+	writeAdminData(w, r, struct {
+		performanceSnapshot
+		Runtime liveRuntimeSnapshot `json:"runtime"`
+	}{phaseMetrics.snapshot(time.Now()), snapshotLiveRuntime(r)})
 }
 
 func (p *requestPerformance) debugFields() map[string]any {

@@ -32,6 +32,13 @@
   "debug": {
     "enabled": false
   },
+  "downstream": {
+    "writeTimeoutSeconds": 30
+  },
+  "server": {
+    "shutdownGraceSeconds": 120,
+    "shutdownCleanupSeconds": 15
+  },
   "logs": {
     "retentionDays": 0
   },

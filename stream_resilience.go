@@ -49,11 +49,17 @@ func (g *streamWriteGuard) write(frame []byte, data, heartbeat bool) error {
 	if err == nil && n != len(frame) {
 		err = io.ErrShortWrite
 	}
+	if err == nil {
+		if f, ok := g.w.(interface{ FlushError() error }); ok {
+			err = f.FlushError()
+		} else {
+			g.flusher.Flush()
+		}
+	}
 	var closeBody io.Closer
 	if err != nil {
 		g.writeErr, closeBody = err, g.body
 	} else {
-		g.flusher.Flush()
 		g.dataSeen = g.dataSeen || data
 	}
 	g.mu.Unlock()

@@ -33,6 +33,8 @@ func isolatedGatewayConfig(t *testing.T) {
 	authSwitchOn = false
 	authSwitchMu.Unlock()
 	oldCfg := cfg
+	oldServiceTimeouts := serviceTimeouts.Load()
+	serviceTimeouts.Store(nil)
 	gatewayConfigMu.Lock()
 	oldSettings := gatewaySettings
 	gatewayConfigMu.Unlock()
@@ -52,6 +54,7 @@ func isolatedGatewayConfig(t *testing.T) {
 	}
 	closeLog := initFileLogging("gateway-config-test")
 	t.Cleanup(func() {
+		serviceTimeouts.Store(oldServiceTimeouts)
 		closeLog()
 		log.SetOutput(oldWriter)
 		gatewayConfigMu.Lock()

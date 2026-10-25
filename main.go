@@ -172,6 +172,7 @@ var legacyLargeBodyWarned atomic.Bool
 //
 // 返回的 cancel 用于在流式读取结束后取消上游 context（调用方负责）。
 func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, upstreamBytes []byte, reqID uint64, traceID string) (*http.Response, context.CancelFunc, error) {
+	performanceFor(r).setLivePhase(liveFirstToken)
 	// A consistent credential snapshot is shared by all retries of this request.
 	// Hot reload must not mix token fields across concurrent sends.
 	accountMu.Lock()
@@ -3365,8 +3366,10 @@ func runLogin() {
 // -----------------------------------------------------------------------------
 
 func runServe() {
+	life := newGatewayLifecycle()
+	defer life.cancel()
 	// 先绑定全部所需端口；任一失败就释放已经绑定的端口，不启动半套服务。
-	servers, listeners, err := prepareGatewayServers()
+	servers, listeners, err := prepareGatewayServersWithLifecycle(life)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
@@ -3557,19 +3560,15 @@ func runServe() {
 		log.Printf("[服务异常] traceId=%s 原因=%v 说明=同时关闭API与管理监听，避免半可用状态", newTraceID(), err)
 	}
 	fmt.Println("\n正在关闭网关服务...")
+	life.beginDrain()
+	stopConfigReload()
 	stopCheckin() // Stop scheduled writes before draining the HTTP listeners.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var shutdown sync.WaitGroup
-	for _, server := range servers {
-		shutdown.Go(func() {
-			if err := server.Shutdown(ctx); err != nil {
-				_ = server.Close()
-			}
-		})
+	timeouts := currentServiceTimeouts()
+	if err := shutdownGatewayServers(servers, life, timeouts.grace, timeouts.cleanup); err != nil {
+		log.Printf("[停机] 结果=未确认清理完成 原因=%v", err)
+	} else {
+		fmt.Println("网关在途请求已退出，正在完成统计落盘。")
 	}
-	shutdown.Wait()
-	fmt.Println("网关已安全停止。")
 }
 
 func printAPIAuthBanner(w io.Writer) {
@@ -3608,8 +3607,10 @@ func backgroundTokenRefresher() {
 
 type auditResponseWriter struct {
 	http.ResponseWriter
-	status      int
-	performance *requestPerformance
+	status       int
+	performance  *requestPerformance
+	writeTimeout time.Duration
+	cancel       context.CancelFunc
 }
 
 func (w *auditResponseWriter) WriteHeader(status int) {
@@ -3617,34 +3618,67 @@ func (w *auditResponseWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-func (w *auditResponseWriter) Write(data []byte) (int, error) {
+func (w *auditResponseWriter) Write(data []byte) (n int, err error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	if w.performance == nil {
+	if w.performance == nil && w.writeTimeout <= 0 && w.cancel == nil {
 		return w.ResponseWriter.Write(data)
 	}
 	started := time.Now()
-	n, err := w.ResponseWriter.Write(data)
-	w.performance.observe(phaseDownstream, time.Since(started), err != nil || n != len(data))
-	if err != nil || n != len(data) {
-		w.performance.downstreamError()
+	w.performance.beginLiveWrite(started)
+	defer w.finishDownstreamWrite(started, &err)
+	if err = w.setDownstreamDeadline(started.Add(w.writeTimeout)); err != nil {
+		return 0, err
+	}
+	n, err = w.ResponseWriter.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
 	}
 	return n, err
 }
 
-func (w *auditResponseWriter) Flush() {
+func (w *auditResponseWriter) Flush() { _ = w.FlushError() }
+
+func (w *auditResponseWriter) FlushError() (err error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		var started time.Time
-		if w.performance != nil {
-			started = time.Now()
-		}
-		flusher.Flush()
-		if w.performance != nil {
-			w.performance.observe(phaseDownstream, time.Since(started), false)
+	if w.performance == nil && w.writeTimeout <= 0 && w.cancel == nil {
+		return http.NewResponseController(w.ResponseWriter).Flush()
+	}
+	started := time.Now()
+	w.performance.beginLiveWrite(started)
+	defer w.finishDownstreamWrite(started, &err)
+	if err = w.setDownstreamDeadline(started.Add(w.writeTimeout)); err != nil {
+		return err
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *auditResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *auditResponseWriter) setDownstreamDeadline(deadline time.Time) error {
+	if w.writeTimeout <= 0 {
+		return nil
+	}
+	err := http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func (w *auditResponseWriter) finishDownstreamWrite(started time.Time, writeErr *error) {
+	if err := w.setDownstreamDeadline(time.Time{}); *writeErr == nil && err != nil {
+		*writeErr = err
+	}
+	w.performance.endLiveWrite()
+	w.performance.observe(phaseDownstream, time.Since(started), *writeErr != nil)
+	if *writeErr != nil {
+		w.performance.downstreamError()
+		if w.cancel != nil {
+			w.cancel()
 		}
 	}
 }
@@ -3660,6 +3694,15 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 		// 普通落盘审计也需要稳定的 TraceID / requestID；不能依赖可选 JSON 日志。
 		ensureDebugRequestContext(r, traceID, start)
 		r, performance := withRequestPerformance(r, start)
+		var writeTimeout time.Duration
+		var downstreamCancel context.CancelFunc
+		if performance != nil {
+			var ctx context.Context
+			ctx, downstreamCancel = context.WithCancel(r.Context())
+			defer downstreamCancel()
+			r = r.WithContext(ctx)
+			writeTimeout = currentServiceTimeouts().write
+		}
 		r = r.WithContext(context.WithValue(r.Context(), statsRequestContextKey{}, &statsAttempt{}))
 		// 鉴权层通过这个持有者回填身份，外层结算才能读到（否则成功请求不入账）。
 		r = r.WithContext(context.WithValue(r.Context(), keyIdentityHolderKey{}, &keyIdentityHolder{}))
@@ -3668,7 +3711,7 @@ func requestAuditMiddleware(next http.Handler) http.Handler {
 				"message": "请求已进入网关，准备执行中间件与路由处理",
 			})
 		}
-		aw := &auditResponseWriter{ResponseWriter: w, performance: performance}
+		aw := &auditResponseWriter{ResponseWriter: w, performance: performance, writeTimeout: writeTimeout, cancel: downstreamCancel}
 		performanceFinished := false
 		defer func() {
 			if performance != nil && !performanceFinished {
@@ -3836,6 +3879,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 	affKey := affinityKeyFor(r, modelName, upstreamBytes)
 	preferPath := affinityLookup(affKey)
 	for attempt := 0; attempt < poolSize; attempt++ {
+		performanceFor(r).setLivePhase(liveAccount)
 		accountStarted := performanceStarted(r)
 		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID)
 		recordPerformance(r, phaseAccount, accountStarted, err != nil)
@@ -3908,6 +3952,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 			log.Printf("[ModelProbe] requestId=%d 账号 %s 付费余额已耗尽，但模型 %s 收费属性未知；执行一次受控探测，5分钟内不重复探测", reqID, acc.Path, modelName)
 		}
 		credentialStarted := performanceStarted(r)
+		performanceFor(r).setLivePhase(liveCredential)
 		credentialErr := lockModelAccountWithContext(r.Context(), acc)
 		recordPerformance(r, phaseCredential, credentialStarted, credentialErr != nil)
 		if err := credentialErr; err != nil {
@@ -3964,6 +4009,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				defer releaseSlot()
 				defer acc.lock.RUnlock()
 				statsFinishAttempt(r, resp.StatusCode)
+				performanceFor(r).setLivePhase(liveResponding)
 				// 错误体只用于分类和提示；限制上限，避免异常上游把整段大响应读进内存。
 				readStarted := performanceStarted(r)
 				errBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -4066,6 +4112,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		if firstByteReplayPath(r.URL.Path) && currentFirstByteRetry() {
 			streamBody = newFirstByteReplayBody(streamBody, r.Context(), r, reqID, modelName, 1, func(replayCtx context.Context) (*http.Response, error) {
 				credentialStarted := performanceStarted(r)
+				performanceFor(r).setLivePhase(liveCredential)
 				credentialErr := lockModelAccountWithContext(replayCtx, acc)
 				recordPerformance(r, phaseCredential, credentialStarted, credentialErr != nil)
 				if err := credentialErr; err != nil {
