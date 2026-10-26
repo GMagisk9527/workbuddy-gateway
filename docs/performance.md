@@ -125,10 +125,28 @@ go test -run 'TestRedaction|TestMinimal(LogRedaction|RedactingWriter|DebugRedact
 go test -run '^$' -bench 'BenchmarkRedaction(Text|AdminStats)' -benchmem -benchtime=300ms -count=3
 ```
 
+## 上游 HTTP/2 连接复用
+
+网关到上游的 HTTPS Transport 即使使用自定义拨号和 TLS 配置，也会通过 ALPN 尝试
+HTTP/2；上游没有协商 HTTP/2 时仍使用 HTTP/1.1，明文 HTTP 沿用 HTTP/1.1。
+证书校验、代理、响应头超时及流式空闲超时保持原配置，不设置整条流的总超时。
+这与客户端到反向代理的 HTTP 版本分别协商，不要求客户端使用 HTTP/2。
+
+SSE 仍在 `[DONE]` 结束，不为复用连接等待上游 EOF。HTTP/2 可以只关闭已完成或取消的流，
+同一连接继续服务其他请求，减少后续请求重复建立 TCP/TLS 连接的机会。
+响应头超时热加载后的 Transport 克隆继续保留 HTTP/2 协商。
+合成本地 TLS 测试验证两次在 `[DONE]` 后关闭的 SSE 请求共用一条连接、并发流取消隔离、
+HTTP/1.1 回退，以及收到完整 POST 后中断时不重复发送。
+
+这项改进针对连接开销和延迟波动，不能推算真实首 token 延迟的下降比例，
+也不改变上游模型的生成 TPS。应结合相同负载下的连接复用率、连接获取耗时和
+首 token 分位数评估；现有累计写入耗时或 SSE chunk 数不能作为准确的模型 TPS。
+
 ## 验证命令
 
 ```sh
 go test -run 'TestLargeContext|TestDecodedRequestBody|TestReadModelRequestBody|TestConversionJSON' -count=1
+go test -run '^TestUpstreamHTTP(2|1Fallback)' -count=1
 go test -run '^$' -fuzz '^FuzzRequestJSONNumbersParity$' -fuzztime=10s -parallel=2
 go test -run '^$' -bench 'BenchmarkMessagesRequestConversion|BenchmarkConversionJSONString|BenchmarkRead(Decoded|Known)RequestBody' -benchmem -benchtime=300ms -count=3
 ```
