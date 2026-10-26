@@ -22,16 +22,24 @@ type dshMessageTextPart struct {
 }
 
 func dshMessageText(message map[string]any, anthropic bool) (string, []dshMessageTextPart) {
+	parts := dshMessageTextParts(message, anthropic)
+	return joinDSHMessageText(parts), parts
+}
+
+// Collect borrowed text and its offsets before allocating a Markdown parsing
+// view. Unmatched messages need no joined copy; matching messages still use all
+// parts, including earlier parts that open code spans or fences.
+func dshMessageTextParts(message map[string]any, anthropic bool) []dshMessageTextPart {
 	if text, ok := message["content"].(string); ok {
-		return text, []dshMessageTextPart{{container: message, key: "content", text: text}}
+		return []dshMessageTextPart{{container: message, key: "content", text: text}}
 	}
 	blocks, _ := message["content"].([]any)
-	separator := "\n"
+	separatorBytes := 1
 	if anthropic && roleOfMessage(message) == "assistant" {
 		// convertAnthropicBlocks joins assistant text verbatim; system adds newlines.
-		separator = ""
+		separatorBytes = 0
 	}
-	var joined strings.Builder
+	length := 0
 	var parts []dshMessageTextPart
 	for _, raw := range blocks {
 		block, _ := raw.(map[string]any)
@@ -43,12 +51,31 @@ func dshMessageText(message map[string]any, anthropic bool) (string, []dshMessag
 			continue
 		}
 		if len(parts) > 0 {
-			joined.WriteString(separator)
+			length += separatorBytes
 		}
-		parts = append(parts, dshMessageTextPart{container: block, key: "text", text: text, start: joined.Len()})
-		joined.WriteString(text)
+		parts = append(parts, dshMessageTextPart{container: block, key: "text", text: text, start: length})
+		length += len(text)
 	}
-	return joined.String(), parts
+	return parts
+}
+
+func joinDSHMessageText(parts []dshMessageTextPart) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0].text
+	}
+	var joined strings.Builder
+	last := parts[len(parts)-1]
+	joined.Grow(last.start + len(last.text))
+	for _, part := range parts {
+		if joined.Len() < part.start {
+			joined.WriteByte('\n')
+		}
+		joined.WriteString(part.text)
+	}
+	return joined.String()
 }
 
 func dshFenceDelimiter(line string) (byte, int, string) {
@@ -240,11 +267,19 @@ func normalizeDSHGUIContextsForProtocol(obj map[string]any, anthropic bool) int 
 		if !ok || (roleOfMessage(message) != "system" && roleOfMessage(message) != "assistant") {
 			continue
 		}
-		text, parts := dshMessageText(message, anthropic)
-		if !strings.Contains(text, dshGUIContextOpening) {
+		parts := dshMessageTextParts(message, anthropic)
+		candidate := false
+		for _, part := range parts {
+			// Replacement already requires a complete opening inside one part.
+			if strings.Contains(part.text, dshGUIContextOpening) {
+				candidate = true
+				break
+			}
+		}
+		if !candidate {
 			continue
 		}
-		code := dshMarkdownCodeRanges(text)
+		code := dshMarkdownCodeRanges(joinDSHMessageText(parts))
 		for _, part := range parts {
 			if normalized, n := normalizeDSHGUIContextPart(part.text, part.start, code); n > 0 {
 				part.container[part.key] = normalized

@@ -54,7 +54,7 @@ func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string,
 		if !ok || roleOfMessage(msg) != role {
 			continue
 		}
-		text, parts := dshMessageText(msg, anthropic)
+		parts := dshMessageTextParts(msg, anthropic)
 		candidate := false
 		for _, part := range parts {
 			if identityTextMayChange(part.text, settings, true) {
@@ -65,7 +65,7 @@ func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string,
 		if !candidate {
 			continue
 		}
-		code := dshMarkdownCodeRanges(text)
+		code := dshMarkdownCodeRanges(joinDSHMessageText(parts))
 		for _, part := range parts {
 			if rewritten, changed := normalizeIdentityText(part.text, code, part.start, true, settings); changed {
 				part.container[part.key] = rewritten

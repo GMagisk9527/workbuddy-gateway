@@ -155,6 +155,30 @@ system 和 assistant 兼容入口计时，未包含 JSON 解码、协议转换�
 
 复测：`go test -run '^$' -bench '^BenchmarkIdentityPreparation$' -benchmem -benchtime=300ms -count=3`。
 
+多文本块还需避免在候选检查之前拼接正文。现在先保留各块的原文引用和字节偏移，
+逐块检查候选；只有可能修改时才构造完整 Markdown 解析视图。单块直接借用原字符串，
+多块按最终长度一次分配。Messages 助手块无分隔拼接，其他块的换行分隔、空块处理、
+跨块代码范围、块元数据及原有 GUI/身份处理顺序均保持原样。规则只在完整块内匹配，
+不会因这次优化新增跨块词语替换。
+
+同日同机、Go 1.27.3，以 PR #35 的 `268f183` 为基线，300ms × 3 取中位数：
+
+| 默认规则、无候选内容的一轮完整兼容检查 | 耗时：前 → 后 | 累计分配：前 → 后 |
+|---|---|---|
+| 单个约 128 KiB 文本块 | 26.9 → 3.27µs | 262,240 → 96 B |
+| 16 个文本块，共约 2 MiB | 2.21 → 0.0483ms | 21,859,506 → 3,232 B |
+
+本轮只计 GUI、system 和 assistant 兼容入口，不包含 JSON 解码、协议转换、网络或模型
+推理。减少首 token 前的本地准备与临时分配；生产 TTFT 和低内存主机的 GC 抖动收益仍需
+实测，不由这些数据推算模型 TPS 或峰值 RSS。
+先以分配回归复现旧路径，再验证跨块代码与 force/fallback 回归；另用模糊测试比较
+延迟拼接与原先先拼接再处理的结果、修改计数及块元数据。
+
+```sh
+go test -run '^$' -bench '^BenchmarkPromptBlockPreparation$' -benchmem -benchtime=300ms -count=3
+go test -run '^$' -fuzz '^FuzzPromptBlockCompatibilityParity$' -fuzztime=15s -parallel=2
+```
+
 ## 日志与管理响应的脱敏匹配器
 
 固定的字段名规范化器（删除下划线/连字符后忽略大小写）跨调用复用。
