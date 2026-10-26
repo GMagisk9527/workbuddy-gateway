@@ -40,6 +40,10 @@ func normalizeDSHIdentityPrefixes(obj map[string]any, role string) int {
 
 // Markdown scope follows the whole message, including spans across text parts.
 func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string, anthropic bool) int {
+	settings := identitySnapshot()
+	if !settings.enabled {
+		return 0
+	}
 	messages, ok := obj["messages"].([]any)
 	if !ok {
 		return 0
@@ -51,9 +55,19 @@ func sanitizeMessageIdentityPrefixesForProtocol(obj map[string]any, role string,
 			continue
 		}
 		text, parts := dshMessageText(msg, anthropic)
+		candidate := false
+		for _, part := range parts {
+			if identityTextMayChange(part.text, settings, true) {
+				candidate = true
+				break
+			}
+		}
+		if !candidate {
+			continue
+		}
 		code := dshMarkdownCodeRanges(text)
 		for _, part := range parts {
-			if rewritten, changed := normalizeIdentityTextWithRanges(part.text, code, part.start); changed {
+			if rewritten, changed := normalizeIdentityText(part.text, code, part.start, true, settings); changed {
 				part.container[part.key] = rewritten
 				modified++
 			}

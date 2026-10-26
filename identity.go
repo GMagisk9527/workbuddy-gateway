@@ -24,6 +24,7 @@ type identitySettings struct {
 	enabled      bool
 	prefix       string
 	replacements []identityReplacement
+	replacer     *strings.Replacer
 }
 
 var (
@@ -79,9 +80,18 @@ func setIdentityConfig(c runtimeIdentityConfig) {
 		}
 		return replacements[i].Old < replacements[j].Old
 	})
+	var replacer *strings.Replacer
+	if enabled && len(replacements) > 0 {
+		pairs := make([]string, 0, len(replacements)*2)
+		for _, replacement := range replacements {
+			pairs = append(pairs, replacement.Old, replacement.New)
+		}
+		replacer = strings.NewReplacer(pairs...)
+		replacer.Replace("") // Build the immutable matcher before publishing it.
+	}
 	identityConfigMu.Lock()
 	currentIdentity = identitySettings{
-		enabled: enabled, prefix: "You are " + prefixTarget, replacements: replacements,
+		enabled: enabled, prefix: "You are " + prefixTarget, replacements: replacements, replacer: replacer,
 	}
 	identityConfigMu.Unlock()
 }
@@ -89,8 +99,8 @@ func setIdentityConfig(c runtimeIdentityConfig) {
 func identitySnapshot() identitySettings {
 	identityConfigMu.RLock()
 	snapshot := currentIdentity
-	snapshot.replacements = append([]identityReplacement(nil), currentIdentity.replacements...)
 	identityConfigMu.RUnlock()
+	// Settings and their replacement slice are immutable after publication.
 	return snapshot
 }
 
@@ -104,7 +114,11 @@ func identitySettingsSummary() (bool, string, int) {
 // display-name replacements. It is called only for system/developer/assistant
 // text; user/tool content is intentionally outside this function.
 func normalizeAssistantIdentityText(text string) (string, bool) {
-	return normalizeIdentityTextWithRanges(text, dshMarkdownCodeRanges(text), 0)
+	settings := identitySnapshot()
+	if !identityTextMayChange(text, settings, true) {
+		return text, false
+	}
+	return normalizeIdentityText(text, dshMarkdownCodeRanges(text), 0, true, settings)
 }
 
 // Offsets belong to the original, complete message, including other parts.
@@ -125,15 +139,44 @@ func identityPrefixReplacement(text string, settings identitySettings) (string, 
 }
 
 func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset int, allowPrefix bool) (string, bool) {
-	settings := identitySnapshot()
+	return normalizeIdentityText(text, code, offset, allowPrefix, identitySnapshot())
+}
+
+// This is only a candidate check. Matching text must still be parsed in its
+// complete Markdown context, including unchanged text parts before it.
+func identityTextMayChange(text string, settings identitySettings, allowPrefix bool) bool {
 	if !settings.enabled {
+		return false
+	}
+	// Bound the extra scans for large custom rule sets. The compiled matcher
+	// below handles those in one pass instead of scanning the text per rule.
+	if len(settings.replacements) > 8 {
+		return true
+	}
+	if allowPrefix {
+		if old, _ := identityPrefixReplacement(text, settings); old != "" {
+			return true
+		}
+	}
+	for _, replacement := range settings.replacements {
+		if replacement.Old != replacement.New && strings.Contains(text, replacement.Old) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s identitySettings) replace(text string) string {
+	if s.replacer == nil {
+		return text
+	}
+	return s.replacer.Replace(text)
+}
+
+func normalizeIdentityText(text string, code []dshTextRange, offset int, allowPrefix bool, settings identitySettings) (string, bool) {
+	if !identityTextMayChange(text, settings, allowPrefix) {
 		return text, false
 	}
-	var pairs []string
-	for _, replacement := range settings.replacements {
-		pairs = append(pairs, replacement.Old, replacement.New)
-	}
-	replacer := strings.NewReplacer(pairs...)
 	var out strings.Builder
 	pos := 0
 	oldPrefix, newPrefix := identityPrefixReplacement(text, settings)
@@ -156,11 +199,11 @@ func normalizeIdentityTextWithPrefix(text string, code []dshTextRange, offset in
 		if end <= start {
 			continue
 		}
-		out.WriteString(replacer.Replace(text[pos:start]))
+		out.WriteString(settings.replace(text[pos:start]))
 		out.WriteString(text[start:end])
 		pos = end
 	}
-	out.WriteString(replacer.Replace(text[pos:]))
+	out.WriteString(settings.replace(text[pos:]))
 	result := out.String()
 	return result, result != text
 }
