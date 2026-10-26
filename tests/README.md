@@ -27,6 +27,7 @@ go test -run 'TestAdmission|TestScheduling|TestCommonStream|TestGatewayControl' 
 go test -run '^TestMemory' -count=1
 go test -run '^TestPerformance' -count=1
 go test -run 'TestRedaction|TestMinimal(LogRedaction|RedactingWriter|DebugRedacts|RedactionConcurrent)' -count=1
+go test -run 'TestIdentity|TestAssistantIdentity|TestCCIdentity|TestDSH|TestConfiguredSystemPrompt|TestUnifiedDSH' -count=1
 go test -run 'TestLive|TestStreamFlushFailure|TestSlowDownstream|TestHTTP2WriteTimeout|TestDownstreamDeadline|TestGateway(Readiness|Shutdown|Forced)|TestServiceTimeout' -count=1
 go test -run 'TestLargeContext|TestDecodedRequestBody|TestReadModelRequestBody' -count=1
 go test -run 'TestUpstreamTLSHandshake|TestAggregate.*(Failure|Settlement|Rejection|MissingFinish)|TestMessages.*(MissingUsage|UnknownFailures)|TestChatMultiChoice' -count=1
