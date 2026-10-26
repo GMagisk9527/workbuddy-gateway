@@ -22,6 +22,7 @@
 go vet ./...
 go test ./...
 go test -run '^TestConfigEditor' -count=1
+go test -run 'TestGateway.*(HotSwitch|Port)|TestHotReload|TestUpstreamSync.*(HotSwitch|Shutdown)' -count=1
 go test -run 'TestAdmission|TestScheduling|TestCommonStream|TestGatewayControl' -count=1
 go test -run '^TestMemory' -count=1
 go test -run '^TestPerformance' -count=1

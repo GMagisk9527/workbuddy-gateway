@@ -17,7 +17,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 - 首次启动会在工作目录生成完整的默认 `config.json`；已有配置不会自动补写或改写。默认单账号模型并发 `4`，全局不限；修改 `concurrent.MaxAcc/MaxGlobal` 可热加载。可按需要设置管理 Key、API 鉴权和身份替换。
 - 请求体解码前默认准入 `2` 个请求、最多排队 `8` 个、等待 `15` 秒；账号选择默认感知负载，亲和账号繁忙时先等待 `250` 毫秒再按同等资格回退。`admission` 和 `scheduling` 均可热加载，详见使用手册。
 - **后台价格探测默认关闭**，只有显式传入 `-allow-price-probes` 才开启；主动生成请求可能消耗积分。
-- 网页配置页支持风险确认后的完整 JSON 编辑；监听端口修改需重启服务。
+- 网页配置页支持风险确认后的完整 JSON 编辑；API/Web 监听端口修改可热切换，已有连接与流继续完成。新端口被占用或配置无法应用时保留旧运行状态；显式 `-port` 仍优先于配置文件。
 - `config.json` 和账号凭据含敏感信息，已由 Git 忽略，不要公开分享。
 - 多 Harness 可使用 `upstream.requestProfile: "official"` 开启统一出站兼容；旧配置省略该项保持原行为。见[出站兼容说明](docs/outbound-compatibility.md)。
 
