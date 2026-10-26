@@ -30,6 +30,7 @@ go test -run 'TestRedaction|TestMinimal(LogRedaction|RedactingWriter|DebugRedact
 go test -run 'TestLive|TestStreamFlushFailure|TestSlowDownstream|TestHTTP2WriteTimeout|TestDownstreamDeadline|TestGateway(Readiness|Shutdown|Forced)|TestServiceTimeout' -count=1
 go test -run 'TestLargeContext|TestDecodedRequestBody|TestReadModelRequestBody' -count=1
 go test -run 'TestUpstreamTLSHandshake|TestAggregate.*(Failure|Settlement|Rejection|MissingFinish)|TestMessages.*(MissingUsage|UnknownFailures)|TestChatMultiChoice' -count=1
+go test -run '^TestUpstreamHTTP(2|1Fallback)' -count=1
 go test -run 'TestOfficial|TestRequestProfile|TestHarnessProtocol' -count=1
 go test -run 'TestMessages(ThinkingDisplay|ToolReference|ClaudeCodeCompleteShape|UpstreamRefusal)|TestResponses(Output|EncryptedReasoning|UnsupportedCapabilities)|TestProtocolReasoning' -count=1
 go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMarshalConverted|TestMessages.*(ToolIdentity|ConversionLimit|RequestLimit|ToolReference)|TestResponses.*ToolIdentity|TestPendingTool|TestInvalidToolIdentity' -count=1

@@ -852,6 +852,8 @@ func initHTTPClient() {
 		IdleConnTimeout:     90 * time.Second,
 		MaxIdleConnsPerHost: 10,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: false},
+		// 自定义拨号/TLS 配置仍尝试 ALPN 协商 HTTP/2，不支持时沿用 HTTP/1.1。
+		ForceAttemptHTTP2: true,
 		// 只约束到「收到响应头」为止；流式响应体的长时间传输由 upstreamIdleTimeout 的空闲看门狗保护。
 		ResponseHeaderTimeout: headerTimeout,
 	}
