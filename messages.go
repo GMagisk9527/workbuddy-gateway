@@ -539,24 +539,34 @@ func anthropicContentText(v any) string {
 	return ""
 }
 
-// anthropicImageURL 把 Anthropic image 块转为 data URL（base64 source）或原 URL。
-// 上游不支持的形态返回空串，调用方静默丢弃。
-func anthropicImageURL(blk map[string]any) string {
+// Return borrowed source strings without constructing a full data URL during
+// validation. An empty media type denotes a URL source; empty value is invalid.
+func anthropicImageSource(blk map[string]any) (mediaType, value string) {
 	src, _ := blk["source"].(map[string]any)
 	if src == nil {
-		return ""
+		return "", ""
 	}
 	switch strOf(src["type"]) {
 	case "base64":
 		media, data := strOf(src["media_type"]), strOf(src["data"])
 		if media == "" || data == "" {
-			return ""
+			return "", ""
 		}
-		return "data:" + media + ";base64," + data
+		return media, data
 	case "url":
-		return strOf(src["url"])
+		return "", strOf(src["url"])
 	}
-	return ""
+	return "", ""
+}
+
+// anthropicImageURL 把 Anthropic image 块转为 data URL（base64 source）或原 URL。
+// 上游不支持的形态返回空串，调用方静默丢弃。
+func anthropicImageURL(blk map[string]any) string {
+	media, value := anthropicImageSource(blk)
+	if media != "" {
+		return "data:" + media + ";base64," + value
+	}
+	return value
 }
 
 // convertAnthropicTools 将 Anthropic tools（input_schema）转为 chat 格式。

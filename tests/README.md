@@ -30,6 +30,7 @@ go test -run 'TestRedaction|TestMinimal(LogRedaction|RedactingWriter|DebugRedact
 go test -run 'TestIdentity|TestAssistantIdentity|TestCCIdentity|TestDSH|TestConfiguredSystemPrompt|TestUnifiedDSH' -count=1
 go test -run 'TestLive|TestStreamFlushFailure|TestSlowDownstream|TestHTTP2WriteTimeout|TestDownstreamDeadline|TestGateway(Readiness|Shutdown|Forced)|TestServiceTimeout' -count=1
 go test -run 'TestLargeContext|TestDecodedRequestBody|TestReadModelRequestBody' -count=1
+go test -run 'TestMessagesImage|TestAnthropicImage|TestConversionJSON|TestMarshalConverted' -count=1
 go test -run 'TestUpstreamTLSHandshake|TestAggregate.*(Failure|Settlement|Rejection|MissingFinish)|TestMessages.*(MissingUsage|UnknownFailures)|TestChatMultiChoice' -count=1
 go test -run '^TestUpstreamHTTP(2|1Fallback)' -count=1
 go test -run 'TestOfficial|TestRequestProfile|TestHarnessProtocol' -count=1
@@ -43,6 +44,10 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 内存准入测试使用合成 Go / cgroup 信号与临时 v1/v2 层级文件，覆盖水位恢复、排队复核、
 在途字节预算、未知长度与压缩输入、热加载、并发释放及三协议拒绝前零上游调用/零记账。
 大上下文的解码差分、缓冲交接和性能基准见[性能回归说明](../docs/performance.md)。
+字符串大小预检的全字节/边界差分与模糊测试位于 `conversion_budget_scan_test.go`；可运行
+`go test -run '^$' -fuzz '^FuzzConversionJSONStringBudget$' -fuzztime=10s -parallel=2`。
+多文本块兼容处理的分配回归、字节偏移与延迟/提前拼接差分位于 `prompt_blocks_performance_test.go`；
+可运行 `go test -run '^$' -fuzz '^FuzzPromptBlockCompatibilityParity$' -fuzztime=15s -parallel=2`。
 分阶段指标的固定窗口、请求内累计与失败口径见[请求性能说明](../docs/request-performance.md)。
 写入/刷新错误、在途现场、HTTP/2 流隔离与结算收尾见[流与生命周期说明](../docs/stream-lifecycle.md)。
 异常结算回归覆盖三协议的读取失败、缺少结束原因与坏 JSON，区分已知费用、零费用和未知费用；
