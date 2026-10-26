@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 )
@@ -14,16 +15,36 @@ import (
 // 脱敏仅用于日志/调试展示。不得把脱敏后的错误送回业务分类或上游响应解析。
 var sensitiveSecrets sync.Map
 
+// Registration and snapshot publication share this lock. Warm readers keep an
+// immutable snapshot without locking; a new secret invalidates it before
+// registerSecrets returns. Historical secrets retain their existing lifetime.
+var sensitiveMatcherMu sync.Mutex
+var sensitiveMatcher atomic.Pointer[secretTextMatcher]
+
+type secretTextMatcher struct {
+	long  *strings.Replacer
+	short []string
+}
+
 var (
-	namedSecretPattern  = regexp.MustCompile(`(?i)(\b(?:access[_-]?token|refresh[_-]?token|admin[_-]?key|api[_-]?key|x-api-key|x-refresh-token|authorization)\b["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|(?:Bearer[ \t]+)?[^\s,;}\[\]]+)`)
-	bearerSecretPattern = regexp.MustCompile(`(?i)(\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+`)
+	namedSecretPattern    = regexp.MustCompile(`(?i)(\b(?:access[_-]?token|refresh[_-]?token|admin[_-]?key|api[_-]?key|x-api-key|x-refresh-token|authorization)\b["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'[^']*'|(?:Bearer[ \t]+)?[^\s,;}\[\]]+)`)
+	bearerSecretPattern   = regexp.MustCompile(`(?i)(\bBearer[ \t]+)[A-Za-z0-9._~+/=-]+`)
+	secretFieldNormalizer = strings.NewReplacer("_", "", "-", "")
 )
 
 func registerSecrets(values ...string) {
+	sensitiveMatcherMu.Lock()
+	defer sensitiveMatcherMu.Unlock()
+	changed := false
 	for _, value := range values {
 		if value != "" {
-			sensitiveSecrets.Store(value, struct{}{})
+			if _, loaded := sensitiveSecrets.LoadOrStore(value, struct{}{}); !loaded {
+				changed = true
+			}
 		}
+	}
+	if changed {
+		sensitiveMatcher.Store(nil)
 	}
 }
 
@@ -33,7 +54,15 @@ func registerCredentialSecrets(auth *StoredAuth) {
 	}
 }
 
-func redactSensitiveText(text string) string {
+func currentSecretMatcher() *secretTextMatcher {
+	if matcher := sensitiveMatcher.Load(); matcher != nil {
+		return matcher
+	}
+	sensitiveMatcherMu.Lock()
+	defer sensitiveMatcherMu.Unlock()
+	if matcher := sensitiveMatcher.Load(); matcher != nil {
+		return matcher
+	}
 	var secrets []string
 	sensitiveSecrets.Range(func(key, _ any) bool {
 		value := key.(string)
@@ -48,19 +77,31 @@ func redactSensitiveText(text string) string {
 	})
 	// 长值优先、一次替换，避免重叠秘密值导致部分泄漏或改写替换标记。
 	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	matcher := &secretTextMatcher{}
 	var pairs []string
 	for _, secret := range secrets {
 		if len(secret) >= 8 {
 			pairs = append(pairs, secret, "[REDACTED]")
+		} else {
+			matcher.short = append(matcher.short, secret)
 		}
 	}
 	if len(pairs) > 0 {
-		text = strings.NewReplacer(pairs...).Replace(text)
+		matcher.long = strings.NewReplacer(pairs...)
+		// Build its internal lookup once before publishing to concurrent readers.
+		_ = matcher.long.Replace("")
 	}
-	for _, secret := range secrets {
-		if len(secret) < 8 {
-			text = redactShortSecret(text, secret)
-		}
+	sensitiveMatcher.Store(matcher)
+	return matcher
+}
+
+func redactSensitiveText(text string) string {
+	matcher := currentSecretMatcher()
+	if matcher.long != nil {
+		text = matcher.long.Replace(text)
+	}
+	for _, secret := range matcher.short {
+		text = redactShortSecret(text, secret)
 	}
 	text = namedSecretPattern.ReplaceAllStringFunc(text, func(match string) string {
 		parts := namedSecretPattern.FindStringSubmatch(match)
@@ -158,7 +199,7 @@ func redactDebugValue(value any) any {
 }
 
 func secretLogField(key string) bool {
-	key = strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+	key = strings.ToLower(secretFieldNormalizer.Replace(key))
 	switch key {
 	case "accesstoken", "refreshtoken", "adminkey", "apikey", "xapikey", "xrefreshtoken", "authorization":
 		return true

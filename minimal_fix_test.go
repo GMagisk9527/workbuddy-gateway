@@ -17,15 +17,20 @@ import (
 	"time"
 )
 
-func isolateSecrets(t *testing.T) {
+func isolateSecrets(t testing.TB) {
 	t.Helper()
+	sensitiveMatcherMu.Lock()
 	old := map[string]struct{}{}
 	sensitiveSecrets.Range(func(key, value any) bool {
 		old[key.(string)] = struct{}{}
 		sensitiveSecrets.Delete(key)
 		return true
 	})
+	sensitiveMatcher.Store(nil)
+	sensitiveMatcherMu.Unlock()
 	t.Cleanup(func() {
+		sensitiveMatcherMu.Lock()
+		defer sensitiveMatcherMu.Unlock()
 		sensitiveSecrets.Range(func(key, _ any) bool {
 			sensitiveSecrets.Delete(key)
 			return true
@@ -33,6 +38,7 @@ func isolateSecrets(t *testing.T) {
 		for key := range old {
 			sensitiveSecrets.Store(key, struct{}{})
 		}
+		sensitiveMatcher.Store(nil)
 	})
 }
 
