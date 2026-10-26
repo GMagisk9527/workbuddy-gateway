@@ -115,8 +115,10 @@ func validateAnthropicChatContent(content any, role, path string) error {
 				continue
 			}
 		case "image":
-			if (role == "user" || role == "tool") && anthropicImageURL(block) != "" {
-				continue
+			if role == "user" || role == "tool" {
+				if _, value := anthropicImageSource(block); value != "" {
+					continue
+				}
 			}
 		case "thinking", "redacted_thinking":
 			if role == "assistant" {

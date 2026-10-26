@@ -30,6 +30,35 @@ decodeAnthropicMessageBody、anthropicToChatRequest、marshalConvertedRequest，
 不含 HTTP 读取、解压、全部兼容处理、出站压缩、网络和上游推理。
 耗时会随环境波动；以上不代表线上请求总耗时的改善比例。
 
+## 请求大小扫描与图片校验
+
+转换后的 JSON 大小预检使用固定 256 字节分类表扫描连续普通 ASCII，减少热循环中的
+多重条件判断；转义、HTML 特殊字符、Unicode、无效 UTF-8 及 plain/quoted 两种精确
+长度计算继续走原有规则，扫描仍受剩余预算约束，超限时在序列化前拒绝。
+
+Messages 图片校验只读取来源字段，正式转换时才构造 data URL。
+校验与 URL 转换共用一个来源解析函数，保留 base64/URL 形态、允许的消息角色、
+工具结果图片提升和原有错误规则；不会为了校验先复制整份 base64 数据。
+
+2026-10-26，Windows amd64 / i5-13500HX / Go 1.27.3，基线 main `5bb6ce0`，
+本地合成基准 200ms × 3 取中位数：
+
+| 场景 | 耗时：前 → 后 | 累计分配：前 → 后 |
+|---|---|---|
+| 约 0.94 MiB 普通 ASCII 大小预检 | 0.998 → 0.399ms | 16 → 16 B |
+| 4 MiB 文本工具结果的解码、转换与编码 | 21.1 → 16.1ms | 不作内存收益归因 |
+| 4 MiB 用户图片仅做输入校验 | 0.402ms → 0.270µs | 约 4.20MB → 64 B |
+| 4 MiB 用户图片转换并编码 | 8.43 → 5.59ms | 约 14.4 → 9.61MB |
+| 4 MiB 工具结果图片仅做输入校验 | 0.473ms → 0.695µs | 约 4.20MB → 224 B |
+
+转义密集预检样本 0.912 → 0.939ms，约 3% 耗时波动；Unicode 样本仍走原处理路径。
+图片转换基准不包含 HTTP 读取和 JSON 解码；正式构造 data URL 的一次复制仍然存在。
+标准库编码缓冲复用和 GC 会影响整段转换的累计分配与计时，不能把所有差值归因于
+分类表。确定的内存收益是图片校验不再构造一份完整 data URL。
+这些数字不是峰值 RSS，也不能推算线上首 token 或模型 TPS 的改善比例。
+
+复测：`go test -run '^$' -bench 'Benchmark(MessagesImagePreparation|ConversionJSONString|MessagesRequestConversion)$' -benchmem -benchtime=200ms -count=3`。
+
 ## Messages 流式输出
 
 普通流式正文只发送增量，不再在状态机中保留完整正文副本；非流式聚合仍保留正文。

@@ -127,9 +127,17 @@ func (c *conversionJSONCounter) string(text string) error {
 	return nil
 }
 
-func conversionSafeASCII(b byte) bool {
-	return b >= 0x20 && b < utf8.RuneSelf && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&'
-}
+// The hot scan uses one byte classification lookup. Escaping and UTF-8 still
+// follow string's original slow path and exact plain/quoted budget accounting.
+var conversionSafeASCIIBytes = func() [256]bool {
+	var safe [256]bool
+	for b := 0x20; b < utf8.RuneSelf; b++ {
+		safe[b] = b != '"' && b != '\\' && b != '<' && b != '>' && b != '&'
+	}
+	return safe
+}()
+
+func conversionSafeASCII(b byte) bool { return conversionSafeASCIIBytes[b] }
 
 func (c *conversionJSONCounter) value(value any, depth int) error {
 	// This matches encoding/json's nesting limit and also terminates cycles from
