@@ -336,10 +336,28 @@ test("页面移除统计落盘徽标和摘要卡四分之一圆装饰，选项�
   assert(!page.includes('id="statsStorage"'));
   assert(!/\.usage-metric::after\s*\{/.test(css), "摘要卡的圆形装饰必须删除");
   assert(/\.tabs\s*\{[\s\S]*width:\s*min\(83\.3333vw,\s*3200px\)/.test(css));
-  assert(/\.tabs\s*\{[\s\S]*grid-template-columns:\s*repeat\(7,\s*minmax\(0,\s*1fr\)\)/.test(css));
   assert(/\.health-layout\s*\{[^}]*height:\s*196px/.test(css));
   assert(/\.account-alert\s*\{[^}]*padding:\s*3px 10px/.test(css));
   audit("布局精简与自适应通过", {stats_badge_removed: true, quarter_circle_removed: true, tabs_5_of_6_capped_4k: true});
+});
+
+test("桌面和移动端标签列数覆盖页面全部标签", () => {
+  const page = fs.readFileSync(path.join(projectRoot, "web/index.html"), "utf8");
+  const css = fs.readFileSync(path.join(projectRoot, "web/style.css"), "utf8");
+  const nav = page.match(/<nav\b[^>]*\bid="tabs"[^>]*>([\s\S]*?)<\/nav>/);
+  assert(nav, "必须保留主导航");
+  const tabs = Array.from(nav[1].matchAll(/<button\b[^>]*\bdata-tab="([^"]+)"/g), match => match[1]);
+  assert(tabs.includes("settings"), "访问设置标签不能被移除");
+  assert.equal(new Set(tabs).size, tabs.length, "导航标识不能重复");
+  const gridRules = Array.from(css.matchAll(/\.tabs\s*\{([^}]*)\}/g))
+    .filter(match => match[1].includes("grid-template-columns"));
+  assert(gridRules.length >= 2, "必须检查桌面与移动端的列定义");
+  gridRules.forEach(rule => {
+    const columns = rule[1].match(/grid-template-columns:\s*repeat\(\s*(\d+)\s*,\s*minmax\(0,\s*1fr\)\)/);
+    assert(columns, "标签栏应使用可核对列数的等分网格");
+    assert.equal(Number(columns[1]), tabs.length, "每个断点的列数必须与实际标签数一致");
+  });
+  audit("导航数量与网格列数一致", {tabs: tabs.length, breakpoint_rules: gridRules.length});
 });
 
 test("新状态快照恢复后立即剔除旧告警，无需等待再次扫描日志", () => {

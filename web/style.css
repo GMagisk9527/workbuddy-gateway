@@ -96,7 +96,7 @@ button.ghost { background: transparent; }
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 4px;
   width: min(83.3333vw, 3200px);
   margin: 0 auto;
@@ -735,7 +735,7 @@ rect.series-m7 { fill: var(--series-m7); }
 }
 
 @media (max-width: 700px) {
-  .tabs { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+  .tabs { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; }
   .tab { padding: 8px 2px; font-size: 12px; }
 }
 
