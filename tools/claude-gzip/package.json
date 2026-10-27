@@ -1,0 +1,13 @@
+{
+  "name": "workbuddy-claude-gzip",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opt-in native Claude Code gzip for a custom gateway, using a verified executable copy",
+  "scripts": {
+    "test": "node --test tests/patch.test.cjs tests/launcher.test.cjs",
+    "test:native": "node --test --test-concurrency=1 tests/native.test.cjs",
+    "prepare:copy": "node bin/claude-gzip.cjs --prepare-only"
+  },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

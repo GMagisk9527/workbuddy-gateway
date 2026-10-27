@@ -36,6 +36,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 | 多 Harness 出站对齐、协议参数与兼容边界 | [docs/outbound-compatibility.md](docs/outbound-compatibility.md) |
 | Messages / Responses 转换能力及推理回传 | [Messages](docs/messages-chat-compatibility.md) / [Responses](docs/responses-chat-compatibility.md) |
 | DSH 历史回放、GUI 环境句与 11128 兼容说明 | [docs/11128-dsh-history.md](docs/11128-dsh-history.md) |
+| Windows Claude Code 大请求 gzip 独立启动器（非官方、版本限定） | [tools/claude-gzip/README.md](tools/claude-gzip/README.md) |
 
 ## 构建与测试
 

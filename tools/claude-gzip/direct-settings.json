@@ -1,0 +1,10 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://fandai.202695276.xyz:10717",
+    "CLAUDE_CODE_GZIP_REQUEST_BODIES": "1",
+    "DISABLE_AUTOUPDATER": "1",
+    "HTTP_PROXY": "",
+    "HTTPS_PROXY": "",
+    "ALL_PROXY": ""
+  }
+}
