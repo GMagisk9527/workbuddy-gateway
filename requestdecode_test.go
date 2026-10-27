@@ -11,12 +11,30 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func gzipBytes(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zstdBytes(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := zw.Write(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -52,13 +70,14 @@ func echoHandler() http.Handler {
 	})
 }
 
-func TestDecodeGzipAndDeflate(t *testing.T) {
+func TestDecodeCompressedBodies(t *testing.T) {
 	plain := []byte(`{"model":"m","messages":[{"role":"user","content":"你好"}]}`)
 	h := decodeRequestBodyMiddleware(echoHandler())
 
 	for name, body := range map[string][]byte{
 		"gzip":    gzipBytes(t, plain),
 		"deflate": zlibBytes(t, plain),
+		"zstd":    zstdBytes(t, plain),
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 		req.Header.Set("Content-Encoding", name)
@@ -89,7 +108,7 @@ func TestDecodeLeavesPlainBodyUntouched(t *testing.T) {
 
 func TestDecodeRejectsUnsupportedEncoding(t *testing.T) {
 	h := decodeRequestBodyMiddleware(echoHandler())
-	for _, enc := range []string{"br", "zstd", "compress"} {
+	for _, enc := range []string{"br", "compress"} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("x"))
 		req.Header.Set("Content-Encoding", enc)
 		rec := httptest.NewRecorder()
@@ -103,17 +122,19 @@ func TestDecodeRejectsUnsupportedEncoding(t *testing.T) {
 	}
 }
 
-func TestDecodeRejectsCorruptGzip(t *testing.T) {
+func TestDecodeRejectsCorruptCompressedBody(t *testing.T) {
 	h := decodeRequestBodyMiddleware(echoHandler())
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not-gzip-at-all"))
-	req.Header.Set("Content-Encoding", "gzip")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("损坏的 gzip 应 400，实际 %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "invalid_request_encoding") {
-		t.Fatalf("错误码应可识别，实际 %s", rec.Body.String())
+	for _, enc := range []string{"gzip", "zstd"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("not-gzip-at-all"))
+		req.Header.Set("Content-Encoding", enc)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("损坏的 %s 应 400，实际 %d", enc, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "invalid_request_encoding") {
+			t.Fatalf("%s 错误码应可识别，实际 %s", enc, rec.Body.String())
+		}
 	}
 }
 
@@ -121,22 +142,26 @@ func TestDecodeRejectsCorruptGzip(t *testing.T) {
 func TestDecodeRejectsDecompressionBomb(t *testing.T) {
 	// 40MB 的零字节压成 gzip 只有几十 KB
 	huge := make([]byte, requestDecodedLimit+1024)
-	body := gzipBytes(t, huge)
-	if len(body) > requestCompressedLimit {
-		t.Fatalf("测试数据压缩后过大: %d", len(body))
-	}
-	h := decodeRequestBodyMiddleware(echoHandler())
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
-	req.Header.Set("Content-Encoding", "gzip")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("解压超过上限应 413，实际 %d", rec.Code)
+	for name, body := range map[string][]byte{
+		"gzip": gzipBytes(t, huge),
+		"zstd": zstdBytes(t, huge),
+	} {
+		if len(body) > requestCompressedLimit {
+			t.Fatalf("%s 测试数据压缩后过大: %d", name, len(body))
+		}
+		h := decodeRequestBodyMiddleware(echoHandler())
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+		req.Header.Set("Content-Encoding", name)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("%s 解压超过上限应 413，实际 %d", name, rec.Code)
+		}
 	}
 }
 
 // 真实中间件链：压缩请求必须与非压缩请求得到同样的业务结果。
-func TestGzipRequestThroughRealChain(t *testing.T) {
+func TestCompressedRequestThroughRealChain(t *testing.T) {
 	isolatedGatewayConfig(t)
 	accountMu.Lock()
 	oldAccounts := accounts
@@ -169,10 +194,15 @@ func TestGzipRequestThroughRealChain(t *testing.T) {
 	if plainCode == http.StatusBadRequest {
 		t.Fatalf("前提不成立：明文请求不应 400，实际 %d", plainCode)
 	}
-	if gzCode := post(gzipBytes(t, body), "gzip"); gzCode != plainCode {
-		t.Fatalf("压缩请求与明文请求结果应一致：明文 %d，gzip %d", plainCode, gzCode)
-	}
-	if badCode := post([]byte("broken"), "gzip"); badCode != http.StatusBadRequest {
-		t.Fatalf("损坏的 gzip 必须 400，实际 %d", badCode)
+	for name, payload := range map[string][]byte{
+		"gzip": gzipBytes(t, body),
+		"zstd": zstdBytes(t, body),
+	} {
+		if code := post(payload, name); code != plainCode {
+			t.Fatalf("压缩请求与明文请求结果应一致：明文 %d，%s %d", plainCode, name, code)
+		}
+		if badCode := post([]byte("broken"), name); badCode != http.StatusBadRequest {
+			t.Fatalf("损坏的 %s 必须 400，实际 %d", name, badCode)
+		}
 	}
 }

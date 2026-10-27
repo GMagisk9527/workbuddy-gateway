@@ -8,8 +8,8 @@ package main
 // handler，其它请求一个字节都不动。
 //
 // 取舍：
-//   - 只支持 gzip / deflate（标准库即可），brotli/zstd 返回 415，让客户端按
-//     自己的协商逻辑回退到 gzip——插件正是这么设计的（411/415/501 触发回退）。
+//   - 支持 gzip / deflate / zstd；zstd 使用 klauspost/compress，brotli 仍返回 415，
+//     让客户端按自己的协商逻辑回退。
 //   - 压缩数据和解压后的输入共用在途字节预算，并保留单请求大小上限。
 //     准入层另按内存水位限制新请求，给 JSON 解析、协议转换和长流留出余量。
 
@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -54,7 +56,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(w, r.Body, requestDecodedLimit)
 			next.ServeHTTP(w, r)
 			return
-		case "gzip", "x-gzip", "deflate":
+		case "gzip", "x-gzip", "deflate", "zstd":
 			if r.ContentLength > requestCompressedLimit {
 				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "压缩请求体超过网关上限")
 				return
@@ -63,7 +65,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			// 交给客户端自行回退（插件收到 415 会改用 gzip 并记住该 endpoint）。
 			log.Printf("[请求解码] traceId=%s 结果=拒绝 编码=%s 原因=不支持该压缩算法", w.Header().Get("X-Trace-ID"), encoding)
 			writeUpstreamError(w, r, http.StatusUnsupportedMediaType, "unsupported_content_encoding",
-				"不支持的请求体压缩算法: "+encoding+"（仅支持 gzip / deflate）")
+				"不支持的请求体压缩算法: "+encoding+"（仅支持 gzip / deflate / zstd）")
 			return
 		}
 		if err := wrapMemoryBody(r); err != nil {
@@ -145,6 +147,17 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 		} else {
 			reader = flate.NewReader(bytes.NewReader(raw))
 		}
+	case "zstd":
+		// Bound decoder window/memory independently of the compressed input.
+		zr, err := zstd.NewReader(bytes.NewReader(raw),
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(uint64(requestCompressedLimit)),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		reader = zr
 	default:
 		return nil, errors.New("unsupported encoding")
 	}
