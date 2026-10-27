@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
+	"log"
+	"net"
 	"net/http"
 )
 
@@ -49,4 +53,27 @@ func readModelRequestBody(r *http.Request) (data []byte, readErr error) {
 		return append(buf, tail...), err
 	}
 	return io.ReadAll(r.Body)
+}
+
+// requestBodyReadTimedOut distinguishes a server read deadline/client upload
+// timeout from malformed or disconnected request bodies.
+func requestBodyReadTimedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// writeModelRequestBodyReadError returns a protocol-shaped failure without
+// recording body contents. A read deadline is reported as 408 so clients can
+// distinguish a slow upload from invalid JSON.
+func writeModelRequestBodyReadError(w http.ResponseWriter, r *http.Request, body []byte, err error) {
+	status, code, message := http.StatusBadRequest, "read_error", "读取请求体失败"
+	if requestBodyReadTimedOut(err) {
+		status, code, message = http.StatusRequestTimeout, "request_body_timeout", "读取请求体超时，请检查上行带宽或减小请求体"
+	}
+	log.Printf("[请求体读取失败] traceId=%s 路径=%s 状态码=%d 错误类型=%s 声明字节=%d 已读字节=%d 说明=不记录正文或密钥",
+		debugTraceID(r), r.URL.Path, status, debugErrorType(err), r.ContentLength, len(body))
+	writeUpstreamError(w, r, status, code, message)
 }

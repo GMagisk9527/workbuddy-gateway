@@ -38,13 +38,17 @@ func prepareGatewayServers() ([]*http.Server, []net.Listener, error) {
 	return prepareGatewayServersWithLifecycle(newGatewayLifecycle())
 }
 
+const apiReadHeaderTimeout = 15 * time.Second
+
 func prepareGatewayServersWithLifecycle(life *gatewayLifecycle) ([]*http.Server, []net.Listener, error) {
 	if err := webUIPreflightError(); err != nil {
 		return nil, nil, err
 	}
+	timeouts := currentServiceTimeouts()
 	servers := []*http.Server{{
 		Addr: net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)), Handler: life.handler(newAPIHandler()),
-		ReadTimeout: 120 * time.Second,
+		ReadHeaderTimeout: apiReadHeaderTimeout,
+		ReadTimeout:       timeouts.read,
 		// 保留模型流无总写入时限，不把管理端限制扩散到模型 API。
 		WriteTimeout: 0,
 	}}
@@ -103,7 +107,10 @@ func newGatewayHTTPSlot(addr string, web bool, life *gatewayLifecycle) *gatewayH
 		}
 	} else {
 		handler = newAPIHandler()
-		server = &http.Server{Addr: addr, Handler: handler, ReadTimeout: 120 * time.Second, WriteTimeout: 0}
+		server = &http.Server{
+			Addr: addr, Handler: handler, ReadHeaderTimeout: apiReadHeaderTimeout,
+			ReadTimeout: currentServiceTimeouts().read, WriteTimeout: 0,
+		}
 	}
 	if life != nil {
 		server.Handler = life.handler(handler)

@@ -422,6 +422,11 @@ workbuddy-gateway serve -keepalive-hours ""
 32 MiB。超限返回各协议的 HTTP 413 错误；已声明超限长度的普通请求在读取前拒绝，
 未声明长度的请求按实际读取量限制。反向代理若设了更低上限，则先由代理拒绝。
 此限制控制单次请求大小；解析 JSON、构建上游请求及并发请求仍需要额外内存。
+API 端口的请求读取总时限由 `server.requestReadTimeoutSeconds` 控制，默认 900 秒，
+范围 0～3600 秒，0 表示使用默认值；请求头读取另有固定 15 秒限制。大请求在慢速上行链路上
+可能持续数分钟，超时返回 408 和 `request_body_timeout`（Messages 使用
+`invalid_request_error`），不会读取完成、调用上游或计费。修改该值后，已有 API 监听仍使用
+创建时的值；重启服务或热切换 API 端口后新监听才会采用新值。
 
 ---
 
