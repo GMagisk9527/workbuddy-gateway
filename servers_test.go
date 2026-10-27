@@ -219,3 +219,28 @@ func TestGatewayHotSwitchPreservesInFlightSSE(t *testing.T) {
 		t.Fatalf("new API health=%d", health.StatusCode)
 	}
 }
+
+func TestGatewayHotSwitchUsesPendingReadTimeout(t *testing.T) {
+	isolatedGatewayConfig(t)
+	oldCfg := cfg
+	cfg.Addr, cfg.WebUI, cfg.PortExplicit = "127.0.0.1", false, false
+	cfg.Port = freeLoopbackPort(t)
+	t.Cleanup(func() { cfg = oldCfg })
+	life := newGatewayLifecycle()
+	defer life.cancel()
+	servers, listeners, err := prepareGatewayServersWithLifecycle(life)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manager gatewayServerManager
+	manager.register(servers, listeners, life)
+	manager.start(make(chan error, 4))
+	t.Cleanup(func() { manager.shutdown(context.Background()) })
+	next := freeLoopbackPort(t)
+	if _, _, err := manager.applyWith(gatewayFileConfig{APIPort: next}, next, false, 33*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if manager.api == nil || manager.api.server.ReadTimeout != 33*time.Second {
+		t.Fatalf("new API listener did not use pending timeout: %#v", manager.api)
+	}
+}

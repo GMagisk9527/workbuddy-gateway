@@ -76,8 +76,8 @@ func anthropicErrType(errType string) string {
 		return "rate_limit_error"
 	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled", "request_memory_pressure", "request_body_budget_exceeded", "gateway_draining", "upstream_retry_budget_exhausted":
 		return "overloaded_error"
-	case "invalid_request_encoding", "unsupported_content_encoding":
-		// 请求体格式/编码问题是调用方错误，不能退化成服务端 api_error
+	case "invalid_request_encoding", "unsupported_content_encoding", "request_body_timeout":
+		// 请求体格式/编码/上传超时是调用方错误，不能退化成服务端 api_error
 		return "invalid_request_error"
 	case "request_body_too_large":
 		return "request_too_large"
@@ -106,7 +106,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		if writeRequestBodyLimitError(w, r, err) {
 			return
 		}
-		writeAnthropicError(w, http.StatusBadRequest, "api_error", "读取请求体失败")
+		writeModelRequestBodyReadError(w, r, bodyBytes, err)
 		return
 	}
 	defer r.Body.Close()
@@ -1384,7 +1384,7 @@ func handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		if writeRequestBodyLimitError(w, r, err) {
 			return
 		}
-		writeAnthropicError(w, http.StatusBadRequest, "api_error", "读取请求体失败")
+		writeModelRequestBodyReadError(w, r, bodyBytes, err)
 		return
 	}
 	defer r.Body.Close()

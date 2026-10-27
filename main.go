@@ -4229,7 +4229,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if writeRequestBodyLimitError(w, r, err) {
 			return
 		}
-		writeOpenAIError(w, http.StatusBadRequest, "read_error", "读取请求体失败")
+		writeModelRequestBodyReadError(w, r, bodyBytes, err)
 		return
 	}
 	defer r.Body.Close()

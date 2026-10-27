@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 const (
@@ -173,7 +174,7 @@ func persistGatewayConfigLocked(doc map[string]json.RawMessage, g gatewayFileCon
 		log.Printf("[管理配置] traceId=%s 阶段=写入配置 结果=失败 原因=%v 业务影响=运行时配置未切换", trace, err)
 		return err
 	}
-	if err := applyGatewayListenerPortsLocked(g, trace); err != nil {
+	if err := applyGatewayListenerPortsLocked(g, trace, currentServiceTimeouts().read); err != nil {
 		if restoreErr := writeConfigPreservingFile(old, append(data, '\n')); restoreErr != nil {
 			return fmt.Errorf("监听端口切换失败: %v；恢复原配置也失败，请检查服务器日志: %w", err, restoreErr)
 		}
@@ -188,7 +189,7 @@ func persistGatewayConfigLocked(doc map[string]json.RawMessage, g gatewayFileCon
 }
 
 // Called with gatewayConfigMu held. New listeners bind before old ones retire.
-func applyGatewayListenerPortsLocked(g gatewayFileConfig, trace string, beforeCommit ...func() error) error {
+func applyGatewayListenerPortsLocked(g gatewayFileConfig, trace string, readTimeout time.Duration, beforeCommit ...func() error) error {
 	apiPort := g.APIPort
 	if cfg.PortExplicit {
 		apiPort = cfg.Port
@@ -197,7 +198,7 @@ func applyGatewayListenerPortsLocked(g gatewayFileConfig, trace string, beforeCo
 	if len(beforeCommit) > 0 {
 		prepare = beforeCommit[0]
 	}
-	actualAPI, actualWeb, err := gatewayServers.applyWith(g, apiPort, cfg.WebUI, prepare)
+	actualAPI, actualWeb, err := gatewayServers.applyWith(g, apiPort, cfg.WebUI, readTimeout, prepare)
 	if err != nil {
 		log.Printf("[监听热切换] traceId=%s 目标API端口=%d 目标Web端口=%d 结果=失败 原因=%v 业务影响=原监听继续服务", trace, apiPort, g.WebPort, err)
 		return gatewayValidationError(err.Error())

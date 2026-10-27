@@ -37,7 +37,8 @@
   },
   "server": {
     "shutdownGraceSeconds": 120,
-    "shutdownCleanupSeconds": 15
+    "shutdownCleanupSeconds": 15,
+    "requestReadTimeoutSeconds": 900
   },
   "logs": {
     "retentionDays": 0,
