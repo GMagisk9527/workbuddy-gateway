@@ -8,8 +8,8 @@ package main
 // handler，其它请求一个字节都不动。
 //
 // 取舍：
-//   - 只支持 gzip / deflate（标准库即可），brotli/zstd 返回 415，让客户端按
-//     自己的协商逻辑回退到 gzip——插件正是这么设计的（411/415/501 触发回退）。
+//   - 支持 gzip / deflate / zstd；zstd 使用 klauspost/compress，brotli 仍返回 415，
+//     让客户端按自己的协商逻辑回退。
 //   - 压缩数据和解压后的输入共用在途字节预算，并保留单请求大小上限。
 //     准入层另按内存水位限制新请求，给 JSON 解析、协议转换和长流留出余量。
 
@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -54,7 +56,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			r.Body = http.MaxBytesReader(w, r.Body, requestDecodedLimit)
 			next.ServeHTTP(w, r)
 			return
-		case "gzip", "x-gzip", "deflate":
+		case "gzip", "x-gzip", "deflate", "zstd":
 			if r.ContentLength > requestCompressedLimit {
 				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "压缩请求体超过网关上限")
 				return
@@ -63,7 +65,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			// 交给客户端自行回退（插件收到 415 会改用 gzip 并记住该 endpoint）。
 			log.Printf("[请求解码] traceId=%s 结果=拒绝 编码=%s 原因=不支持该压缩算法", w.Header().Get("X-Trace-ID"), encoding)
 			writeUpstreamError(w, r, http.StatusUnsupportedMediaType, "unsupported_content_encoding",
-				"不支持的请求体压缩算法: "+encoding+"（仅支持 gzip / deflate）")
+				"不支持的请求体压缩算法: "+encoding+"（仅支持 gzip / deflate / zstd）")
 			return
 		}
 		if err := wrapMemoryBody(r); err != nil {
@@ -90,6 +92,10 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 		recordPerformance(r, phaseDecompress, start, err != nil)
 		if err != nil {
 			if writeRequestMemoryError(w, r, err) {
+				return
+			}
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过网关上限")
 				return
 			}
 			log.Printf("[请求解码] traceId=%s 结果=失败 编码=%s 原因=%v", w.Header().Get("X-Trace-ID"), encoding, err)
@@ -145,6 +151,18 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 		} else {
 			reader = flate.NewReader(bytes.NewReader(raw))
 		}
+	case "zstd":
+		// Bound decoder window/memory independently of the compressed input.
+		zr, err := zstd.NewReader(bytes.NewReader(raw),
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxMemory(uint64(requestDecodedLimit)),
+			zstd.WithDecoderMaxWindow(uint64(requestDecodedLimit)),
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		reader = zr
 	default:
 		return nil, errors.New("unsupported encoding")
 	}
@@ -157,12 +175,71 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 	}
 	out, err := io.ReadAll(io.LimitReader(reader, requestDecodedLimit+1))
 	if err != nil {
+		if errors.Is(err, zstd.ErrDecoderSizeExceeded) ||
+			(errors.Is(err, zstd.ErrWindowSizeExceeded) && zstdWindowExceedsLimit(raw)) {
+			return nil, errRequestBodyTooLarge
+		}
 		return nil, err
 	}
 	if len(out) > requestDecodedLimit {
 		return nil, errRequestBodyTooLarge
 	}
 	return out, nil
+}
+
+// ErrWindowSizeExceeded also describes corrupt blocks. Inspect frame boundaries
+// only on that error, so a malformed small frame is not mistaken for our limit.
+func zstdWindowExceedsLimit(raw []byte) bool {
+	for len(raw) > 0 {
+		var h zstd.Header
+		if h.Decode(raw) != nil {
+			return false
+		}
+		n := h.HeaderSize
+		if h.Skippable {
+			if uint64(h.SkippableSize) > uint64(len(raw)-n) {
+				return false
+			}
+			raw = raw[n+int(h.SkippableSize):]
+			continue
+		}
+		window := h.WindowSize
+		if h.SingleSegment {
+			window = max(h.FrameContentSize, 1024)
+		}
+		if window > uint64(requestDecodedLimit) {
+			return true
+		}
+		for {
+			if len(raw)-n < 3 {
+				return false
+			}
+			block := uint32(raw[n]) | uint32(raw[n+1])<<8 | uint32(raw[n+2])<<16
+			n += 3
+			kind, size := (block>>1)&3, int(block>>3)
+			if kind == 3 || size > 128<<10 || uint64(size) > window {
+				return false
+			}
+			if kind == 1 { // RLE stores a single byte, regardless of output size.
+				size = 1
+			}
+			if size > len(raw)-n {
+				return false
+			}
+			n += size
+			if block&1 != 0 {
+				break
+			}
+		}
+		if h.HasCheckSum {
+			n += 4
+		}
+		if n > len(raw) {
+			return false
+		}
+		raw = raw[n:]
+	}
+	return false
 }
 
 // withRequestBodyDecode 把解码中间件套在单个协议处理函数上：

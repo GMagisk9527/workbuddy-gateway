@@ -418,7 +418,7 @@ workbuddy-gateway serve -keepalive-hours ""
 调试日志不会记录 `Authorization`、Cookie、API Key、Access Token、Refresh Token 或完整请求体。只记录是否提供 Authorization，以及凭据的不可逆短哈希 `api_key_fingerprint`。
 
 模型请求入口（Chat、Responses、Messages 及 `messages/count_tokens`）在鉴权后限制请求体：
-普通／`identity` 请求最多 32 MiB，gzip／deflate 请求压缩体最多 16 MiB、解压后最多
+普通／`identity` 请求最多 32 MiB，gzip／deflate／zstd 请求压缩体最多 16 MiB、解压后最多
 32 MiB。超限返回各协议的 HTTP 413 错误；已声明超限长度的普通请求在读取前拒绝，
 未声明长度的请求按实际读取量限制。反向代理若设了更低上限，则先由代理拒绝。
 此限制控制单次请求大小；解析 JSON、构建上游请求及并发请求仍需要额外内存。
@@ -1005,7 +1005,7 @@ workbuddy-gateway serve -auth-dir ./auths
 - 名额持续到整个处理结束，包含上游流及本地聚合。此限制与 `concurrent` 同时生效，因此默认 API 实际总并发最多为 2，即使 `concurrent.MaxGlobal=0`。如有充足资源，可一起调高请求准入和上游并发。
 - `maxActive` 的 0/省略使用默认 2，允许最大 1024；`maxWaiting` 省略为 8，显式 0 表示不排队，最大 10000；`waitTimeoutMs` 的 0/省略为 15000，最大 600000。负数和错误类型拒绝加载。
 - 配置可热加载：扩容唤醒等待者，缩容等待已有请求自然完成，不取消正在输出的流；已入队者沿用入队时的等待期限。FIFO 排队，取消会立即撤出队列并让后续请求继续。
-- 默认启用 `memoryProtection`。共享请求体预算覆盖读取中的输入和已经读完但响应尚未结束的请求；gzip / deflate 同时计算压缩数据与解压后的数据，分块上传也按实际读取逐步预留。提前关闭请求体不会释放预算，整个 handler 返回（含取消、错误和 panic）后才释放。
+- 默认启用 `memoryProtection`。共享请求体预算覆盖读取中的输入和已经读完但响应尚未结束的请求；gzip / deflate / zstd 同时计算压缩数据与解压后的数据，分块上传也按实际读取逐步预留。提前关闭请求体不会释放预算，整个 handler 返回（含取消、错误和 panic）后才释放。
 - `maxBodyBytes` 是全局在途输入字节预算，0/省略为自动计算：取 64 MiB、有效 Go 内存上限的四分之一、各可读 cgroup 内存上限的八分之一中的最小值。没有相应上限的项不参与计算。例：Go `GOMEMLIMIT=48MiB`、cgroup 上限约 128 MB 时，自动预算为 12 MiB。可显式指定正整数字节数，最大 1 TiB；负数和小数拒绝加载。
 - 内存采样最多每 250 毫秒刷新一次。Go 监测使用运行时管理的内存（total 减去已归还系统的 heap），Linux 同时读取常见 cgroup v1/v2 路径及父级限制，包含同一 cgroup 中其他进程的消耗。任何有效范围达到高水位即暂停新准入，所有可用范围回落到低水位才恢复。默认高/低水位为 85%/75%；0/省略使用默认值，允许 1～100，低水位必须小于高水位。
 - 水位过高返回 HTTP 503 `request_memory_pressure`；其他在途请求暂时占满字节预算返回 503 `request_body_budget_exceeded`，两者均带 `Retry-After: 1`。Messages 返回 Anthropic `overloaded_error`。新到达请求在读取 body 前拒绝，已排队者获得名额时重新检查水位；未知长度或压缩体可能在读取过程中发现预算不足，但不会进入模型调用。
