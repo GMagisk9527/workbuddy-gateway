@@ -175,7 +175,8 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 	}
 	out, err := io.ReadAll(io.LimitReader(reader, requestDecodedLimit+1))
 	if err != nil {
-		if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) || errors.Is(err, zstd.ErrFrameSizeExceeded) {
+		if errors.Is(err, zstd.ErrDecoderSizeExceeded) ||
+			(errors.Is(err, zstd.ErrWindowSizeExceeded) && zstdWindowExceedsLimit(raw)) {
 			return nil, errRequestBodyTooLarge
 		}
 		return nil, err
@@ -184,6 +185,61 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 		return nil, errRequestBodyTooLarge
 	}
 	return out, nil
+}
+
+// ErrWindowSizeExceeded also describes corrupt blocks. Inspect frame boundaries
+// only on that error, so a malformed small frame is not mistaken for our limit.
+func zstdWindowExceedsLimit(raw []byte) bool {
+	for len(raw) > 0 {
+		var h zstd.Header
+		if h.Decode(raw) != nil {
+			return false
+		}
+		n := h.HeaderSize
+		if h.Skippable {
+			if uint64(h.SkippableSize) > uint64(len(raw)-n) {
+				return false
+			}
+			raw = raw[n+int(h.SkippableSize):]
+			continue
+		}
+		window := h.WindowSize
+		if h.SingleSegment {
+			window = max(h.FrameContentSize, 1024)
+		}
+		if window > uint64(requestDecodedLimit) {
+			return true
+		}
+		for {
+			if len(raw)-n < 3 {
+				return false
+			}
+			block := uint32(raw[n]) | uint32(raw[n+1])<<8 | uint32(raw[n+2])<<16
+			n += 3
+			kind, size := (block>>1)&3, int(block>>3)
+			if kind == 3 || size > 128<<10 || uint64(size) > window {
+				return false
+			}
+			if kind == 1 { // RLE stores a single byte, regardless of output size.
+				size = 1
+			}
+			if size > len(raw)-n {
+				return false
+			}
+			n += size
+			if block&1 != 0 {
+				break
+			}
+		}
+		if h.HasCheckSum {
+			n += 4
+		}
+		if n > len(raw) {
+			return false
+		}
+		raw = raw[n:]
+	}
+	return false
 }
 
 // withRequestBodyDecode 把解码中间件套在单个协议处理函数上：

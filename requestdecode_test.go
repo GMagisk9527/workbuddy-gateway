@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -254,5 +255,72 @@ func TestDecodeZstdSingleSegmentBoundaries(t *testing.T) {
 				t.Fatalf("size error not mapped: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestDecodeZstdCorruptSizeMetadata(t *testing.T) {
+	// Frame content size is 1, but the raw block contains the two bytes {}.
+	badFrameSize := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x20, 1, 0x11, 0, 0, '{', '}'}
+	// A raw 1025-byte block exceeds its declared 1024-byte frame window.
+	badBlockSize := append([]byte{0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x09, 0x20, 0}, bytes.Repeat([]byte("x"), 1025)...)
+	for _, tc := range []struct {
+		name string
+		body []byte
+		err  error
+	}{
+		{"frame_content_size", badFrameSize, zstd.ErrFrameSizeExceeded},
+		{"block_window_size", badBlockSize, zstd.ErrWindowSizeExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zr, err := zstd.NewReader(bytes.NewReader(tc.body), zstd.WithDecoderConcurrency(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = io.Copy(io.Discard, zr)
+			zr.Close()
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("fixture error=%v want=%v", err, tc.err)
+			}
+			for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens"} {
+				t.Run(path, func(t *testing.T) {
+					h := decodeRequestBodyMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+						t.Fatal("corrupt body reached handler")
+					}))
+					req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(tc.body))
+					req.Header.Set("Content-Encoding", "zstd")
+					rec := httptest.NewRecorder()
+					h.ServeHTTP(rec, req)
+					if rec.Code != http.StatusBadRequest {
+						t.Fatalf("status=%d want=400 body=%s", rec.Code, rec.Body.String())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestDecodeZstdOversizedWindow(t *testing.T) {
+	prefixes := map[string][]byte{
+		"first_frame":             nil,
+		"after_checksummed_frame": zstdBytes(t, []byte("{}")),
+		"after_skippable_frame":   {0x50, 0x2a, 0x4d, 0x18, 1, 0, 0, 0, 'x'},
+		"after_rle_frame":         {0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x53, 0, 0, 'x'},
+	}
+	for name, prefix := range prefixes {
+		for _, descriptor := range []byte{0x80, 0xff} { // 64 MiB and the format's largest window.
+			t.Run(fmt.Sprintf("%s/window_%02x", name, descriptor), func(t *testing.T) {
+				body := append(append([]byte{}, prefix...), []byte{0x28, 0xb5, 0x2f, 0xfd, 0, descriptor, 0x11, 0, 0, '{', '}'}...)
+				h := decodeRequestBodyMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					t.Fatal("oversized window reached handler")
+				}))
+				req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+				req.Header.Set("Content-Encoding", "zstd")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusRequestEntityTooLarge {
+					t.Fatalf("status=%d want=413 body=%s", rec.Code, rec.Body.String())
+				}
+			})
+		}
 	}
 }
