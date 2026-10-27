@@ -94,6 +94,10 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			if writeRequestMemoryError(w, r, err) {
 				return
 			}
+			if errors.Is(err, errRequestBodyTooLarge) {
+				writeUpstreamError(w, r, http.StatusRequestEntityTooLarge, "request_body_too_large", "请求体超过网关上限")
+				return
+			}
 			log.Printf("[请求解码] traceId=%s 结果=失败 编码=%s 原因=%v", w.Header().Get("X-Trace-ID"), encoding, err)
 			writeUpstreamError(w, r, http.StatusBadRequest, "invalid_request_encoding", "请求体不是有效的 "+encoding+" 数据")
 			return
@@ -151,7 +155,8 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 		// Bound decoder window/memory independently of the compressed input.
 		zr, err := zstd.NewReader(bytes.NewReader(raw),
 			zstd.WithDecoderConcurrency(1),
-			zstd.WithDecoderMaxMemory(uint64(requestCompressedLimit)),
+			zstd.WithDecoderMaxMemory(uint64(requestDecodedLimit)),
+			zstd.WithDecoderMaxWindow(uint64(requestDecodedLimit)),
 		)
 		if err != nil {
 			return nil, err
@@ -170,6 +175,9 @@ func decodeCompressedBodyWithMemory(encoding string, raw []byte, lease *requestM
 	}
 	out, err := io.ReadAll(io.LimitReader(reader, requestDecodedLimit+1))
 	if err != nil {
+		if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) || errors.Is(err, zstd.ErrFrameSizeExceeded) {
+			return nil, errRequestBodyTooLarge
+		}
 		return nil, err
 	}
 	if len(out) > requestDecodedLimit {

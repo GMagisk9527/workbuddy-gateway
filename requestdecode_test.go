@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,16 @@ func gzipBytes(t *testing.T, raw []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func zstdSingleSegmentBytes(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	zw, err := zstd.NewWriter(nil, zstd.WithSingleSegment(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zw.Close()
+	return zw.EncodeAll(raw, nil)
 }
 
 func zstdBytes(t *testing.T, raw []byte) []byte {
@@ -204,5 +215,44 @@ func TestCompressedRequestThroughRealChain(t *testing.T) {
 		if badCode := post([]byte("broken"), name); badCode != http.StatusBadRequest {
 			t.Fatalf("损坏的 %s 必须 400，实际 %d", name, badCode)
 		}
+	}
+}
+
+func TestDecodeZstdSingleSegmentBoundaries(t *testing.T) {
+	h := decodeRequestBodyMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, err := io.Copy(io.Discard, r.Body)
+		if err != nil {
+			http.Error(w, "read error", http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprint(w, n)
+	}))
+	cases := []struct {
+		name   string
+		size   int
+		status int
+	}{
+		{"17MiB", 17 << 20, http.StatusOK},
+		{"32MiB", requestDecodedLimit, http.StatusOK},
+		{"32MiB+1KiB", requestDecodedLimit + 1024, http.StatusRequestEntityTooLarge},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := bytes.Repeat([]byte("x"), tc.size)
+			encoded := zstdSingleSegmentBytes(t, raw)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(encoded))
+			req.Header.Set("Content-Encoding", "zstd")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status == http.StatusOK && rec.Body.String() != fmt.Sprint(tc.size) {
+				t.Fatalf("decoded size=%s want=%d", rec.Body.String(), tc.size)
+			}
+			if tc.status == http.StatusRequestEntityTooLarge && !strings.Contains(rec.Body.String(), "request_body_too_large") {
+				t.Fatalf("size error not mapped: %s", rec.Body.String())
+			}
+		})
 	}
 }
