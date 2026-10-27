@@ -1,0 +1,5 @@
+#!/bin/sh
+# Standalone rotation state; does not race the system-wide logrotate state file.
+set -eu
+exec /usr/sbin/logrotate --state /var/lib/logrotate/workbuddy-service-error.status \
+    /etc/workbuddy-gateway/service-error.logrotate

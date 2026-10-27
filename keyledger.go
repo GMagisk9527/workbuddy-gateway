@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,7 +58,8 @@ type ledgerSnapshot struct {
 	// Archived 保存已删除 Key 的历史消费（匿名归属），压缩时不会被丢弃。
 	Archived map[string]*apiKeyUsage `json:"archived,omitempty"`
 	// LostSettlements 记录 WAL 尾部被截断而无法确认的结算笔数（保守计数）。
-	LostSettlements int64 `json:"lostSettlements,omitempty"`
+	LostSettlements int64             `json:"lostSettlements,omitempty"`
+	PendingAttempts map[string]string `json:"pendingAttempts,omitempty"`
 }
 
 // ledgerDiskState distinguishes an uncompressed WAL from a lost snapshot.
@@ -68,15 +70,22 @@ type ledgerDiskState struct {
 	Incomplete       bool `json:"incomplete,omitempty"`
 }
 
+type ledgerWALFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
 var ledger struct {
 	mu              sync.Mutex
-	file            *os.File
+	file            ledgerWALFile
 	seq             atomic.Int64
 	pending         int
 	path            string
 	writable        bool
 	lostSettlements int64 // WAL 尾部被截断、无法确认的结算笔数（保守计数）
 	state           ledgerDiskState
+	pendingAttempts map[string]string
 }
 
 // ledgerLoad 先读快照，再重放 WAL 中比快照更新的条目。
@@ -131,6 +140,10 @@ func ledgerLoad(dir string) error {
 	apiKeys.archive = snap.Archived
 	apiKeys.mu.Unlock()
 	ledger.seq.Store(snap.LastSeq)
+	ledger.pendingAttempts = maps.Clone(snap.PendingAttempts)
+	if ledger.pendingAttempts == nil {
+		ledger.pendingAttempts = map[string]string{}
+	}
 	ledger.lostSettlements = snap.LostSettlements
 	if snap.LostSettlements > 0 {
 		state.Incomplete = true
@@ -206,6 +219,8 @@ func ledgerLoad(dir string) error {
 
 	replayed := 0
 	firstSeq := int64(0)
+	previousSeq := int64(0)
+	nextReplay := snap.LastSeq + 1
 	if len(body) > 0 {
 		lines := strings.Split(string(body), "\n")
 		for idx, line := range lines {
@@ -220,9 +235,17 @@ func ledgerLoad(dir string) error {
 			if firstSeq == 0 {
 				firstSeq = e.Seq
 			}
+			if e.Seq <= 0 || (previousSeq > 0 && e.Seq != previousSeq+1) {
+				return fmt.Errorf("WAL 第 %d 行序号不连续，拒绝以部分账本启动", idx+1)
+			}
+			previousSeq = e.Seq
 			if e.Seq <= snap.LastSeq {
 				continue
 			}
+			if e.Seq != nextReplay {
+				return fmt.Errorf("WAL 第 %d 行缺少快照后的结算序号，拒绝启动", idx+1)
+			}
+			nextReplay++
 			ledgerApply(e)
 			if e.Seq > ledger.seq.Load() {
 				ledger.seq.Store(e.Seq)
@@ -247,6 +270,10 @@ func ledgerLoad(dir string) error {
 	}
 	if ledger.lostSettlements > 0 {
 		state.Incomplete = true
+	}
+	if len(ledger.pendingAttempts) > 0 {
+		state.Incomplete = true
+		log.Printf("[账本] 严重=存在未完成的持久化调用凭据 数量=%d 业务影响=有限额 Key 停止放行，需核对消耗后恢复", len(ledger.pendingAttempts))
 	}
 	ledger.state = state
 	if err := persistLedgerState(dir, state); err != nil {
@@ -363,6 +390,14 @@ func extractKeyIDFromBrokenEntry(text string) string {
 // ledgerApply 重放一条记录。全部按增量累加；日/月额度只累加归属窗口等于
 // 当前窗口的条目，昨天的消费不会算进今天的额度。
 func ledgerApply(e ledgerEntry) {
+	if e.Kind == "begin" {
+		ledger.pendingAttempts[e.Attempt] = e.Key
+		return
+	}
+	delete(ledger.pendingAttempts, e.Attempt)
+	if e.Kind == "cancel" {
+		return
+	}
 	apiKeys.mu.RLock()
 	k := apiKeys.byID[e.Key]
 	apiKeys.mu.RUnlock()
@@ -434,32 +469,39 @@ func nextLedgerSeq() int64 { return ledger.seq.Add(1) }
 // ledgerAppendLocked 在已持有 ledger.mu 时追加一行（不负责加锁）。
 func ledgerAppendLocked(e ledgerEntry) error {
 	if !ledger.writable || ledger.file == nil {
-		apiKeys.degraded.Store(true)
-		return errors.New("账本不可写")
+		return ledgerWriteFailedLocked(errors.New("账本不可写"))
 	}
 	line, err := json.Marshal(e)
 	if err != nil {
-		apiKeys.degraded.Store(true)
-		return err
+		return ledgerWriteFailedLocked(err)
 	}
 	line = append(line, '\n')
-	if _, werr := ledger.file.Write(line); werr != nil {
-		apiKeys.degraded.Store(true)
-		return werr
+	if n, werr := ledger.file.Write(line); werr != nil || n != len(line) {
+		if werr == nil {
+			werr = errors.New("WAL 写入不完整")
+		}
+		return ledgerWriteFailedLocked(werr)
 	}
 	if err := ledger.file.Sync(); err != nil {
-		apiKeys.degraded.Store(true)
-		return err
+		return ledgerWriteFailedLocked(err)
+	}
+	if ledger.pendingAttempts == nil {
+		ledger.pendingAttempts = map[string]string{}
+	}
+	if e.Kind == "begin" {
+		ledger.pendingAttempts[e.Attempt] = e.Key
+	} else {
+		delete(ledger.pendingAttempts, e.Attempt)
 	}
 	ledger.pending++
 	return nil
 }
 
 func ledgerAppend(e ledgerEntry) {
+	ledger.mu.Lock()
 	if e.Seq == 0 {
 		e.Seq = nextLedgerSeq()
 	}
-	ledger.mu.Lock()
 	err := ledgerAppendLocked(e)
 	ledger.mu.Unlock()
 	if err != nil {
@@ -491,7 +533,7 @@ func ledgerCompact() {
 		cp := *u
 		archived[id] = &cp
 	}
-	snap := ledgerSnapshot{Version: 1, LastSeq: ledger.seq.Load(), Keys: map[string]*apiKeyUsage{}, Archived: archived, LostSettlements: ledger.lostSettlements}
+	snap := ledgerSnapshot{Version: 1, LastSeq: ledger.seq.Load(), Keys: map[string]*apiKeyUsage{}, Archived: archived, LostSettlements: ledger.lostSettlements, PendingAttempts: maps.Clone(ledger.pendingAttempts)}
 	// Membership must stay fixed across both collections: deletion transfers a
 	// key's usage to archive, and must not fall between these two reads.
 	for id, k := range apiKeys.byID {
@@ -549,7 +591,10 @@ func ledgerCompact() {
 	}
 	// 3) 快照提交成功，才允许截断 WAL；先 Sync 保证已提交的行不再丢失
 	if ledger.file != nil {
-		_ = ledger.file.Sync()
+		if err := ledger.file.Sync(); err != nil {
+			ledgerWriteFailedLocked(err)
+			return
+		}
 		// Windows append handles do not grant truncation access. Keep the append
 		// handle, and truncate through a separate write handle under ledger.mu.
 		tf, err := os.OpenFile(ledger.path, os.O_WRONLY, 0o600)

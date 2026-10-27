@@ -71,19 +71,20 @@ func loadAuthSwitch(dir string) error {
 // setAuthSwitch 原子写入开关文件。
 func setAuthSwitch(dir string, require bool) error {
 	authSwitchMu.Lock()
-	authSwitchOn = require
-	authSwitchMu.Unlock()
+	defer authSwitchMu.Unlock()
+	if require {
+		authSwitchOn = true
+	}
 	doc := authSwitchDoc{RequireAuth: require, UpdatedAt: time.Now().UnixMilli()}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
-	path := authSwitchPath(dir)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := writeLedgerFileAtomic(authSwitchPath(dir), raw); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	authSwitchOn = require
+	return nil
 }
 
 func authSwitchEnabled() bool {

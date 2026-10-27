@@ -276,8 +276,12 @@ func TestFirstTokenDeadlineDuringSettlementReportsFailure(t *testing.T) {
 	plain, key := mustCreateKey(t, keyCreateOptions{Name: "deadline-in-settlement", QuotaTotal: 20})
 	budgetReady := make(chan *firstTokenBudget, 1)
 	var calls atomic.Int32
+	var settlementLocked atomic.Bool
 	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
+		// The call's begin record must be durable before blocking settlement.
+		ledger.mu.Lock()
+		settlementLocked.Store(true)
 		budgetReady <- firstTokenFor(req)
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: &readErrorBody{err: errors.New("read: connection reset by peer")}, Request: req}, nil
 	})}
@@ -285,10 +289,8 @@ func TestFirstTokenDeadlineDuringSettlementReportsFailure(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+plain)
 	w := newLockedResponseWriter()
 	done := make(chan struct{})
-	ledger.mu.Lock()
-	locked := true
 	defer func() {
-		if locked {
+		if settlementLocked.Swap(false) {
 			ledger.mu.Unlock()
 		}
 		select {
@@ -310,7 +312,7 @@ func TestFirstTokenDeadlineDuringSettlementReportsFailure(t *testing.T) {
 		t.Fatal("first-token budget never expired")
 	}
 	ledger.mu.Unlock()
-	locked = false
+	settlementLocked.Store(false)
 	select {
 	case <-done:
 	case <-time.After(time.Second):

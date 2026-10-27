@@ -158,8 +158,8 @@ func restoreStatsAccountStatesLocked() {
 		if !ok || acc.Disabled {
 			continue
 		}
-		acc.ModelStates = make(map[string]*modelRuntimeState, len(saved.ModelStates))
-		for model, row := range saved.ModelStates {
+		acc.ModelStates = make(map[string]*modelRuntimeState, min(len(saved.ModelStates), maxTrackedModels))
+		for model, row := range boundedModelStateSnapshots(saved.ModelStates) {
 			state := &modelRuntimeState{CostClass: row.CostClass, CooldownUntil: timeFromUnix(row.CooldownUntil),
 				QuotaBlocked: row.QuotaBlocked, NextProbeAt: timeFromUnix(row.NextProbeAt),
 				LastReason: row.LastReason, ObservedAt: timeFromUnix(row.ObservedAt)}
@@ -213,6 +213,15 @@ func loadOptionalStats() {
 		doc.Requests = compactStatsRequests(trimmed)
 	} else {
 		doc.Requests = trimmed
+	}
+	for id, account := range doc.Accounts {
+		account.ModelStates = boundedModelStateSnapshots(account.ModelStates)
+		doc.Accounts[id] = account
+	}
+	for i := range doc.Requests {
+		if !validModelName(doc.Requests[i].Model) {
+			doc.Requests[i].Model = overflowModelStat
+		}
 	}
 	requestStats.document, requestStats.mode = doc, "file"
 	requestStats.lastSaved = info.ModTime().UnixMilli()
@@ -349,14 +358,15 @@ func statsPersistenceLoop(ctx context.Context) {
 
 type statsRequestContextKey struct{}
 type statsAttempt struct {
-	id        string
-	attemptID string // 本次上游尝试的幂等键，用于额度结算去重
-	account   statsAccount
-	model     string
-	started   time.Time
-	usage     map[string]any
-	ttft      *float64
-	complete  bool
+	ledgerIntent bool // durable begin written before a managed-key upstream call
+	id           string
+	attemptID    string // 本次上游尝试的幂等键，用于额度结算去重
+	account      statsAccount
+	model        string
+	started      time.Time
+	usage        map[string]any
+	ttft         *float64
+	complete     bool
 	// settleUnknown 表示这次上游请求已经实际发生、但没有拿到可计费 usage。
 	// 即使下游因转换失败返回 4xx/5xx，也必须按未知消耗结算一次。
 	settleUnknown bool
@@ -466,6 +476,8 @@ func statsFinishAttempt(r *http.Request, status int) {
 				})
 			}
 		}
+	} else {
+		cancelKeyLedgerAttempt(p)
 	}
 	requestStats.Lock()
 	if !requestStats.enabled {

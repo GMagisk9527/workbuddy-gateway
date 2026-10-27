@@ -100,12 +100,18 @@ func (st *modelStat) windowAveragesLocked(now time.Time) (ttft time.Duration, ha
 }
 
 func modelStatLocked(model string) *modelStat {
+	if model != "" && !validModelName(model) {
+		model = overflowModelStat
+	}
 	model = normalizeModelName(model)
 	if model == "" {
 		model = "(默认)"
 	}
 	stat := modelStats[model]
 	if stat == nil {
+		if len(modelStats) >= maxTrackedModels-1 && model != overflowModelStat {
+			return modelStatLocked(overflowModelStat)
+		}
 		stat = &modelStat{}
 		modelStats[model] = stat
 	}

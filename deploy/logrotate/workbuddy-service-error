@@ -1,0 +1,11 @@
+# Only the service stderr file. App-managed gateway-*.log and billing WAL are excluded.
+/var/log/workbuddy-gateway/service-error.log {
+    daily
+    maxsize 8M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

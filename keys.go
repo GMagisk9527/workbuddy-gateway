@@ -282,11 +282,7 @@ func (s *keyStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return writeLedgerFileAtomic(s.path, data)
 }
 
 func (s *keyStore) persist() error {
@@ -381,16 +377,26 @@ func keyCreate(in keyCreateOptions) (string, *apiKey, error) {
 		apiKeys.mu.Unlock()
 		return "", nil, errKeyDuplicate
 	}
+	// The sticky auth switch must be durable before publishing the first key.
+	// A key-table failure must not reopen anonymous access after a restart.
+	if err = setAuthSwitch(keyDataDir, true); err != nil {
+		apiKeys.degraded.Store(true)
+		apiKeys.mu.Unlock()
+		return "", nil, err
+	}
 	apiKeys.byID[k.ID] = k
 	apiKeys.byPrefix[prefix] = k
 	apiKeys.requireAuth = true
 	err = apiKeys.persistLocked()
+	if err != nil {
+		delete(apiKeys.byID, k.ID)
+		delete(apiKeys.byPrefix, prefix)
+	}
 	apiKeys.mu.Unlock()
 	if err != nil {
 		apiKeys.degraded.Store(true)
 		return "", nil, err
 	}
-	ensureAuthSwitchOn(keyDataDir)
 	log.Printf("[APIKey] 结果=已创建 id=%s 前缀=%s 总额度=%.1f 日额度=%.1f 月额度=%.1f 并发=%d 说明=明文只在此处生成，不落盘",
 		k.ID, k.Prefix, k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly, k.concurrency())
 	return plain, k, nil
@@ -427,12 +433,17 @@ func keyRotate(id string) (string, *apiKey, error) {
 		return "", nil, errKeyDuplicate
 	}
 	k.mu.Lock()
-	oldPrefix := k.Prefix
+	oldPrefix, oldHash := k.Prefix, k.Hash
 	k.Prefix, k.Hash = prefix, hash
-	k.mu.Unlock()
 	delete(apiKeys.byPrefix, oldPrefix)
 	apiKeys.byPrefix[prefix] = k
 	err = apiKeys.persistLocked()
+	if err != nil {
+		k.Prefix, k.Hash = oldPrefix, oldHash
+		delete(apiKeys.byPrefix, prefix)
+		apiKeys.byPrefix[oldPrefix] = k
+	}
+	k.mu.Unlock()
 	apiKeys.mu.Unlock()
 	if err != nil {
 		apiKeys.degraded.Store(true)
@@ -451,11 +462,15 @@ func keyUpdate(id string, in keyCreateOptions) (*apiKey, error) {
 		return nil, errKeyNotFound
 	}
 	k.mu.Lock()
+	old := keyOptionsLocked(k)
 	k.Name, k.ExpiresAt, k.Models = in.Name, in.ExpiresAt, in.Models
 	k.MaxConcurrent, k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly = in.MaxConcurrent, in.QuotaTotal, in.QuotaDaily, in.QuotaMonthly
 	k.Note = in.Note
-	k.mu.Unlock()
 	err := apiKeys.persistLocked()
+	if err != nil {
+		applyKeyOptionsLocked(k, old)
+	}
+	k.mu.Unlock()
 	apiKeys.mu.Unlock()
 	if err != nil {
 		apiKeys.degraded.Store(true)
@@ -473,9 +488,13 @@ func keySetEnabled(id string, enabled bool) error {
 		return errKeyNotFound
 	}
 	k.mu.Lock()
+	oldEnabled := k.Enabled
 	k.Enabled = enabled
-	k.mu.Unlock()
 	err := apiKeys.persistLocked()
+	if err != nil {
+		k.Enabled = oldEnabled
+	}
+	k.mu.Unlock()
 	apiKeys.mu.Unlock()
 	if err != nil {
 		apiKeys.degraded.Store(true)
@@ -498,11 +517,23 @@ func keyDelete(id string) error {
 	k.mu.Lock()
 	archived := k.usage
 	k.mu.Unlock()
+	oldArchive, oldArchived := apiKeys.archive, apiKeys.archive[id]
 	if apiKeys.archive == nil {
 		apiKeys.archive = map[string]*apiKeyUsage{}
 	}
 	apiKeys.archive[id] = &archived
 	err := apiKeys.persistLocked()
+	if err != nil {
+		apiKeys.byID[id] = k
+		apiKeys.byPrefix[k.Prefix] = k
+		if oldArchive == nil {
+			apiKeys.archive = nil
+		} else if oldArchived == nil {
+			delete(apiKeys.archive, id)
+		} else {
+			apiKeys.archive[id] = oldArchived
+		}
+	}
 	apiKeys.mu.Unlock()
 	if err != nil {
 		apiKeys.degraded.Store(true)
@@ -511,6 +542,17 @@ func keyDelete(id string) error {
 	// 账本里的历史消费按 Key ID 保留，不随删除消失。
 	log.Printf("[APIKey] 结果=已删除 id=%s 说明=账本历史保留匿名归属，统计不丢失", id)
 	return nil
+}
+
+func keyOptionsLocked(k *apiKey) keyCreateOptions {
+	return keyCreateOptions{Name: k.Name, ExpiresAt: k.ExpiresAt, Models: k.Models, MaxConcurrent: k.MaxConcurrent,
+		QuotaTotal: k.QuotaTotal, QuotaDaily: k.QuotaDaily, QuotaMonthly: k.QuotaMonthly, Note: k.Note}
+}
+
+func applyKeyOptionsLocked(k *apiKey, in keyCreateOptions) {
+	k.Name, k.ExpiresAt, k.Models = in.Name, in.ExpiresAt, in.Models
+	k.MaxConcurrent, k.QuotaTotal, k.QuotaDaily, k.QuotaMonthly = in.MaxConcurrent, in.QuotaTotal, in.QuotaDaily, in.QuotaMonthly
+	k.Note = in.Note
 }
 
 // keyResetUsage 清零额度累计；历史消费事实仍保留在 WAL 中。
@@ -758,10 +800,11 @@ func (k *apiKey) setReject(reason string) {
 type keySettleOutcome string
 
 const (
-	settleCharged keySettleOutcome = "charged" // usage.credit > 0
-	settleZero    keySettleOutcome = "zero"    // 明确 0
-	settleUnknown keySettleOutcome = "unknown" // 字段缺失/非法
-	settleDup     keySettleOutcome = "duplicate"
+	settleCharged      keySettleOutcome = "charged" // usage.credit > 0
+	settleZero         keySettleOutcome = "zero"    // 明确 0
+	settleUnknown      keySettleOutcome = "unknown" // 字段缺失/非法
+	settleDup          keySettleOutcome = "duplicate"
+	settleStorageError keySettleOutcome = "storage_error"
 )
 
 // keySettle 按上游真实 usage.credit 记账。
@@ -809,6 +852,12 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	ledger.mu.Lock()
 	e.Seq = nextLedgerSeq()
 	werr := ledgerAppendLocked(e)
+	if werr != nil {
+		ledger.mu.Unlock()
+		unmarkSettled(attemptID)
+		log.Printf("[账本] 严重=结算落盘失败 key=%s attempt=%s 原因=%v 业务影响=未发布已结算用量，有限额 Key 已停止放行", k.ID, attemptID, werr)
+		return settleStorageError
+	}
 	// Keep membership fixed until this usage update is complete. Deletion either
 	// archives the updated usage afterwards, or happened earlier and needs this
 	// settlement merged into its archive. It must never do both.
@@ -844,9 +893,6 @@ func keySettle(k *apiKey, attemptID string, usage map[string]any, status int) ke
 	needCompact := ledger.pending >= ledgerCompactEvery
 	ledger.mu.Unlock()
 
-	if werr != nil {
-		log.Printf("[账本] 警告=结算落盘失败 key=%s attempt=%s 原因=%v 业务影响=内存已记，有限额 Key 已停止放行", k.ID, attemptID, werr)
-	}
 	if needCompact {
 		ledgerCompact()
 	}
@@ -885,6 +931,18 @@ func markSettled(id string) bool {
 		settledOrder = settledOrder[drop:]
 	}
 	return true
+}
+
+func unmarkSettled(id string) {
+	settledMu.Lock()
+	defer settledMu.Unlock()
+	delete(settledIDs, id)
+	for i, entry := range settledOrder {
+		if entry == id {
+			settledOrder = append(settledOrder[:i], settledOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

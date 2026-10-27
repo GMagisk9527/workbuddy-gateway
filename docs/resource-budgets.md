@@ -4,6 +4,9 @@
 已有配置省略新字段也会启用默认值；不会自动改写配置文件。完整示例见根目录
 `config.example.json`。
 
+模型标识及状态条目预算、Key/账本故障保护见 [模型与账本保护](model-ledger-hardening.md)。
+OpenRC 的 `service-error.log` 需单独安装 [服务日志轮转](../deploy/README.md)，不属于应用日志预算。
+
 ## 输出保留预算
 
 ```json

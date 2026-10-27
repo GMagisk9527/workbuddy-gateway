@@ -344,7 +344,10 @@ func TestLedgerCorruptSnapshotRefusesEmpty(t *testing.T) {
 }
 
 func TestKeyUsageEndpointIsolated(t *testing.T) {
-	resetKeyWorld(t)
+	dir := resetKeyWorld(t)
+	if err := ledgerLoad(dir); err != nil {
+		t.Fatal(err)
+	}
 	plainA, kA := mustCreateKey(t, keyCreateOptions{Name: "A", QuotaTotal: 10})
 	keySettle(kA, "u1", map[string]any{"credit": 2}, 200)
 
@@ -448,6 +451,7 @@ func TestDifferentKeysGetDifferentCallerFingerprint(t *testing.T) {
 		t.Fatalf("不同密钥必须产生不同调用方指纹: %q %q", a, b)
 	}
 }
+
 // ---------------------------------------------------------------------------
 // 基准：准入与鉴权开销
 // ---------------------------------------------------------------------------
@@ -495,6 +499,7 @@ func BenchmarkKeyAdmitLimited(b *testing.B) {
 		release()
 	}
 }
+
 // 重置后历史累计仍要能在面板上看到（/v1/usage 的 lifetime 字段）。
 func TestUsageViewExposesLifetime(t *testing.T) {
 	dir := resetKeyWorld(t)
@@ -519,6 +524,7 @@ func TestUsageViewExposesLifetime(t *testing.T) {
 		t.Fatalf("面板累计消费应取历史累计，实际 %v", summary["allTimeCredits"])
 	}
 }
+
 // 旧 Key 实际不限并发，面板必须显示「不限」而不是 1。
 func TestLegacyKeyReportsUnlimitedConcurrency(t *testing.T) {
 	resetKeyWorld(t)

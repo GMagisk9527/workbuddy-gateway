@@ -63,9 +63,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelName, _ := respReq["model"].(string)
-	if modelName == "" {
-		modelName = "hy4-preview"
+	modelName, modelErr := requestModel(respReq)
+	if modelErr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", modelErr.Error())
+		return
 	}
 	isStream, _ := respReq["stream"].(bool)
 	debugSetModelAndStream(r, modelName, isStream)
