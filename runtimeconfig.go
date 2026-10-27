@@ -197,7 +197,7 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	if hot {
 		g, _ := normalizeGatewayConfig(c.Gateway)
 		gatewayConfigMu.Lock()
-		if err := applyGatewayListenerPortsLocked(g, trace, func() error {
+		if err := applyGatewayListenerPortsLocked(g, trace, timeouts.read, func() error {
 			return switchDebugLogging(c.Debug.Enabled)
 		}); err != nil {
 			gatewayConfigMu.Unlock()

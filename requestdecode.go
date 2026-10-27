@@ -78,7 +78,7 @@ func decodeRequestBodyMiddleware(next http.Handler) http.Handler {
 			if writeRequestMemoryError(w, r, err) {
 				return
 			}
-			writeUpstreamError(w, r, http.StatusBadRequest, "invalid_request_encoding", "读取压缩请求体失败")
+			writeCompressedRequestBodyReadError(w, r, raw, err)
 			return
 		}
 		if len(raw) > requestCompressedLimit {

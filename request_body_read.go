@@ -65,15 +65,23 @@ func requestBodyReadTimedOut(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// writeModelRequestBodyReadError returns a protocol-shaped failure without
+// writeRequestBodyReadError returns a protocol-shaped read failure without
 // recording body contents. A read deadline is reported as 408 so clients can
-// distinguish a slow upload from invalid JSON.
-func writeModelRequestBodyReadError(w http.ResponseWriter, r *http.Request, body []byte, err error) {
-	status, code, message := http.StatusBadRequest, "read_error", "读取请求体失败"
+// distinguish a slow upload from malformed JSON.
+func writeRequestBodyReadError(w http.ResponseWriter, r *http.Request, body []byte, err error, code, message string) {
+	status := http.StatusBadRequest
 	if requestBodyReadTimedOut(err) {
 		status, code, message = http.StatusRequestTimeout, "request_body_timeout", "读取请求体超时，请检查上行带宽或减小请求体"
 	}
 	log.Printf("[请求体读取失败] traceId=%s 路径=%s 状态码=%d 错误类型=%s 声明字节=%d 已读字节=%d 说明=不记录正文或密钥",
 		debugTraceID(r), r.URL.Path, status, debugErrorType(err), r.ContentLength, len(body))
 	writeUpstreamError(w, r, status, code, message)
+}
+
+func writeModelRequestBodyReadError(w http.ResponseWriter, r *http.Request, body []byte, err error) {
+	writeRequestBodyReadError(w, r, body, err, "read_error", "读取请求体失败")
+}
+
+func writeCompressedRequestBodyReadError(w http.ResponseWriter, r *http.Request, body []byte, err error) {
+	writeRequestBodyReadError(w, r, body, err, "invalid_request_encoding", "读取压缩请求体失败")
 }

@@ -96,7 +96,7 @@ type gatewayServerManager struct {
 
 var gatewayServers gatewayServerManager
 
-func newGatewayHTTPSlot(addr string, web bool, life *gatewayLifecycle) *gatewayHTTPSlot {
+func newGatewayHTTPSlot(addr string, web bool, life *gatewayLifecycle, readTimeout time.Duration) *gatewayHTTPSlot {
 	var handler http.Handler
 	var server *http.Server
 	if web {
@@ -109,7 +109,7 @@ func newGatewayHTTPSlot(addr string, web bool, life *gatewayLifecycle) *gatewayH
 		handler = newAPIHandler()
 		server = &http.Server{
 			Addr: addr, Handler: handler, ReadHeaderTimeout: apiReadHeaderTimeout,
-			ReadTimeout: currentServiceTimeouts().read, WriteTimeout: 0,
+			ReadTimeout: readTimeout, WriteTimeout: 0,
 		}
 	}
 	if life != nil {
@@ -189,12 +189,12 @@ func portOf(addr net.Addr) string {
 // apply swaps changed listeners without closing established connections.
 // It validates and binds every new listener before retiring any old one.
 func (m *gatewayServerManager) apply(g gatewayFileConfig, apiPort int, webEnabled bool) (int, int, error) {
-	return m.applyWith(g, apiPort, webEnabled, nil)
+	return m.applyWith(g, apiPort, webEnabled, currentServiceTimeouts().read, nil)
 }
 
 // beforeCommit may prepare another fallible runtime resource (debug logging).
 // Run it only after all new ports bind, but before publishing/retiring listeners.
-func (m *gatewayServerManager) applyWith(g gatewayFileConfig, apiPort int, webEnabled bool, beforeCommit func() error) (int, int, error) {
+func (m *gatewayServerManager) applyWith(g gatewayFileConfig, apiPort int, webEnabled bool, readTimeout time.Duration, beforeCommit func() error) (int, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.life != nil && m.life.isDraining() {
@@ -245,7 +245,7 @@ func (m *gatewayServerManager) applyWith(g gatewayFileConfig, apiPort int, webEn
 			return currentAPI, currentWeb, fmt.Errorf("新 API 监听 %s 绑定失败: %w", net.JoinHostPort(m.addr, strconv.Itoa(apiPort)), err)
 		}
 		opened = append(opened, listener)
-		slot := newGatewayHTTPSlot(listener.Addr().String(), false, m.life)
+		slot := newGatewayHTTPSlot(listener.Addr().String(), false, m.life, readTimeout)
 		slot.listener = listener
 		newAPI = slot
 	}
@@ -256,7 +256,7 @@ func (m *gatewayServerManager) applyWith(g gatewayFileConfig, apiPort int, webEn
 			return currentAPI, currentWeb, fmt.Errorf("新 Web 监听 %s 绑定失败: %w", net.JoinHostPort(m.addr, strconv.Itoa(targetWeb)), err)
 		}
 		opened = append(opened, listener)
-		slot := newGatewayHTTPSlot(listener.Addr().String(), true, m.life)
+		slot := newGatewayHTTPSlot(listener.Addr().String(), true, m.life, 0)
 		slot.listener = listener
 		newWeb = slot
 	}
