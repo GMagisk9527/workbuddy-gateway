@@ -470,7 +470,7 @@ func freeModelDisplayCounts(rows []modelStatSnapshot) (cn, intl int) {
 	return cn, intl
 }
 
-// 调用方持有 accountMu，仅在展示数量发生变化时记录，避免每 3 秒重复刷日志。
+// 由 statusSnapshotWriteMu 保护，仅在展示数量发生变化时记录。
 var lastFreeModelDisplay struct {
 	initialized bool
 	cn, intl    int

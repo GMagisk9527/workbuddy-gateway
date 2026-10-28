@@ -2952,14 +2952,23 @@ type statusSnapshot struct {
 // writeStatusSnapshot 将账号池实时状态（含冷却/失效）原子写入状态快照文件。
 // serve 后台周期调用；monitor 命令前台读取展示。
 func writeStatusSnapshot() error {
+	return writeStatusSnapshotAt(time.Time{})
+}
+
+func writeStatusSnapshotAt(now time.Time) error {
 	statusSnapshotWriteMu.Lock()
 	defer statusSnapshotWriteMu.Unlock()
-	accountMu.Lock()
-	snap := statusSnapshot{UpdatedAt: time.Now().Unix()}
-	now := time.Now()
-	for _, acc := range accounts {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	snapshotAccounts := captureStatusSnapshotAccounts()
+	modelAccounts := make([]*Account, 0, len(snapshotAccounts))
+	snap := statusSnapshot{UpdatedAt: now.Unix()}
+	for _, captured := range snapshotAccounts {
+		acc := captured.Account
+		modelAccounts = append(modelAccounts, acc)
 		as := accountSnapshot{Path: acc.Path, Edition: acc.Profile().Key}
-		as.Checkin = dailyCheckins.view(checkinTargetLocked(acc), now)
+		as.Checkin = dailyCheckins.view(captured.checkin, now)
 		as.QuotaTotal = acc.QuotaTotal
 		as.QuotaUsed = acc.QuotaUsed
 		as.QuotaRemaining = acc.QuotaRemaining
@@ -2993,8 +3002,7 @@ func writeStatusSnapshot() error {
 			if amt, _ := acc.credits.expiringWithin(currentCreditSettings().Window, now); amt > 0 {
 				as.CreditExpiring = amt
 			}
-			pkgs := make([]creditPackage, len(acc.credits.Packages))
-			copy(pkgs, acc.credits.Packages)
+			pkgs := acc.credits.Packages // already an owned copy from capture
 			sortCreditsForDisplay(pkgs)
 			as.CreditPackages = pkgs
 		}
@@ -3055,10 +3063,9 @@ func writeStatusSnapshot() error {
 		snap.Accounts = append(snap.Accounts, as)
 	}
 	annotateAccountPolicies(snap.Accounts)
-	snap.ModelCatalog = buildAllModelStatSnapshots(now, accounts)
+	snap.ModelCatalog = buildAllModelStatSnapshots(now, modelAccounts)
 	snap.Affinity = affinitySnapshot()
 	snap.Credits = creditSnapshot()
-	captureAccountStatsLocked()
 	for _, row := range snap.ModelCatalog {
 		if disabled, _ := modelDisabled(row.ID); !disabled {
 			snap.Models = append(snap.Models, row)
@@ -3078,7 +3085,6 @@ func writeStatusSnapshot() error {
 		log.Printf("[兼容统计] traceId=%s 来源=模型统计站点倍率 国内=%d 国际=%d 模型行数=%d 规则=只计0.00x 业务影响=仅保留旧快照兼容字段，账号表不展示，不改实测账本、调度或计费判断",
 			newTraceID(), cnFree, intlFree, len(snap.Models))
 	}
-	accountMu.Unlock()
 
 	// 告警标记与快照同一次写入，避免出现「快照已异常、日志还没扫到」的时间差。
 	marks := recordAccountAlertMarks(snap.Accounts, snap.UpdatedAt)
@@ -3087,19 +3093,7 @@ func writeStatusSnapshot() error {
 	}
 	snap.AlertSource = alertSourceSnapshot
 
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return err
-	}
-	// 原子写：先写临时文件再改名，避免 monitor 读到半截内容
-	tmp := statusSnapshotFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, statusSnapshotFile); err != nil {
-		return err
-	}
-	return nil
+	return persistStatusSnapshot(snap, now)
 }
 
 func displayWidth(s string) int {
