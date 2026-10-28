@@ -260,10 +260,12 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 			upstreamCancel()
 			return nil, nil, budgetErr
 		}
+		client := cfg.HttpClient
+		var retryCleanup func()
 		if try > 0 {
-			// 重试时不复用已被对端关闭的空闲连接。
+			// Only this retry owns a fresh pool; other requests keep their idle connections.
 			req.Close = true
-			cfg.HttpClient.CloseIdleConnections()
+			client, retryCleanup = isolatedRetryClient(client)
 			log.Printf("[网络重试] traceId=%s requestId=%d 账号=%s 第 %d/%d 次重试，上一尝试请求头未写出，已重建连接（错误: %s）",
 				traceID, reqID, acc.Path, try, retries, safeDebugError(lastErr))
 		}
@@ -272,7 +274,16 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 		if attemptStats != nil {
 			attemptStats.cancelSafe = false
 		}
-		resp, err := cfg.HttpClient.Do(req)
+		resp, err := client.Do(req)
+		if retryCleanup != nil {
+			if err != nil {
+				retryCleanup()
+			} else {
+				resp.Body = newAccountStreamBody(resp.Body, retryCleanup)
+				parentCancel := upstreamCancel
+				upstreamCancel = func() { parentCancel(); retryCleanup() }
+			}
+		}
 		if err != nil {
 			mayHaveConsumed = mayHaveConsumed || headersWritten.Load() || bodyWritten.Load() || !definitelyUnsentUpstreamError(err)
 		} else {
