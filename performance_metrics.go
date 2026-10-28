@@ -62,6 +62,7 @@ type performanceCounters struct {
 
 type requestPerformance struct {
 	mu                                           sync.Mutex
+	traceID                                      string
 	protocol                                     int
 	start, preparing                             time.Time
 	closed                                       bool
@@ -99,6 +100,9 @@ func withRequestPerformance(r *http.Request, start time.Time) (*http.Request, *r
 		return r, nil
 	}
 	p := &requestPerformance{protocol: protocol, start: start}
+	if trace := debugTraceID(r); validDiagnosticTrace(trace) {
+		p.traceID = trace
+	}
 	phaseMetrics.live.begin(p)
 	return r.WithContext(context.WithValue(r.Context(), requestPerformanceKey{}, p)), p
 }
@@ -292,6 +296,7 @@ type performanceStore struct {
 	started time.Time
 	minutes [performanceWindowMinutes]performanceMinute
 	live    livePerformance
+	recent  requestDiagnosticRing
 }
 
 var phaseMetrics = &performanceStore{started: time.Now()}
@@ -334,6 +339,7 @@ func (p *requestPerformance) finish(store *performanceStore, status int, cancele
 	minute := now.Unix() / 60
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	store.rememberRequestLocked(p.traceID, protocol, status, now, counters, cells)
 	b := &store.minutes[(minute%performanceWindowMinutes+performanceWindowMinutes)%performanceWindowMinutes]
 	if b.minute > minute {
 		return
@@ -417,6 +423,19 @@ func (s *performanceStore) snapshot(now time.Time) performanceSnapshot {
 func handleWebUIPerformance(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "性能指标只支持 GET")
+		return
+	}
+	if trace := r.URL.Query().Get("trace"); trace != "" {
+		if !validDiagnosticTrace(trace) {
+			writeJSONError(w, http.StatusBadRequest, "Trace ID 格式无效")
+			return
+		}
+		entry, ok := phaseMetrics.requestDiagnostic(trace, time.Now())
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "近期未找到该请求；可能仍在执行、已过期或被有界记录淘汰")
+			return
+		}
+		writeAdminData(w, r, entry)
 		return
 	}
 	writeAdminData(w, r, struct {

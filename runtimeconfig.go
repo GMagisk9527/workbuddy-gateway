@@ -96,6 +96,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if c.Admission.MaxPreparing < 0 || c.Admission.MaxPreparing > normalizeAdmission(c.Admission).active {
 		return c, errors.New("admission.maxPreparing 必须为 0～maxActive；0 保留原整请求准入")
 	}
+	if c.Admission.MaxWaitingPerKey < 0 || c.Admission.MaxWaitingPerKey > 10000 {
+		return c, errors.New("admission.maxWaitingPerKey 必须为0～10000；0自动分配排队上限")
+	}
 	high, low := c.Admission.MemoryHighWatermarkPercent, c.Admission.MemoryLowWatermarkPercent
 	if high < 0 || high > 100 || low < 0 || low > 100 {
 		return c, errors.New("admission 内存水位必须为 0～100 的整数百分比")

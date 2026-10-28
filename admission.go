@@ -12,6 +12,8 @@ import (
 type admissionFileConfig struct {
 	MaxActive                  int   `json:"maxActive"`
 	MaxPreparing               int   `json:"maxPreparing"`
+	FairQueue                  *bool `json:"fairQueue"`
+	MaxWaitingPerKey           int   `json:"maxWaitingPerKey"`
 	MaxWaiting                 *int  `json:"maxWaiting"`
 	WaitTimeoutMs              int   `json:"waitTimeoutMs"`
 	MemoryProtection           *bool `json:"memoryProtection"`
@@ -41,7 +43,7 @@ func normalizeAdmission(c admissionFileConfig) admissionLimits {
 var errAdmissionFull = errors.New("request admission queue full")
 var errAdmissionTimeout = errors.New("request admission wait timed out")
 
-type admissionTicket struct{ id byte }
+type admissionTicket struct{ flow string }
 type requestAdmission struct {
 	mu             sync.Mutex
 	memory         *requestMemoryAdmission
@@ -51,11 +53,14 @@ type requestAdmission struct {
 	changed        chan struct{}
 	preparing      *requestAdmission
 	preparingLimit int
+	fair           bool
+	perKeyWaiting  int
+	flowActive     map[string]int
 }
 
 func newRequestAdmission() *requestAdmission {
-	g := &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{}), memory: newRequestMemoryAdmission()}
-	g.preparing = &requestAdmission{limits: admissionLimits{active: 1024, waiting: 8, wait: 15 * time.Second}, changed: make(chan struct{}), memory: g.memory}
+	g := &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{}), memory: newRequestMemoryAdmission(), fair: true, perKeyWaiting: 4}
+	g.preparing = &requestAdmission{limits: admissionLimits{active: 1024, waiting: 8, wait: 15 * time.Second}, changed: make(chan struct{}), memory: g.memory, fair: true, perKeyWaiting: 4}
 	return g
 }
 
@@ -76,10 +81,16 @@ func (g *requestAdmission) configure(c admissionFileConfig) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.limits = normalizeAdmission(c)
+	g.fair = c.FairQueue == nil || *c.FairQueue
+	g.perKeyWaiting = c.MaxWaitingPerKey
+	if g.perKeyWaiting == 0 {
+		g.perKeyWaiting = max(1, (g.limits.waiting+1)/2)
+	}
 	g.memory.configure(c)
 	g.preparingLimit = c.MaxPreparing
 	g.preparing.mu.Lock()
 	g.preparing.limits = g.limits
+	g.preparing.fair, g.preparing.perKeyWaiting = g.fair, g.perKeyWaiting
 	if c.MaxPreparing > 0 {
 		g.preparing.limits.active = c.MaxPreparing
 	} else {
@@ -119,15 +130,89 @@ func (g *requestAdmission) snapshot() (admissionLimits, int, int) {
 	defer g.mu.Unlock()
 	return g.limits, g.active, len(g.waiters)
 }
-func (g *requestAdmission) reserveLocked() func() {
+func (g *requestAdmission) reserveLocked(flow string) func() {
 	g.active++
+	if g.flowActive == nil {
+		g.flowActive = make(map[string]int)
+	}
+	g.flowActive[flow]++
 	var once sync.Once
-	return func() { once.Do(func() { g.mu.Lock(); defer g.mu.Unlock(); g.active--; g.notifyLocked() }) }
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			g.active--
+			g.flowActive[flow]--
+			if g.flowActive[flow] == 0 {
+				delete(g.flowActive, flow)
+			}
+			g.notifyLocked()
+		})
+	}
+}
+
+// Authenticated, server-issued Key IDs only. Caller headers never create queues.
+func admissionFlow(ctx context.Context) string {
+	if id, ok := ctx.Value(keyIdentityContextKey{}).(*keyIdentity); ok && id != nil {
+		return id.ID
+	}
+	return ""
+}
+
+func (g *requestAdmission) nextWaiterLocked() *admissionTicket {
+	if len(g.waiters) == 0 {
+		return nil
+	}
+	next := g.waiters[0]
+	if g.fair {
+		for _, t := range g.waiters[1:] {
+			if g.flowActive[t.flow] < g.flowActive[next.flow] {
+				next = t
+			}
+		}
+	}
+	return next
+}
+
+// Stable partition puts the remaining requests of this flow behind other flows.
+// Within a flow FIFO is preserved; equal-load flows take turns. Storage remains
+// bounded by the global queue and active permits, including across hot reloads.
+func (g *requestAdmission) popWaiterLocked(ticket *admissionTicket) {
+	for i, t := range g.waiters {
+		if t == ticket {
+			copy(g.waiters[i:], g.waiters[i+1:])
+			g.waiters[len(g.waiters)-1] = nil
+			g.waiters = g.waiters[:len(g.waiters)-1]
+			break
+		}
+	}
+	if g.fair {
+		n := 0
+		for _, t := range g.waiters {
+			if t.flow == ticket.flow {
+				n++
+			}
+		}
+		if n > 0 && n < len(g.waiters) {
+			same := make([]*admissionTicket, 0, n)
+			i := 0
+			for _, t := range g.waiters {
+				if t.flow == ticket.flow {
+					same = append(same, t)
+				} else {
+					g.waiters[i] = t
+					i++
+				}
+			}
+			copy(g.waiters[i:], same)
+		}
+	}
 }
 
 // acquire registers and checks admission under the same lock, so concurrent
 // arrivals cannot overfill the queue or bypass a previously queued request.
 func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
+	flow := admissionFlow(ctx)
 	g.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		g.mu.Unlock()
@@ -138,7 +223,7 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 		return nil, err
 	}
 	if g.active < g.limits.active && len(g.waiters) == 0 {
-		release := g.reserveLocked()
+		release := g.reserveLocked(flow)
 		g.mu.Unlock()
 		return release, nil
 	}
@@ -146,8 +231,19 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 		g.mu.Unlock()
 		return nil, errAdmissionFull
 	}
-	// Each allocation carries one byte, avoiding Go's zero-size pointer aliasing.
-	ticket := new(admissionTicket)
+	if g.fair && flow != "" {
+		queued := 0
+		for _, t := range g.waiters {
+			if t.flow == flow {
+				queued++
+			}
+		}
+		if queued >= g.perKeyWaiting {
+			g.mu.Unlock()
+			return nil, errAdmissionFull
+		}
+	}
+	ticket := &admissionTicket{flow: flow}
 	g.waiters = append(g.waiters, ticket)
 	wait := g.limits.wait
 	g.mu.Unlock()
@@ -156,7 +252,9 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 	remove := func() {
 		for i, t := range g.waiters {
 			if t == ticket {
-				g.waiters = append(g.waiters[:i], g.waiters[i+1:]...)
+				copy(g.waiters[i:], g.waiters[i+1:])
+				g.waiters[len(g.waiters)-1] = nil
+				g.waiters = g.waiters[:len(g.waiters)-1]
 				g.notifyLocked()
 				break
 			}
@@ -172,14 +270,14 @@ func (g *requestAdmission) acquire(ctx context.Context) (func(), error) {
 			}
 			return nil, errAdmissionTimeout
 		}
-		if g.active < g.limits.active && len(g.waiters) > 0 && g.waiters[0] == ticket {
+		if g.active < g.limits.active && g.nextWaiterLocked() == ticket {
 			if err := g.memory.checkAdmission(); err != nil {
 				remove()
 				g.mu.Unlock()
 				return nil, err
 			}
-			g.waiters = g.waiters[1:]
-			release := g.reserveLocked()
+			g.popWaiterLocked(ticket)
+			release := g.reserveLocked(flow)
 			g.notifyLocked()
 			g.mu.Unlock()
 			return release, nil

@@ -19,6 +19,8 @@
   "admission": {
     "maxActive": 8,
     "maxPreparing": 2,
+    "fairQueue": true,
+    "maxWaitingPerKey": 0,
     "maxWaiting": 8,
     "waitTimeoutMs": 15000,
     "memoryProtection": true,
