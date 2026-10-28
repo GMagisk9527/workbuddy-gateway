@@ -58,7 +58,7 @@ func beginKeyLedgerAttempt(r *http.Request) error {
 // Explicitly rejected/unsubmitted requests have no cost to settle, but must
 // close their durable begin record so a normal restart does not flag lost cost.
 func cancelKeyLedgerAttempt(p *statsAttempt) {
-	if !p.ledgerIntent {
+	if !p.ledgerIntent || !p.cancelSafe {
 		return
 	}
 	ledger.mu.Lock()

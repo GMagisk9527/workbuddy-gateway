@@ -670,6 +670,11 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	if err != nil {
 		completeTokenStream(body, false)
 		statsObserveUsage(r, usage, false)
+		if len(usage) == 0 {
+			if attempt := statsAttemptFor(r); attempt != nil {
+				attempt.settleUnknown = true
+			}
+		}
 		debugEvent(r, "error", "response_translation_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),

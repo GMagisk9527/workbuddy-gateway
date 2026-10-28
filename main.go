@@ -175,6 +175,11 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 	if err := beginKeyLedgerAttempt(r); err != nil {
 		return nil, nil, err
 	}
+	attemptStats := statsAttemptFor(r)
+	if attemptStats != nil {
+		attemptStats.cancelSafe = true
+	}
+	mayHaveConsumed := false
 	scope := retryScopeFor(r)
 	if scope == nil {
 		scope = upstreamRetries.scope()
@@ -264,7 +269,21 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 		}
 
 		performanceFor(r).networkAttempt(try > 0)
+		if attemptStats != nil {
+			attemptStats.cancelSafe = false
+		}
 		resp, err := cfg.HttpClient.Do(req)
+		if err != nil {
+			mayHaveConsumed = mayHaveConsumed || headersWritten.Load() || bodyWritten.Load() || !definitelyUnsentUpstreamError(err)
+		} else {
+			mayHaveConsumed = mayHaveConsumed || !unchargedUpstreamStatus(resp.StatusCode)
+		}
+		if attemptStats != nil {
+			attemptStats.cancelSafe = !mayHaveConsumed
+			if mayHaveConsumed && (err != nil || resp.StatusCode >= 400) {
+				attemptStats.settleUnknown = true
+			}
+		}
 		if releaseRetry != nil {
 			if err == nil {
 				resp.Body = newAccountStreamBody(resp.Body, releaseRetry)

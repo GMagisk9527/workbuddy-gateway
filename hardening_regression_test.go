@@ -307,6 +307,7 @@ func TestHardeningIntentCompletesWithoutFalseRecovery(t *testing.T) {
 			if mode == "settle" {
 				keySettle(k, p.attemptID, map[string]any{"credit": 2.0}, 200)
 			} else {
+				p.cancelSafe = true // This fixture explicitly represents an unsubmitted call.
 				cancelKeyLedgerAttempt(p)
 			}
 			if len(ledger.pendingAttempts) != 0 {

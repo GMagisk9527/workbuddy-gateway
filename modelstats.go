@@ -229,6 +229,7 @@ type ttftReader struct {
 	performance *requestPerformance
 	output      *outputLease
 	firstToken  *firstTokenBudget
+	attempt     *statsAttempt
 }
 
 func newTTFTReader(r io.Reader, start time.Time) *ttftReader {
@@ -240,6 +241,7 @@ func newRequestTTFTReader(req *http.Request, r io.Reader, start time.Time) *ttft
 	t.performance = performanceFor(req)
 	t.output = outputFor(req)
 	t.firstToken = firstTokenFor(req)
+	t.attempt = statsAttemptFor(req)
 	return t
 }
 
@@ -312,6 +314,9 @@ func (t *ttftReader) observeFirstToken() {
 	t.once.Do(func() {
 		if t.firstToken.finish() != nil {
 			return
+		}
+		if t.attempt != nil {
+			t.attempt.receivedOutput = true
 		}
 		t.d = time.Since(t.start)
 		t.performance.observe(phaseFirstToken, t.d, false)

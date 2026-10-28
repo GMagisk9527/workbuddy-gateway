@@ -379,8 +379,14 @@ func keyCreate(in keyCreateOptions) (string, *apiKey, error) {
 	}
 	// The sticky auth switch must be durable before publishing the first key.
 	// A key-table failure must not reopen anonymous access after a restart.
+	apiKeys.requireAuth = true
 	if err = setAuthSwitch(keyDataDir, true); err != nil {
 		apiKeys.degraded.Store(true)
+		// A damaged/unwritable keyauth path must not erase the auth intent.
+		// Persist only requireAuth (and existing keys), never the unreturned key.
+		if fallbackErr := apiKeys.persistLocked(); fallbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("鉴权保护的备用密钥表也无法落盘: %w", fallbackErr))
+		}
 		apiKeys.mu.Unlock()
 		return "", nil, err
 	}
