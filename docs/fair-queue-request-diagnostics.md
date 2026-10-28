@@ -2,7 +2,11 @@
 
 `admission.fairQueue` 默认开启，显式 `false` 恢复全局 FIFO。总准入与前处理两个队列均按鉴权后稳定 Key ID 分组，同一 Key 内 FIFO；在有等待请求时优先在途较少的 Key，同等在途数量时按 Key 轮转。空闲时单个 Key 可用满全局名额，原有 Key 硬并发上限仍先执行。已经开始的请求/SSE 不会被抢占或缩容中断。
 
-`maxWaitingPerKey` 是每个队列内单个已鉴权 Key 的等待上限，0（默认）取总等待上限的一半向上取整，最少1。总等待上限 `maxWaiting` 仍然有效，不为每个 Key 各分配一份全局队列。鉴权关闭且没有 Key 身份时沿用公共 FIFO，不接受客户端自报的身份创建队列；旧式共享 Key 作为一个调用方处理。取消/超时移除等待项，释放最后一个名额时清除对应活动计数。热更新保留已有计数与队列，不改变在途请求的结算覆盖范围。
+`maxWaitingPerKey` **仅在公平队列模式（`fairQueue:true` 或省略该字段）且请求已有鉴权 Key 身份时生效**，表示每个队列内该 Key 的等待上限。字段范围为0～10000的整数；0（默认）自动取总等待上限的一半向上取整，最少1，不表示无限排队。显式 `fairQueue:false` 使用全局 FIFO，`maxWaitingPerKey` 不参与准入判定；全局等待上限 `maxWaiting` 和原有 Key 硬并发限制继续生效。
+
+总等待上限不为每个 Key 各分配一份独立额度。鉴权关闭且没有 Key 身份时沿用公共 FIFO，不接受客户端自报的身份创建队列；旧式共享 Key 作为一个调用方处理。取消/超时移除等待项，释放最后一个名额时清除对应活动计数。热更新保留已有计数与队列，不改变在途请求的结算覆盖范围。
+
+完整默认字段见根目录 [config.example.json](../config.example.json)，主手册的[请求准入与有界排队](user-guide.md#请求准入与有界排队)也提供相同默认值的示例。
 
 ```json
 {"admission":{"maxActive":8,"maxPreparing":2,"maxWaiting":8,"fairQueue":true,"maxWaitingPerKey":0}}
