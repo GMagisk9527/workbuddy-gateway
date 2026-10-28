@@ -33,6 +33,23 @@ var (
 	currentIdentity      = defaultIdentitySettings()
 )
 
+const (
+	defaultWorkspaceRootPhrase = "workspace root"
+	defaultWorkspaceBasePhrase = "workspace base"
+	defaultUserPathsPhrase     = "are paths the user"
+	defaultUserPathsNeutral    = "are paths that the user"
+)
+
+func defaultIdentityReplacements(target string) map[string]string {
+	replacements := make(map[string]string, len(defaultIdentityTerms)+2)
+	for _, term := range defaultIdentityTerms {
+		replacements[term] = target
+	}
+	replacements[defaultWorkspaceRootPhrase] = defaultWorkspaceBasePhrase
+	replacements[defaultUserPathsPhrase] = defaultUserPathsNeutral
+	return replacements
+}
+
 func defaultIdentitySettings() identitySettings {
 	return identitySettings{enabled: true, prefix: replacementSystemPromptPrefix}
 }
@@ -69,8 +86,8 @@ func setIdentityConfig(c runtimeIdentityConfig) {
 			prefixTarget = replacement
 		}
 	} else {
-		for _, term := range defaultIdentityTerms {
-			replacements = append(replacements, identityReplacement{Old: term, New: target})
+		for old, newValue := range defaultIdentityReplacements(target) {
+			replacements = append(replacements, identityReplacement{Old: old, New: newValue})
 		}
 	}
 	// Longest first avoids splitting "Claude Code" into "Assistant Code".

@@ -72,16 +72,18 @@ type runtimeFileConfig struct {
 		Force    string `json:"force"`
 	} `json:"systemPrompt"`
 	// Omitted identity settings preserve the fork's existing neutral prefix.
-	Identity        runtimeIdentityConfig     `json:"identity"`
-	Concurrent      concurrentFileConfig      `json:"concurrent"`
-	Admission       admissionFileConfig       `json:"admission"`
-	Scheduling      schedulingFileConfig      `json:"scheduling"`
-	TokenEstimation tokenEstimationFileConfig `json:"tokenEstimation"`
-	Downstream      downstreamFileConfig      `json:"downstream"`
-	Server          serverFileConfig          `json:"server"`
-	Output          outputFileConfig          `json:"output"`
-	Retry           retryFileConfig           `json:"retry"`
-	Debug           struct {
+	// Accept but never execute the retired upstream field.
+	DeprecatedPromptCompatibility json.RawMessage           `json:"promptCompatibility,omitempty"`
+	Identity                      runtimeIdentityConfig     `json:"identity"`
+	Concurrent                    concurrentFileConfig      `json:"concurrent"`
+	Admission                     admissionFileConfig       `json:"admission"`
+	Scheduling                    schedulingFileConfig      `json:"scheduling"`
+	TokenEstimation               tokenEstimationFileConfig `json:"tokenEstimation"`
+	Downstream                    downstreamFileConfig      `json:"downstream"`
+	Server                        serverFileConfig          `json:"server"`
+	Output                        outputFileConfig          `json:"output"`
+	Retry                         retryFileConfig           `json:"retry"`
+	Debug                         struct {
 		Enabled bool `json:"enabled"`
 	} `json:"debug"`
 	Logs logFileConfig `json:"logs"`
