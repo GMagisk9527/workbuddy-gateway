@@ -988,7 +988,8 @@ workbuddy-gateway serve -auth-dir ./auths
 ```json
 {
   "admission": {
-    "maxActive": 2,
+    "maxActive": 8,
+    "maxPreparing": 2,
     "maxWaiting": 8,
     "waitTimeoutMs": 15000,
     "memoryProtection": true,
@@ -996,14 +997,15 @@ workbuddy-gateway serve -auth-dir ./auths
     "memoryHighWatermarkPercent": 85,
     "memoryLowWatermarkPercent": 75
   },
-  "scheduling": {"loadAware": true, "affinityWaitMs": 250, "waitTimeoutMs": 15000}
+  "scheduling": {"loadAware": true, "affinityWaitMs": 250, "cacheAffinityWaitMs": 1500, "waitTimeoutMs": 15000}
 }
 ```
 
 - `admission` 在鉴权和 Key 准入之后、解压与 JSON 解析之前生效。覆盖 Chat、Responses、Messages、count_tokens 及已通过管理员鉴权的 probe 请求；健康检查、模型列表和用量查询不占名额。兼容旧 Key 同样受全局请求准入约束。
-- 默认同时处理 2 个请求、最多等待 8 个、最多排队 15 秒；排队期间不读取或解析请求体、不发送 SSE 心跳或上游请求。队列满或等待超时返回 HTTP 429 和 `Retry-After: 1`，Messages 使用 Anthropic 错误格式。
-- 名额持续到整个处理结束，包含上游流及本地聚合。此限制与 `concurrent` 同时生效，因此默认 API 实际总并发最多为 2，即使 `concurrent.MaxGlobal=0`。如有充足资源，可一起调高请求准入和上游并发。
+- 新生成配置最多保留 8 个在途请求，其中 2 个可同时读入/解码/转换，最多等待 8 个、最多排队 15 秒。总准入和前处理各有有界队列并共享等待期限；前处理等待者已包含在总在途数内。排队期间不读取或解析请求体、不发送 SSE 心跳或上游请求。队列满或等待超时返回 HTTP 429 和 `Retry-After: 1`，Messages 与 count_tokens 使用 Anthropic `rate_limit_error`。
+- 总在途名额持续到整个处理结束，包含上游流及本地聚合；前处理名额在转换完成、进入公共上游入口时归还。两者与 `concurrent` 和内存预算同时生效，新生成配置的总请求上限为 8，实际模型并发还取决于账号和全局模型上限。已有配置不会自动改写；旧配置省略 `maxPreparing` 保留整请求准入，省略 `maxActive` 时上限仍为 2。
 - `maxActive` 的 0/省略使用默认 2，允许最大 1024；`maxWaiting` 省略为 8，显式 0 表示不排队，最大 10000；`waitTimeoutMs` 的 0/省略为 15000，最大 600000。负数和错误类型拒绝加载。
+- 可用 `maxPreparing` 独立限制读入/解码/转换，新生成配置为总在途8、前处理2；旧配置省略该字段仍保持整请求准入。较长流不会占用已归还的前处理名额，输入/输出预算与总并发仍生效。`scheduling.cacheAffinityWaitMs` 可基于近期上游缓存证据延长大上下文软亲和；完整边界与启用示例见[分阶段准入与缓存亲和](staged-admission-cache-affinity.md)。
 - 配置可热加载：扩容唤醒等待者，缩容等待已有请求自然完成，不取消正在输出的流；已入队者沿用入队时的等待期限。FIFO 排队，取消会立即撤出队列并让后续请求继续。
 - 默认启用 `memoryProtection`。共享请求体预算覆盖读取中的输入和已经读完但响应尚未结束的请求；gzip / deflate / zstd 同时计算压缩数据与解压后的数据，分块上传也按实际读取逐步预留。提前关闭请求体不会释放预算，整个 handler 返回（含取消、错误和 panic）后才释放。
 - `maxBodyBytes` 是全局在途输入字节预算，0/省略为自动计算：取 64 MiB、有效 Go 内存上限的四分之一、各可读 cgroup 内存上限的八分之一中的最小值。没有相应上限的项不参与计算。例：Go `GOMEMLIMIT=48MiB`、cgroup 上限约 128 MB 时，自动预算为 12 MiB。可显式指定正整数字节数，最大 1 TiB；负数和小数拒绝加载。

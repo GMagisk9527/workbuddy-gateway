@@ -91,6 +91,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if c.Admission.MaxBodyBytes < 0 || c.Admission.MaxBodyBytes > 1<<40 {
 		return c, errors.New("admission.maxBodyBytes 必须为 0～1099511627776 的整数字节数；0 为自动预算")
 	}
+	if c.Admission.MaxPreparing < 0 || c.Admission.MaxPreparing > normalizeAdmission(c.Admission).active {
+		return c, errors.New("admission.maxPreparing 必须为 0～maxActive；0 保留原整请求准入")
+	}
 	high, low := c.Admission.MemoryHighWatermarkPercent, c.Admission.MemoryLowWatermarkPercent
 	if high < 0 || high > 100 || low < 0 || low > 100 {
 		return c, errors.New("admission 内存水位必须为 0～100 的整数百分比")
@@ -106,6 +109,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	}
 	if c.Scheduling.AffinityWaitMs < 0 || c.Scheduling.AffinityWaitMs > 60000 || c.Scheduling.WaitTimeoutMs < 0 || c.Scheduling.WaitTimeoutMs > 600000 {
 		return c, errors.New("scheduling 亲和等待需为 0～60000 毫秒，总等待需为 0～600000 毫秒")
+	}
+	if c.Scheduling.CacheAffinityWaitMs < 0 || c.Scheduling.CacheAffinityWaitMs > 10000 {
+		return c, errors.New("scheduling.cacheAffinityWaitMs 必须为 0～10000；0 关闭缓存感知等待")
 	}
 	return c, nil
 }

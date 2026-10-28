@@ -72,7 +72,7 @@ func anthropicErrType(errType string) string {
 		return "authentication_error"
 	case "model_disabled", "model_account_disabled":
 		return "permission_error"
-	case "model_rate_limited", "all_accounts_cooldown", "request_queue_full", "request_queue_timeout":
+	case "model_rate_limited", "all_accounts_cooldown", "request_queue_full", "request_queue_timeout", "request_prepare_queue_full":
 		return "rate_limit_error"
 	case "no_available_account", "model_requires_quota", "concurrent_wait_canceled", "request_memory_pressure", "request_body_budget_exceeded", "gateway_draining", "upstream_retry_budget_exhausted":
 		return "overloaded_error"
