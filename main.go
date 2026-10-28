@@ -2957,10 +2957,13 @@ func writeStatusSnapshotAt(now time.Time) error {
 		now = time.Now()
 	}
 	snapshotAccounts := captureStatusSnapshotAccounts()
+	modelAccounts := make([]*Account, 0, len(snapshotAccounts))
 	snap := statusSnapshot{UpdatedAt: now.Unix()}
-	for _, acc := range snapshotAccounts {
+	for _, captured := range snapshotAccounts {
+		acc := captured.Account
+		modelAccounts = append(modelAccounts, acc)
 		as := accountSnapshot{Path: acc.Path, Edition: acc.Profile().Key}
-		as.Checkin = dailyCheckins.view(checkinTargetLocked(acc), now)
+		as.Checkin = dailyCheckins.view(captured.checkin, now)
 		as.QuotaTotal = acc.QuotaTotal
 		as.QuotaUsed = acc.QuotaUsed
 		as.QuotaRemaining = acc.QuotaRemaining
@@ -3055,7 +3058,7 @@ func writeStatusSnapshotAt(now time.Time) error {
 		snap.Accounts = append(snap.Accounts, as)
 	}
 	annotateAccountPolicies(snap.Accounts)
-	snap.ModelCatalog = buildAllModelStatSnapshots(now, snapshotAccounts)
+	snap.ModelCatalog = buildAllModelStatSnapshots(now, modelAccounts)
 	snap.Affinity = affinitySnapshot()
 	snap.Credits = creditSnapshot()
 	for _, row := range snap.ModelCatalog {

@@ -10,13 +10,18 @@ import (
 	"time"
 )
 
+type statusSnapshotAccount struct {
+	*Account
+	checkin checkinTarget
+}
+
 // Capture only the fields used by status/model presentation. Never copy the
 // live credential mutex or expose mutable maps/slices after accountMu unlocks.
-func captureStatusSnapshotAccounts() []*Account {
+func captureStatusSnapshotAccounts() []statusSnapshotAccount {
 	accountMu.Lock()
 	defer accountMu.Unlock()
 	captureAccountStatsLocked()
-	out := make([]*Account, 0, len(accounts))
+	out := make([]statusSnapshotAccount, 0, len(accounts))
 	for _, a := range accounts {
 		c := &Account{Path: a.Path, CooldownUntil: a.CooldownUntil, CooldownMsg: a.CooldownMsg,
 			Disabled: a.Disabled, DisabledReason: a.DisabledReason, Nickname: a.Nickname, UID: a.UID, Edition: a.Edition,
@@ -39,7 +44,12 @@ func captureStatusSnapshotAccounts() []*Account {
 				}
 			}
 		}
-		out = append(out, c)
+		// Eligibility depends on the live AccessToken, which the presentation
+		// copy deliberately omits. Keep only the derived identity and flags;
+		// view never needs the source account or permission to dispatch work.
+		checkin := checkinTargetLocked(a)
+		checkin.account = nil
+		out = append(out, statusSnapshotAccount{Account: c, checkin: checkin})
 	}
 	return out
 }
