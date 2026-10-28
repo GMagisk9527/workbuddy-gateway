@@ -50,6 +50,7 @@ func isolatedGatewayConfig(t *testing.T) {
 	gatewayConfigMu.Unlock()
 	oldPrompts := configuredSystemPrompts()
 	oldProfile := officialRequests.Load()
+	oldDeprecatedCompatibility := deprecatedPromptCompatibilityPresent.Load()
 	oldConcurrent, _, _ := modelConcurrency.snapshot("")
 	oldAdmission, oldScheduling := ingressAdmission, currentSchedulingConfig()
 	ingressAdmission = newRequestAdmission()
@@ -77,6 +78,7 @@ func isolatedGatewayConfig(t *testing.T) {
 		gatewayConfigMu.Unlock()
 		setSystemPromptConfig(oldPrompts.fallback, oldPrompts.force)
 		officialRequests.Store(oldProfile)
+		deprecatedPromptCompatibilityPresent.Store(oldDeprecatedCompatibility)
 		modelConcurrency.configure(oldConcurrent)
 		ingressAdmission = oldAdmission
 		setSchedulingConfig(oldScheduling)

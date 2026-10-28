@@ -14,6 +14,17 @@ import (
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	// Cross-compiled test binaries may run without their original build path.
+	// The deployment preflight supplies a private, extracted source snapshot.
+	if root := os.Getenv("WORKBUDDY_TEST_SOURCE_ROOT"); root != "" {
+		if !filepath.IsAbs(root) {
+			t.Fatal("WORKBUDDY_TEST_SOURCE_ROOT must be absolute")
+		}
+		if info, err := os.Stat(filepath.Join(root, "go.mod")); err != nil || !info.Mode().IsRegular() {
+			t.Fatal("WORKBUDDY_TEST_SOURCE_ROOT must contain the test source tree")
+		}
+		return root
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate source file")
@@ -113,6 +124,34 @@ func TestConfigExampleStartsFreshDeployment(t *testing.T) {
 	}
 	if currentAdminKey() != "" || currentAPIKey() != "" {
 		t.Fatal("示例配置不应预置任何 Key")
+	}
+}
+
+func TestConfigExampleKeepsIdentityCompatibilityOptIn(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c runtimeFileConfig
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.DeprecatedPromptCompatibility) != 0 {
+		t.Fatal("example must not generate the retired field")
+	}
+	if c.Identity.Enabled != nil || c.Identity.Target != "" || len(c.Identity.Replacements) != 0 {
+		t.Fatal("example must keep broad identity replacement opt-in")
+	}
+	t.Cleanup(func() { setIdentityConfig(runtimeIdentityConfig{}) })
+	setIdentityConfig(c.Identity)
+	original := "Codex; workspace root; are paths the user"
+	if got, changed := normalizeAssistantIdentityText(original); changed || got != original {
+		t.Fatal("default example changed ordinary instructions")
+	}
+	enabled := true
+	setIdentityConfig(runtimeIdentityConfig{Enabled: &enabled})
+	if got, changed := normalizeAssistantIdentityText(original); !changed || got != "WorkBuddy; workspace base; are paths that the user" {
+		t.Fatalf("explicit upstream compatibility rules got=%q changed=%t", got, changed)
 	}
 }
 

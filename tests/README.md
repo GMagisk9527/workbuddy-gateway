@@ -56,6 +56,8 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 协议回归另覆盖 CC 完整合成结构、ToolSearch 引用往返、拒答事件、思考展示与加密回传、
 跨 Key／模型／协议及篡改拒绝、metadata 回显和能力边界。所有正文、标识及工具参数均为
 合成数据，全部夹具在本地构造，不读取用户会话或凭据。
+跨编译后的测试程序若在另一台机器运行，应提供同一提交的源码目录，并用 `WORKBUDDY_TEST_SOURCE_ROOT` 指定其绝对路径；这样即使使用 `-trimpath`，示例配置等文件测试也能正确定位，不必跳过这些测试。
+`identity_request_test.go` 验证文本替换仅由 `identity` 控制，七条内置规则显式启用、旧配置不改写及热加载保持有效；旧 `promptCompatibility` 字段只兼容读取并告警，不执行规则，不影响用户/工具内容，也不会放宽其他未知字段的校验。
 可选历史采集离线重放见[出站兼容说明](../docs/outbound-compatibility.md#验证与边界)，默认不会读取私有材料。
 
 输出、额外尝试和日志边界回归集中在 `output_budget_test.go`、`retry_budget_test.go`、
@@ -75,6 +77,15 @@ node --test tests/web/app.test.cjs
 ```
 
 `tests/web/app.test.cjs` 加载真实 `web/app.js`，使用合成 DOM / fetch 响应，不需要浏览器依赖、不调用生产接口。审计写入 `logs/webui-frontend-tests-dev-YYYY-MM-DD.jsonl`。
+
+可选真实浏览器回归需要 Python Playwright 和可用 Chromium，不纳入默认测试入口：
+
+```bash
+python tests/web/polling.browser.py
+python tests/web/polling.browser.py --browser "本机 Chromium 兼容浏览器的可执行文件路径"
+```
+
+该测试只加载仓库中的网页文件，将所有网络请求拦截为合成响应，验证成功/错误提示、页面位移、账号启停、表格局部更新、倍率详情保留及图表复用；不访问生产或上游，验收记录写入 `logs/polling-flicker-*.jsonl`。
 
 ## 构建脚本
 

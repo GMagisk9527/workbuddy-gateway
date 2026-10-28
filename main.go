@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	version = "1.14.38"
+	version = "1.14.41"
 
 	// 状态快照文件名：serve 后台周期写入，monitor 前台命令实时读取展示
 	statusSnapshotFile = "workbuddy-status.json"
@@ -720,9 +720,14 @@ func main() {
 	defer closeLog()
 	if serveCommand || command == "probe" {
 		// Config is loaded before logging is initialized. Persist its effective
-		// concurrency limits now as well, rather than leaving them console-only.
-		logConcurrentConfig(newTraceID())
-		logGatewayControls(newTraceID())
+		// runtime settings now as well, rather than leaving them console-only.
+		trace := newTraceID()
+		logConcurrentConfig(trace)
+		logGatewayControls(trace)
+		logIdentityRuntimeConfig(trace)
+		identityEnabled, _, identityRules := identitySettingsSummary()
+		log.Printf("[配置就绪] traceId=%s identity启用=%t identity规则数=%d 说明=启动配置已加载，后续修改可热加载；未记录Key或配置正文",
+			trace, identityEnabled, identityRules)
 	}
 	closeDebug := func() {}
 	if serveCommand {
