@@ -125,9 +125,10 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelName, _ := msgReq["model"].(string)
-	if modelName == "" {
-		modelName = "hy4-preview"
+	modelName, modelErr := requestModel(msgReq)
+	if modelErr != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", modelErr.Error())
+		return
 	}
 	isStream, _ := msgReq["stream"].(bool)
 	wantThinking := anthropicThinkingOn(msgReq)
@@ -1395,6 +1396,22 @@ func handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "无效的 JSON 请求体")
 		return
+	}
+	if _, err := requestModel(msgReq); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	messages, ok := msgReq["messages"].([]any)
+	if !ok {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "messages 字段必须是数组")
+		return
+	}
+	// Preserve the existing empty-array local-count compatibility.
+	if len(messages) > 0 {
+		if err := validateAnthropicChatInput(msgReq); err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 	}
 	tokens := estimateAnthropicInputTokens(msgReq)
 	debugEvent(r, "info", "tokens_estimated_locally", map[string]any{

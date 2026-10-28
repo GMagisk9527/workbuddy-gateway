@@ -158,8 +158,8 @@ func restoreStatsAccountStatesLocked() {
 		if !ok || acc.Disabled {
 			continue
 		}
-		acc.ModelStates = make(map[string]*modelRuntimeState, len(saved.ModelStates))
-		for model, row := range saved.ModelStates {
+		acc.ModelStates = make(map[string]*modelRuntimeState, min(len(saved.ModelStates), maxTrackedModels))
+		for model, row := range boundedModelStateSnapshots(saved.ModelStates) {
 			state := &modelRuntimeState{CostClass: row.CostClass, CooldownUntil: timeFromUnix(row.CooldownUntil),
 				QuotaBlocked: row.QuotaBlocked, NextProbeAt: timeFromUnix(row.NextProbeAt),
 				LastReason: row.LastReason, ObservedAt: timeFromUnix(row.ObservedAt)}
@@ -213,6 +213,15 @@ func loadOptionalStats() {
 		doc.Requests = compactStatsRequests(trimmed)
 	} else {
 		doc.Requests = trimmed
+	}
+	for id, account := range doc.Accounts {
+		account.ModelStates = boundedModelStateSnapshots(account.ModelStates)
+		doc.Accounts[id] = account
+	}
+	for i := range doc.Requests {
+		if !validModelName(doc.Requests[i].Model) {
+			doc.Requests[i].Model = overflowModelStat
+		}
 	}
 	requestStats.document, requestStats.mode = doc, "file"
 	requestStats.lastSaved = info.ModTime().UnixMilli()
@@ -349,14 +358,17 @@ func statsPersistenceLoop(ctx context.Context) {
 
 type statsRequestContextKey struct{}
 type statsAttempt struct {
-	id        string
-	attemptID string // 本次上游尝试的幂等键，用于额度结算去重
-	account   statsAccount
-	model     string
-	started   time.Time
-	usage     map[string]any
-	ttft      *float64
-	complete  bool
+	ledgerIntent   bool // durable begin written before a managed-key upstream call
+	cancelSafe     bool // affirmative proof of an unsent call or an uncharged rejection
+	receivedOutput bool // parsed model output precedes any later business rejection
+	id             string
+	attemptID      string // 本次上游尝试的幂等键，用于额度结算去重
+	account        statsAccount
+	model          string
+	started        time.Time
+	usage          map[string]any
+	ttft           *float64
+	complete       bool
 	// settleUnknown 表示这次上游请求已经实际发生、但没有拿到可计费 usage。
 	// 即使下游因转换失败返回 4xx/5xx，也必须按未知消耗结算一次。
 	settleUnknown bool
@@ -451,9 +463,10 @@ func statsFinishAttempt(r *http.Request, status int) {
 	}
 	// 额度结算：拿到 usage 的尝试按实测记账；已实际读取上游成功响应但
 	// 没有 usage 的聚合失败按未知消耗结算一次。换号失败的那次没有 usage，
-	// 也没有 settleUnknown 标记，仍不计费。
+	// 也没有 settleUnknown 标记时，只能在明确未发送或未计费时关闭 begin。
 	// 身份来自请求上下文，不依赖会被 statsSelectAccount 重置的 attempt。
-	if p.attemptID != "" && (len(p.usage) > 0 || p.settleUnknown || (p.id != "" && status < 400)) {
+	uncertain := !p.cancelSafe && (p.ledgerIntent || (p.id != "" && status < 400))
+	if p.attemptID != "" && (len(p.usage) > 0 || p.settleUnknown || uncertain) {
 		if identity := keyIdentityFor(r); identity != nil {
 			k := settlementKeyFor(r)
 			if k == nil {
@@ -466,6 +479,8 @@ func statsFinishAttempt(r *http.Request, status int) {
 				})
 			}
 		}
+	} else {
+		cancelKeyLedgerAttempt(p)
 	}
 	requestStats.Lock()
 	if !requestStats.enabled {

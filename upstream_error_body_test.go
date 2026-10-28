@@ -136,6 +136,9 @@ func TestUpstreamErrorBodyDeadlineReleasesResources(t *testing.T) {
 							t.Fatalf("missing bounded error-body failure: status=%d body=%s", w.Code, w.Body.String())
 						}
 					}
+					if tc.status >= 500 {
+						wantSettlements++
+					} // The 5xx attempt can have consumed quota even if its body stalls.
 					if calls.Load() != wantCalls || controlCalls.Load() != 0 || body.closes.Load() != 1 || ctx.Err() != nil {
 						t.Fatalf("timeout retried, failed cleanup, or canceled the client: calls=%d closes=%d clientErr=%v", calls.Load(), body.closes.Load(), ctx.Err())
 					}

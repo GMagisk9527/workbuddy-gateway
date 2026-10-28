@@ -38,11 +38,16 @@ func TestSyncHeartbeatFailureDuringSettlementPreventsReplay(t *testing.T) {
 	upstreamConfigMu.Unlock()
 	first := &readErrorBody{err: errors.New("read: connection reset by peer")}
 	var calls atomic.Int32
+	var settlementLocked atomic.Bool
 	oldClient := cfg.HttpClient
 	cfg.HttpClient = &http.Client{Transport: retryTransportFunc(func(req *http.Request) (*http.Response, error) {
 		body := io.ReadCloser(first)
 		if calls.Add(1) > 1 {
 			body = io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"unexpected replay\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		} else {
+			// Allow the durable begin record, then hold only settlement.
+			ledger.mu.Lock()
+			settlementLocked.Store(true)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: req}, nil
 	})}
@@ -51,10 +56,8 @@ func TestSyncHeartbeatFailureDuringSettlementPreventsReplay(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+plain)
 	w := &replayWindowFailWriter{lockedResponseWriter: newLockedResponseWriter(), failed: make(chan struct{})}
 	done := make(chan struct{})
-	ledger.mu.Lock()
-	locked := true
 	defer func() {
-		if locked {
+		if settlementLocked.Swap(false) {
 			ledger.mu.Unlock()
 		}
 		select {
@@ -81,7 +84,7 @@ func TestSyncHeartbeatFailureDuringSettlementPreventsReplay(t *testing.T) {
 		t.Fatal("heartbeat did not encounter the downstream write failure")
 	}
 	ledger.mu.Unlock()
-	locked = false
+	settlementLocked.Store(false)
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):

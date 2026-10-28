@@ -63,9 +63,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelName, _ := respReq["model"].(string)
-	if modelName == "" {
-		modelName = "hy4-preview"
+	modelName, modelErr := requestModel(respReq)
+	if modelErr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", modelErr.Error())
+		return
 	}
 	isStream, _ := respReq["stream"].(bool)
 	debugSetModelAndStream(r, modelName, isStream)
@@ -669,6 +670,11 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 	if err != nil {
 		completeTokenStream(body, false)
 		statsObserveUsage(r, usage, false)
+		if len(usage) == 0 {
+			if attempt := statsAttemptFor(r); attempt != nil {
+				attempt.settleUnknown = true
+			}
+		}
 		debugEvent(r, "error", "response_translation_failed", map[string]any{
 			"error_type": debugErrorType(err),
 			"error":      safeDebugError(err),

@@ -172,6 +172,14 @@ var legacyLargeBodyWarned atomic.Bool
 //
 // 返回的 cancel 用于在流式读取结束后取消上游 context（调用方负责）。
 func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, upstreamBytes []byte, reqID uint64, traceID string) (*http.Response, context.CancelFunc, error) {
+	if err := beginKeyLedgerAttempt(r); err != nil {
+		return nil, nil, err
+	}
+	attemptStats := statsAttemptFor(r)
+	if attemptStats != nil {
+		attemptStats.cancelSafe = true
+	}
+	mayHaveConsumed := false
 	scope := retryScopeFor(r)
 	if scope == nil {
 		scope = upstreamRetries.scope()
@@ -261,7 +269,21 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 		}
 
 		performanceFor(r).networkAttempt(try > 0)
+		if attemptStats != nil {
+			attemptStats.cancelSafe = false
+		}
 		resp, err := cfg.HttpClient.Do(req)
+		if err != nil {
+			mayHaveConsumed = mayHaveConsumed || headersWritten.Load() || bodyWritten.Load() || !definitelyUnsentUpstreamError(err)
+		} else {
+			mayHaveConsumed = mayHaveConsumed || !unchargedUpstreamStatus(resp.StatusCode)
+		}
+		if attemptStats != nil {
+			attemptStats.cancelSafe = !mayHaveConsumed
+			if mayHaveConsumed && (err != nil || resp.StatusCode >= 400) {
+				attemptStats.settleUnknown = true
+			}
+		}
 		if releaseRetry != nil {
 			if err == nil {
 				resp.Body = newAccountStreamBody(resp.Body, releaseRetry)
@@ -1153,8 +1175,8 @@ func restoreAccountRuntimeStateLocked() {
 		if len(state.ModelStates) == 0 {
 			continue
 		}
-		acc.ModelStates = make(map[string]*modelRuntimeState, len(state.ModelStates))
-		for model, saved := range state.ModelStates {
+		acc.ModelStates = make(map[string]*modelRuntimeState, min(len(state.ModelStates), maxTrackedModels))
+		for model, saved := range boundedModelStateSnapshots(state.ModelStates) {
 			restored := &modelRuntimeState{
 				CostClass: saved.CostClass, CooldownUntil: timeFromUnix(saved.CooldownUntil),
 				QuotaBlocked: saved.QuotaBlocked, NextProbeAt: timeFromUnix(saved.NextProbeAt),
@@ -1371,12 +1393,20 @@ func normalizeModelName(model string) string {
 }
 
 func modelStateLocked(acc *Account, model string) *modelRuntimeState {
+	if !canTrackAccountModel(acc, model) {
+		return &modelRuntimeState{CostClass: modelCostUnknown, QuotaBlocked: true}
+	}
 	if acc.ModelStates == nil {
 		acc.ModelStates = make(map[string]*modelRuntimeState)
 	}
 	model = normalizeModelName(model)
 	state := acc.ModelStates[model]
 	if state == nil {
+		if len(acc.ModelStates) >= maxTrackedModels {
+			if candidate, ok := accountModelEvictionCandidate(acc, time.Now()); ok {
+				delete(acc.ModelStates, candidate)
+			}
+		}
 		state = &modelRuntimeState{CostClass: modelCostUnknown}
 		acc.ModelStates[model] = state
 	}
@@ -1394,6 +1424,9 @@ func usableForModelReservationLocked(acc *Account, model string, now time.Time, 
 		return "", false
 	}
 	model = normalizeModelName(model)
+	if !canTrackAccountModel(acc, model) {
+		return "", false
+	}
 	state := acc.ModelStates[model]
 	if state == nil {
 		if !acc.QuotaExhausted {
@@ -4016,6 +4049,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		if err != nil {
 			acc.lock.RUnlock()
 			releaseSlot()
+			if errors.Is(err, errLedgerUnavailable) {
+				writeUpstreamError(w, r, http.StatusServiceUnavailable, "ledger_unavailable", errLedgerUnavailable.Error())
+				return nil, nil, nil, false
+			}
 			if errors.Is(err, errRetryBudget) {
 				w.Header().Set("Retry-After", "1")
 				writeUpstreamError(w, r, http.StatusServiceUnavailable, "upstream_retry_budget_exhausted", err.Error())
@@ -4253,13 +4290,13 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 核心特性：完全透传 model 字段
-	// 客户端传什么 model，我们就透传什么 model 给上游，不做任何硬编码限制！
-	modelName, _ := reqObj["model"].(string)
-	if modelName == "" {
-		modelName = "hy4-preview" // 默认保底
-		reqObj["model"] = modelName
+	// 保留目录外模型透传，仅限制标识长度与控制字符。
+	modelName, modelErr := requestModel(reqObj)
+	if modelErr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", modelErr.Error())
+		return
 	}
+	reqObj["model"] = modelName
 
 	isStream, _ := reqObj["stream"].(bool)
 	if !isStream {

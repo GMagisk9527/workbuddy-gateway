@@ -46,6 +46,15 @@ func reportUpstreamStreamRejection(r *http.Request, requestID uint64, model stri
 	if !errors.As(err, &rejection) {
 		return nil
 	}
+	// A channel rejection before output is an explicit uncharged result. A
+	// rejection after output or an earlier ambiguous send cannot erase cost.
+	if p := statsAttemptFor(r); p != nil {
+		if p.receivedOutput {
+			p.settleUnknown = true
+		} else if !p.settleUnknown {
+			p.cancelSafe = true
+		}
+	}
 	logUpstreamRejection(r, requestID, model, prof, http.StatusOK, rejection.info)
 	recordModelFailure(model, rejection.info.Code)
 	return rejection
