@@ -448,7 +448,7 @@ func statsFinishAttempt(r *http.Request, status int) {
 	performanceFor(r).setLivePhase(liveSettlement)
 	defer func() { recordPerformance(r, phaseSettlement, performanceStartedAt, false) }()
 	cachedTokens, cacheSource, hasCached := statsCachedValue(p.usage)
-	affinityObserveCache(p.cacheAffinityKey, p.account.File, cachedTokens, hasCached, p.complete && status < 400, time.Now())
+	affinityObserveCache(p.cacheAffinityKey, p.account.File, p.id, cachedTokens, hasCached, p.complete && status < 400, time.Now())
 	var cachedPtr *int64
 	if hasCached {
 		cachedPtr = &cachedTokens

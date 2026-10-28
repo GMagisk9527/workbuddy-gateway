@@ -18,6 +18,8 @@ func TestCacheAffinityRequiresRecentRepeatedUpstreamEvidence(t *testing.T) {
 	base := 250 * time.Millisecond
 	cfg := schedulingFileConfig{CacheAffinityWaitMs: 1500}
 	hint := cacheAffinityHint{key: "synthetic-cache-binding", inputBytes: 1 << 20}
+	withAccounts(t, mkAccount("a"), mkAccount("b"))
+	identity := affinityAccountIdentity("a")
 	affinityRemember(hint.key, "a")
 	check := func(want time.Duration, at time.Time) {
 		t.Helper()
@@ -26,9 +28,9 @@ func TestCacheAffinityRequiresRecentRepeatedUpstreamEvidence(t *testing.T) {
 		}
 	}
 	check(base, now)
-	affinityObserveCache(hint.key, "a", 790016, true, true, now)
+	affinityObserveCache(hint.key, "a", identity, 790016, true, true, now)
 	check(base, now)
-	affinityObserveCache(hint.key, "a", 790016, true, true, now)
+	affinityObserveCache(hint.key, "a", identity, 790016, true, true, now)
 	check(1500*time.Millisecond, now)
 	if got := cacheAffinityGrace(cacheAffinityHint{key: hint.key, inputBytes: 1024}, "a", base, cfg, now); got != base {
 		t.Fatal("short request waited for cache")
@@ -37,13 +39,13 @@ func TestCacheAffinityRequiresRecentRepeatedUpstreamEvidence(t *testing.T) {
 		t.Fatal("evidence crossed accounts")
 	}
 	check(base, now.Add(cacheAffinityEvidenceTTL))
-	affinityObserveCache(hint.key, "a", 790016, false, true, now.Add(time.Minute))
-	affinityObserveCache(hint.key, "a", 790016, true, false, now.Add(time.Minute))
+	affinityObserveCache(hint.key, "a", identity, 790016, false, true, now.Add(time.Minute))
+	affinityObserveCache(hint.key, "a", identity, 790016, true, false, now.Add(time.Minute))
 	check(base, now.Add(cacheAffinityEvidenceTTL))
-	affinityObserveCache(hint.key, "a", 0, true, true, now)
+	affinityObserveCache(hint.key, "a", identity, 0, true, true, now)
 	check(base, now)
-	affinityObserveCache(hint.key, "a", 790016, true, true, now)
-	affinityObserveCache(hint.key, "a", 790016, true, true, now)
+	affinityObserveCache(hint.key, "a", identity, 790016, true, true, now)
+	affinityObserveCache(hint.key, "a", identity, 790016, true, true, now)
 	affinityRemember(hint.key, "b")
 	affinityRemember(hint.key, "a")
 	check(base, now)
@@ -64,8 +66,9 @@ func TestCacheAffinitySchedulerWaitsForProvenWarmAccount(t *testing.T) {
 	now := time.Now()
 	hint := cacheAffinityHint{key: "synthetic-warm-session", inputBytes: 1 << 20}
 	affinityRemember(hint.key, a.Path)
-	affinityObserveCache(hint.key, a.Path, 790016, true, true, now)
-	affinityObserveCache(hint.key, a.Path, 790016, true, true, now)
+	identity := affinityAccountIdentity(a.Path)
+	affinityObserveCache(hint.key, a.Path, identity, 790016, true, true, now)
+	affinityObserveCache(hint.key, a.Path, identity, 790016, true, true, now)
 	setSchedulingConfig(schedulingFileConfig{AffinityWaitMs: 5, CacheAffinityWaitMs: 1000, WaitTimeoutMs: 2000})
 	releaseTimer := time.AfterFunc(50*time.Millisecond, held)
 	defer releaseTimer.Stop()
@@ -87,6 +90,7 @@ func TestCacheAffinityLearnsOnlyFromCompletedAttemptUsage(t *testing.T) {
 	})
 	setAffinityConfig(true, "session", 1800, 8, 65536)
 	account := mkAccount("synthetic-usage-cache.json")
+	withAccounts(t, account)
 	key := "synthetic-usage-binding"
 	affinityRemember(key, account.Path)
 	cfg := schedulingFileConfig{CacheAffinityWaitMs: 1500}

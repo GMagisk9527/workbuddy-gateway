@@ -123,12 +123,13 @@ func setAffinityConfig(enabled bool, mode string, ttlSeconds, capacity, headByte
 // ---------------------------------------------------------------------------
 
 type affinityEntry struct {
-	key         string
-	account     string // Account.Path（凭据文件路径，进程内唯一且稳定）
-	at          int64  // 最近一次使用，UnixNano
-	cacheTokens int64
-	cacheHits   uint8
-	cacheAt     int64
+	key           string
+	account       string // Account.Path（凭据文件路径，进程内唯一且稳定）
+	at            int64  // 最近一次使用，UnixNano
+	cacheTokens   int64
+	cacheHits     uint8
+	cacheAt       int64
+	cacheIdentity string // Existing anonymized stats identity: path + site + UID + enterprise; not tokens.
 }
 
 type affinityStoreT struct {
@@ -231,6 +232,7 @@ func (s *affinityStoreT) put(key, account string, now time.Time) {
 			s.byAccount[account]++
 			item.account = account
 			item.cacheTokens, item.cacheHits, item.cacheAt = 0, 0, 0
+			item.cacheIdentity = ""
 		}
 		item.at = now.UnixNano()
 		s.lru.MoveToFront(el)
@@ -695,6 +697,7 @@ func (s *affinityStoreT) decAccount(account string) {
 //   - 新绑定本来就走既有轮询，分布天然均匀，限制极少触发；
 //   - 占比是"会话数"，不是"请求量"，用它调度等于用一个假信号换掉真实的缓存局部性；
 //   - 真正决定负载的是每账号的串行发送锁、429 冷却与配额阻断，这些已在调度器里生效。
+//
 // 因此这里只保留 byAccount 计数用于观察分布，不参与任何选号决策。
 func affinityBindingsByAccount() map[string]int {
 	affinityStoreMu.RLock()
