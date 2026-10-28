@@ -11,6 +11,7 @@
     "force": ""
   },
   "identity": {},
+  "tokenEstimation": {"modelMultipliers": {}},
   "concurrent": {
     "MaxAcc": 4,
     "MaxGlobal": 0

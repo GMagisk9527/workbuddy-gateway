@@ -1425,54 +1425,6 @@ func handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func estimateAnthropicInputTokens(body map[string]any) int {
-	var sb strings.Builder
-	if sys := extractAnthropicSystemText(body["system"]); sys != "" {
-		sb.WriteString(sys)
-		sb.WriteByte('\n')
-	}
-	if msgs, ok := body["messages"].([]any); ok {
-		for _, m := range msgs {
-			if msg, ok := m.(map[string]any); ok {
-				appendAnthropicContentText(&sb, msg["content"])
-				sb.WriteByte('\n')
-			}
-		}
-	}
-	n := approxTokens(sb.String())
-	if tools, ok := body["tools"].([]any); ok && len(tools) > 0 {
-		if b, err := json.Marshal(tools); err == nil {
-			n += len(b) / 4
-		}
-	}
-	return n
-}
-
-func appendAnthropicContentText(sb *strings.Builder, content any) {
-	switch c := content.(type) {
-	case string:
-		sb.WriteString(c)
-	case []any:
-		for _, bAny := range c {
-			blk, ok := bAny.(map[string]any)
-			if !ok {
-				continue
-			}
-			switch blk["type"] {
-			case "text":
-				sb.WriteString(strOf(blk["text"]))
-			case "tool_result":
-				sb.WriteString(anthropicContentText(blk["content"]))
-			case "tool_use":
-				sb.WriteString(strOf(blk["name"]))
-				if b, err := json.Marshal(blk["input"]); err == nil {
-					sb.Write(b)
-				}
-			}
-		}
-	}
-}
-
 func approxTokens(s string) int {
 	cjk, other := 0, 0
 	for _, r := range s {

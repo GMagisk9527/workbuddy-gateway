@@ -30,6 +30,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 | 贡献者及方案署名 | [docs/contributors.md](docs/contributors.md) |
 | 测试入口与说明 | [tests/README.md](tests/README.md) |
 | 请求分阶段性能、连接复用与百分位口径 | [docs/request-performance.md](docs/request-performance.md) |
+| 本地 token 计数、模型校准与隔离安全重试 | [docs/token-estimation-retry-isolation.md](docs/token-estimation-retry-isolation.md) |
 | 下游写入超时、在途指标与停机收尾 | [docs/stream-lifecycle.md](docs/stream-lifecycle.md) |
 | SSE 静默保活、首增量期限与事件分帧 | [docs/sse-liveness.md](docs/sse-liveness.md) |
 | 输出保留、统一额外尝试与日志大小预算 | [docs/resource-budgets.md](docs/resource-budgets.md) |

@@ -113,6 +113,9 @@ func parseRuntimeConfig(data []byte) (runtimeFileConfig, error) {
 	if c.Scheduling.CacheAffinityWaitMs < 0 || c.Scheduling.CacheAffinityWaitMs > 10000 {
 		return c, errors.New("scheduling.cacheAffinityWaitMs 必须为 0～10000；0 关闭缓存感知等待")
 	}
+	if _, err := normalizeTokenEstimation(c.TokenEstimation); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -188,6 +191,10 @@ func loadRuntimeConfig(path string) error {
 
 // 调用前已完整校验。先准备可失败的资源，再热切换；不打断已有连接/流。
 func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
+	multipliers, err := normalizeTokenEstimation(c.TokenEstimation)
+	if err != nil {
+		return err
+	}
 	firstTokenWait, err := normalizeFirstTokenTimeout(c.Upstream.FirstTokenTimeoutSeconds)
 	if err != nil {
 		return err
@@ -237,6 +244,7 @@ func applyRuntimeConfig(c runtimeFileConfig, hot bool, trace string) error {
 	modelConcurrency.configure(c.Concurrent)
 	ingressAdmission.configure(c.Admission)
 	setSchedulingConfig(c.Scheduling)
+	tokenEstimateMultipliers.Store(&multipliers)
 	logGatewayControls(trace)
 	logConcurrentConfig(trace)
 	identityEnabled, _, identityRuleCount := identitySettingsSummary()
