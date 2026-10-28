@@ -11,6 +11,7 @@ import (
 
 type admissionFileConfig struct {
 	MaxActive                  int   `json:"maxActive"`
+	MaxPreparing               int   `json:"maxPreparing"`
 	MaxWaiting                 *int  `json:"maxWaiting"`
 	WaitTimeoutMs              int   `json:"waitTimeoutMs"`
 	MemoryProtection           *bool `json:"memoryProtection"`
@@ -42,16 +43,20 @@ var errAdmissionTimeout = errors.New("request admission wait timed out")
 
 type admissionTicket struct{ id byte }
 type requestAdmission struct {
-	mu      sync.Mutex
-	memory  *requestMemoryAdmission
-	limits  admissionLimits
-	active  int
-	waiters []*admissionTicket
-	changed chan struct{}
+	mu             sync.Mutex
+	memory         *requestMemoryAdmission
+	limits         admissionLimits
+	active         int
+	waiters        []*admissionTicket
+	changed        chan struct{}
+	preparing      *requestAdmission
+	preparingLimit int
 }
 
 func newRequestAdmission() *requestAdmission {
-	return &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{}), memory: newRequestMemoryAdmission()}
+	g := &requestAdmission{limits: normalizeAdmission(admissionFileConfig{}), changed: make(chan struct{}), memory: newRequestMemoryAdmission()}
+	g.preparing = &requestAdmission{limits: admissionLimits{active: 1024, waiting: 8, wait: 15 * time.Second}, changed: make(chan struct{}), memory: g.memory}
+	return g
 }
 
 var ingressAdmission = newRequestAdmission()
@@ -60,7 +65,8 @@ func logGatewayControls(trace string) {
 	l, active, waiting := ingressAdmission.snapshot()
 	s := currentSchedulingConfig()
 	enabled := s.LoadAware == nil || *s.LoadAware
-	log.Printf("[请求控制配置] traceId=%s 准入=%d/%d 排队=%d/%d 排队期限=%v 负载感知=%t 说明=准入覆盖解码到响应结束；已有请求不因缩容中断", trace, active, l.active, waiting, l.waiting, l.wait, enabled)
+	_, preparing, preparingWaiting := ingressAdmission.preparingSnapshot()
+	log.Printf("[请求控制配置] traceId=%s 准入=%d/%d 排队=%d/%d 前处理=%d 前处理排队=%d 排队期限=%v 负载感知=%t 说明=总准入覆盖响应结束；可独立限制前处理；已有请求不因缩容中断", trace, active, l.active, waiting, l.waiting, preparing, preparingWaiting, l.wait, enabled)
 	used, limit, pressured := ingressAdmission.memory.snapshot()
 	log.Printf("[内存准入配置] traceId=%s 请求体预算=%d/%d字节 内存压力=%t 说明=预算包含压缩与解压后的输入；新请求受内存水位保护", trace, used, limit, pressured)
 }
@@ -71,7 +77,42 @@ func (g *requestAdmission) configure(c admissionFileConfig) {
 	defer g.mu.Unlock()
 	g.limits = normalizeAdmission(c)
 	g.memory.configure(c)
+	g.preparingLimit = c.MaxPreparing
+	g.preparing.mu.Lock()
+	g.preparing.limits = g.limits
+	if c.MaxPreparing > 0 {
+		g.preparing.limits.active = c.MaxPreparing
+	} else {
+		g.preparing.limits.active = 1024
+	}
+	g.preparing.notifyLocked()
+	g.preparing.mu.Unlock()
 	g.notifyLocked()
+}
+
+func (g *requestAdmission) preparingSnapshot() (limit, active, waiting int) {
+	g.mu.Lock()
+	limit = g.preparingLimit
+	g.mu.Unlock()
+	_, active, waiting = g.preparing.snapshot()
+	return
+}
+
+type preparationContextKey struct{}
+type preparationLease struct {
+	once    sync.Once
+	release func()
+}
+
+func (p *preparationLease) finish() {
+	if p != nil {
+		p.once.Do(p.release)
+	}
+}
+func finishRequestPreparation(r *http.Request) {
+	if p, _ := r.Context().Value(preparationContextKey{}).(*preparationLease); p != nil {
+		p.finish()
+	}
 }
 func (g *requestAdmission) snapshot() (admissionLimits, int, int) {
 	g.mu.Lock()
@@ -158,8 +199,8 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 		performanceFor(r).setLivePhase(liveAdmission)
 		gate := ingressAdmission
 		release, err := gate.acquire(r.Context())
-		recordPerformance(r, phaseAdmission, started, err != nil)
 		if err != nil {
+			recordPerformance(r, phaseAdmission, started, true)
 			if writeRequestMemoryError(w, r, err) {
 				return
 			}
@@ -181,6 +222,29 @@ func requestAdmissionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		defer release()
+		gLimit, _, _ := gate.preparingSnapshot()
+		if gLimit > 0 {
+			limits, _, _ := gate.snapshot()
+			ctx, cancel := context.WithDeadline(r.Context(), started.Add(limits.wait))
+			prepareRelease, prepareErr := gate.preparing.acquire(ctx)
+			cancel()
+			if prepareErr != nil {
+				recordPerformance(r, phaseAdmission, started, true)
+				if !writeRequestMemoryError(w, r, prepareErr) {
+					w.Header().Set("Retry-After", "1")
+					status, code := http.StatusTooManyRequests, "request_prepare_queue_full"
+					if r.Context().Err() != nil {
+						status, code = http.StatusRequestTimeout, "request_canceled"
+					}
+					writeUpstreamError(w, r, status, code, "等待前处理名额超时、取消或队列已满，未调用上游")
+				}
+				return
+			}
+			lease := &preparationLease{release: prepareRelease}
+			defer lease.finish()
+			r = r.WithContext(context.WithValue(r.Context(), preparationContextKey{}, lease))
+		}
+		recordPerformance(r, phaseAdmission, started, false)
 		performanceFor(r).setLivePhase(livePreparing)
 		lease := &requestMemoryLease{gate: gate.memory}
 		defer lease.release()

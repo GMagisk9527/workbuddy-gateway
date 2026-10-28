@@ -165,6 +165,9 @@ func (s *livePerformance) snapshot(now time.Time) [len(performanceProtocols) + 1
 }
 
 type liveRuntimeSnapshot struct {
+	PreparingActive     int    `json:"preparingActive"`
+	PreparingLimit      int    `json:"preparingLimit"`
+	PreparingWaiting    int    `json:"preparingWaiting"`
 	AdmissionActive     int    `json:"admissionActive"`
 	AdmissionLimit      int    `json:"admissionLimit"`
 	AdmissionWaiting    int    `json:"admissionWaiting"`
@@ -187,6 +190,7 @@ func snapshotLiveRuntime(r *http.Request) liveRuntimeSnapshot {
 	l, active, waiting := ingressAdmission.snapshot()
 	used, budget, pressure := ingressAdmission.memory.snapshot()
 	out := liveRuntimeSnapshot{AdmissionActive: active, AdmissionLimit: l.active, AdmissionWaiting: waiting, AdmissionQueueLimit: l.waiting, BodyBytes: used, BodyBudget: budget, MemoryPressure: pressure}
+	out.PreparingLimit, out.PreparingActive, out.PreparingWaiting = ingressAdmission.preparingSnapshot()
 	sample := retainedOutputs.sample()
 	retainedOutputs.mu.Lock()
 	_, out.OutputBudget = retainedOutputs.limitsLocked(sample)

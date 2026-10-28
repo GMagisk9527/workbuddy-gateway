@@ -123,9 +123,12 @@ func setAffinityConfig(enabled bool, mode string, ttlSeconds, capacity, headByte
 // ---------------------------------------------------------------------------
 
 type affinityEntry struct {
-	key     string
-	account string // Account.Path（凭据文件路径，进程内唯一且稳定）
-	at      int64  // 最近一次使用，UnixNano
+	key         string
+	account     string // Account.Path（凭据文件路径，进程内唯一且稳定）
+	at          int64  // 最近一次使用，UnixNano
+	cacheTokens int64
+	cacheHits   uint8
+	cacheAt     int64
 }
 
 type affinityStoreT struct {
@@ -177,7 +180,8 @@ func affinityStoreReconfigure(capacity int, ttl time.Duration) {
 	old.mu.Lock()
 	for e := old.lru.Back(); e != nil; e = e.Prev() {
 		item := e.Value.(*affinityEntry)
-		next.items[item.key] = next.lru.PushFront(&affinityEntry{key: item.key, account: item.account, at: item.at})
+		copy := *item
+		next.items[item.key] = next.lru.PushFront(&copy)
 		next.byAccount[item.account]++
 		for next.lru.Len() > next.cap {
 			back := next.lru.Back()
@@ -226,6 +230,7 @@ func (s *affinityStoreT) put(key, account string, now time.Time) {
 			s.decAccount(item.account)
 			s.byAccount[account]++
 			item.account = account
+			item.cacheTokens, item.cacheHits, item.cacheAt = 0, 0, 0
 		}
 		item.at = now.UnixNano()
 		s.lru.MoveToFront(el)

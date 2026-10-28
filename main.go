@@ -3911,6 +3911,7 @@ func authRequired() bool {
 // 成功时返回 200 响应（调用方负责关闭 Body）与命中的账号/站点；失败时函数内部已写回
 // 错误响应并返回 ok=false。Chat Completions 与 Responses 两个入口共用此逻辑。
 func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelName string, upstreamBytes []byte, startTime time.Time) (*http.Response, *Account, *upstreamProfile, bool) {
+	finishRequestPreparation(r)
 	performanceFor(r).endPrepare(false)
 	prepareConversationContext(r, nil)
 	traceID := w.Header().Get("X-Trace-ID")
@@ -3939,7 +3940,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 	for attempt := 0; attempt < poolSize; attempt++ {
 		performanceFor(r).setLivePhase(liveAccount)
 		accountStarted := performanceStarted(r)
-		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID)
+		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID, cacheAffinityHint{key: affKey, inputBytes: len(upstreamBytes)})
 		recordPerformance(r, phaseAccount, accountStarted, err != nil)
 		if err != nil {
 			if errors.Is(err, errSchedulingTimeout) || r.Context().Err() != nil {
@@ -4044,6 +4045,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		statsSelectAccount(r, acc, modelName)
 		if p := statsAttemptFor(r); p != nil {
 			p.affinity = affinityDecision
+			p.cacheAffinityKey = affKey
 		}
 		resp, upstreamCancel, err := doUpstreamRequest(r, acc, prof, upstreamBytes, reqID, traceID)
 		if err != nil {
@@ -4212,6 +4214,9 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				replayReq := r.WithContext(replayCtx)
 				statsFinishAttempt(replayReq, http.StatusOK)
 				statsSelectAccount(replayReq, acc, modelName)
+				if p := statsAttemptFor(replayReq); p != nil {
+					p.cacheAffinityKey = affKey
+				}
 				replayed, cancel, replayErr := doUpstreamRequest(replayReq, acc, prof, upstreamBytes, reqID, traceID)
 				if replayErr != nil {
 					// 重放没有真正发出或连接失败：按失败状态终结第二个 attempt，

@@ -10,9 +10,10 @@ import (
 )
 
 type schedulingFileConfig struct {
-	LoadAware      *bool `json:"loadAware"`
-	AffinityWaitMs int   `json:"affinityWaitMs"`
-	WaitTimeoutMs  int   `json:"waitTimeoutMs"`
+	LoadAware           *bool `json:"loadAware"`
+	AffinityWaitMs      int   `json:"affinityWaitMs"`
+	WaitTimeoutMs       int   `json:"waitTimeoutMs"`
+	CacheAffinityWaitMs int   `json:"cacheAffinityWaitMs"`
 }
 
 var schedulingMu sync.RWMutex
@@ -38,7 +39,7 @@ var errSchedulingTimeout = errors.New("model scheduling wait timed out")
 // Account eligibility and hard concurrency admission remain independent checks.
 // A busy sticky account gets a short grace period, then the same policy tier is
 // searched by load. No upstream request is sent while scheduling is waiting.
-func acquireScheduledAccount(r *http.Request, model string, attempted map[*Account]bool, prefer string, reqID uint64, trace string) (*Account, accountSelectionKind, func(), error) {
+func acquireScheduledAccount(r *http.Request, model string, attempted map[*Account]bool, prefer string, reqID uint64, trace string, hints ...cacheAffinityHint) (*Account, accountSelectionKind, func(), error) {
 	cfgSchedule := currentSchedulingConfig()
 	if cfgSchedule.LoadAware != nil && !*cfgSchedule.LoadAware {
 		a, k, err := nextAccountForModelPrefer(model, attempted, prefer)
@@ -56,6 +57,10 @@ func acquireScheduledAccount(r *http.Request, model string, attempted map[*Accou
 	if wait <= 0 {
 		wait = 15 * time.Second
 	}
+	if len(hints) > 0 {
+		grace = cacheAffinityGrace(hints[0], prefer, grace, cfgSchedule, time.Now())
+	}
+	grace = min(grace, wait)
 	ctx, cancel := context.WithTimeout(r.Context(), wait)
 	defer cancel()
 	if attempted == nil {

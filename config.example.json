@@ -16,7 +16,8 @@
     "MaxGlobal": 0
   },
   "admission": {
-    "maxActive": 2,
+    "maxActive": 8,
+    "maxPreparing": 2,
     "maxWaiting": 8,
     "waitTimeoutMs": 15000,
     "memoryProtection": true,
@@ -27,6 +28,7 @@
   "scheduling": {
     "loadAware": true,
     "affinityWaitMs": 250,
+    "cacheAffinityWaitMs": 1500,
     "waitTimeoutMs": 15000
   },
   "debug": {

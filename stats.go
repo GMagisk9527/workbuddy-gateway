@@ -371,8 +371,9 @@ type statsAttempt struct {
 	complete       bool
 	// settleUnknown 表示这次上游请求已经实际发生、但没有拿到可计费 usage。
 	// 即使下游因转换失败返回 4xx/5xx，也必须按未知消耗结算一次。
-	settleUnknown bool
-	affinity      string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
+	settleUnknown    bool
+	affinity         string // ""=未参与亲和 / hit=沿用绑定 / fallback=绑定账号不可用已回退
+	cacheAffinityKey string
 }
 
 func statsAttemptFor(r *http.Request) *statsAttempt {
@@ -447,6 +448,7 @@ func statsFinishAttempt(r *http.Request, status int) {
 	performanceFor(r).setLivePhase(liveSettlement)
 	defer func() { recordPerformance(r, phaseSettlement, performanceStartedAt, false) }()
 	cachedTokens, cacheSource, hasCached := statsCachedValue(p.usage)
+	affinityObserveCache(p.cacheAffinityKey, p.account.File, cachedTokens, hasCached, p.complete && status < 400, time.Now())
 	var cachedPtr *int64
 	if hasCached {
 		cachedPtr = &cachedTokens
