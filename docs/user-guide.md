@@ -1005,11 +1005,15 @@ workbuddy-gateway serve -auth-dir ./auths
 
 ### 请求准入与有界排队
 
+下例与根目录 [config.example.json](../config.example.json) 的默认准入字段一致；完整配置示例还包含网关、账号调度、超时及其他设置。
+
 ```json
 {
   "admission": {
     "maxActive": 8,
     "maxPreparing": 2,
+    "fairQueue": true,
+    "maxWaitingPerKey": 0,
     "maxWaiting": 8,
     "waitTimeoutMs": 15000,
     "memoryProtection": true,
@@ -1025,8 +1029,10 @@ workbuddy-gateway serve -auth-dir ./auths
 - 新生成配置最多保留 8 个在途请求，其中 2 个可同时读入/解码/转换，最多等待 8 个、最多排队 15 秒。总准入和前处理各有有界队列并共享等待期限；前处理等待者已包含在总在途数内。排队期间不读取或解析请求体、不发送 SSE 心跳或上游请求。队列满或等待超时返回 HTTP 429 和 `Retry-After: 1`，Messages 与 count_tokens 使用 Anthropic `rate_limit_error`。
 - 总在途名额持续到整个处理结束，包含上游流及本地聚合；前处理名额在转换完成、进入公共上游入口时归还。两者与 `concurrent` 和内存预算同时生效，新生成配置的总请求上限为 8，实际模型并发还取决于账号和全局模型上限。已有配置不会自动改写；旧配置省略 `maxPreparing` 保留整请求准入，省略 `maxActive` 时上限仍为 2。
 - `maxActive` 的 0/省略使用默认 2，允许最大 1024；`maxWaiting` 省略为 8，显式 0 表示不排队，最大 10000；`waitTimeoutMs` 的 0/省略为 15000，最大 600000。负数和错误类型拒绝加载。
+- `fairQueue` 省略或为 `true` 时默认开启，包括升级前未设置该字段的已有配置；配置文件本身不会自动改写。总准入与前处理队列均使用同 Key 内 FIFO、跨 Key 公平出队：优先在途较少的 Key，同等在途数量时轮转。空闲名额允许单个 Key 借用，原有 Key 硬并发上限仍先执行；已有长流不会被抢占。显式 `fairQueue:false` 使用全局 FIFO。
+- `maxWaitingPerKey` **仅在公平队列模式且请求已有鉴权 Key 身份时生效**，表示每个队列内该 Key 的等待上限；范围为 0～10000 的整数，`0` 或省略表示自动取 `maxWaiting` 的一半向上取整、最少 1，不表示无限排队。所有 Key 仍共用全局 `maxWaiting` 上限。当 `fairQueue:false` 时该字段不参与准入判定，仍受全局队列上限和 Key 硬并发限制；没有 Key 身份时使用公共 FIFO，兼容旧 Key 则作为单个调用方处理。
 - 可用 `maxPreparing` 独立限制读入/解码/转换，新生成配置为总在途8、前处理2；旧配置省略该字段仍保持整请求准入。较长流不会占用已归还的前处理名额，输入/输出预算与总并发仍生效。`scheduling.cacheAffinityWaitMs` 可基于近期上游缓存证据延长大上下文软亲和；完整边界与启用示例见[分阶段准入与缓存亲和](staged-admission-cache-affinity.md)。
-- 配置可热加载：扩容唤醒等待者，缩容等待已有请求自然完成，不取消正在输出的流；已入队者沿用入队时的等待期限。FIFO 排队，取消会立即撤出队列并让后续请求继续。
+- 配置可热加载：扩容唤醒等待者，缩容等待已有请求自然完成，不取消正在输出的流；已入队者沿用入队时的等待期限。取消会立即撤出队列并让后续请求继续。公平策略与管理员 Trace 诊断接口的完整边界见[公平准入与请求诊断](fair-queue-request-diagnostics.md)。
 - 默认启用 `memoryProtection`。共享请求体预算覆盖读取中的输入和已经读完但响应尚未结束的请求；gzip / deflate / zstd 同时计算压缩数据与解压后的数据，分块上传也按实际读取逐步预留。提前关闭请求体不会释放预算，整个 handler 返回（含取消、错误和 panic）后才释放。
 - `maxBodyBytes` 是全局在途输入字节预算，0/省略为自动计算：取 64 MiB、有效 Go 内存上限的四分之一、各可读 cgroup 内存上限的八分之一中的最小值。没有相应上限的项不参与计算。例：Go `GOMEMLIMIT=48MiB`、cgroup 上限约 128 MB 时，自动预算为 12 MiB。可显式指定正整数字节数，最大 1 TiB；负数和小数拒绝加载。
 - 内存采样最多每 250 毫秒刷新一次。Go 监测使用运行时管理的内存（total 减去已归还系统的 heap），Linux 同时读取常见 cgroup v1/v2 路径及父级限制，包含同一 cgroup 中其他进程的消耗。任何有效范围达到高水位即暂停新准入，所有可用范围回落到低水位才恢复。默认高/低水位为 85%/75%；0/省略使用默认值，允许 1～100，低水位必须小于高水位。
