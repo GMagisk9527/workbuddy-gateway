@@ -12,18 +12,23 @@ type requestDiagnostic struct {
 	at               time.Time
 	counters         performanceCounters
 	cells            [performancePhaseCount]performanceCell
+	attempts         [requestAttemptCapacity]requestAttemptRecord
+	attemptCount     int
+	attemptTotal     uint64
 }
 type requestDiagnosticRing struct {
 	items       [requestDiagnosticCapacity]requestDiagnostic
 	next, count int
 }
 type requestDiagnosticView struct {
-	TraceID  string              `json:"traceId"`
-	Protocol string              `json:"protocol"`
-	Status   int                 `json:"status"`
-	At       int64               `json:"at"`
-	Counters performanceCounters `json:"counters"`
-	Phases   map[string]float64  `json:"phaseDurationsMs"`
+	TraceID         string               `json:"traceId"`
+	Protocol        string               `json:"protocol"`
+	Status          int                  `json:"status"`
+	At              int64                `json:"at"`
+	Counters        performanceCounters  `json:"counters"`
+	Phases          map[string]float64   `json:"phaseDurationsMs"`
+	AttemptTrail    []requestAttemptView `json:"attemptTrail"`
+	AttemptsDropped uint64               `json:"attemptsDropped"`
 }
 
 func validDiagnosticTrace(s string) bool {
@@ -38,12 +43,12 @@ func validDiagnosticTrace(s string) bool {
 	return true
 }
 
-func (s *performanceStore) rememberRequestLocked(trace string, protocol, status int, at time.Time, counters performanceCounters, cells [performancePhaseCount]performanceCell) {
+func (s *performanceStore) rememberRequestLocked(trace string, protocol, status int, at time.Time, counters performanceCounters, cells [performancePhaseCount]performanceCell, attempts [requestAttemptCapacity]requestAttemptRecord, attemptCount int, attemptTotal uint64) {
 	if !validDiagnosticTrace(trace) || protocol < 0 || protocol >= len(performanceProtocols) {
 		return
 	}
 	r := &s.recent
-	r.items[r.next] = requestDiagnostic{trace, protocol, status, at, counters, cells}
+	r.items[r.next] = requestDiagnostic{trace, protocol, status, at, counters, cells, attempts, attemptCount, attemptTotal}
 	r.next = (r.next + 1) % len(r.items)
 	r.count = min(r.count+1, len(r.items))
 }
@@ -60,6 +65,8 @@ func (s *performanceStore) requestDiagnostic(trace string, now time.Time) (reque
 			continue
 		}
 		out := requestDiagnosticView{TraceID: d.trace, Protocol: performanceProtocols[d.protocol], Status: d.status, At: d.at.UnixMilli(), Counters: d.counters, Phases: make(map[string]float64)}
+		out.AttemptTrail = attemptTrailViews(d.attempts, d.attemptCount)
+		out.AttemptsDropped = d.attemptTotal - uint64(d.attemptCount)
 		for i, c := range d.cells {
 			if c.seen {
 				out.Phases[performancePhaseNames[i]] = float64(c.duration) / float64(time.Millisecond)

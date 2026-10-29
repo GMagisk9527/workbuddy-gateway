@@ -85,7 +85,7 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map(),
     , openAddAccount, startAddAccount, pollAddAccount, closeAddAccount, accountRowActions
     , initStatsFilter, writeStatsFilterCookie, readStatsFilterCookie, bindStatsChartHover
     , openKeyEditor, closeKeyEditor, submitKeyForm
-    , renderPerformance, loadPerformance, loadLogSettings
+    , renderPerformance, loadPerformance, loadLogSettings, loadRequestDiagnostic
   };})();`);
   vm.createContext(context);
   vm.runInContext(source, context);
@@ -95,6 +95,64 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map(),
 function cells(html) {
   return [...html.matchAll(/<td(?: [^>]*)?>(.*?)<\/td>/g)].map(m => m[1]);
 }
+
+test("请求尝试查询显示重试顺序、容量省略并转义响应字段", async () => {
+  const routes = [];
+  const f = fixture(async route => {
+    routes.push(route);
+    return response(200, {status: 200, counters: {failed: 1, downstreamErrors: 1, incompleteStreams: 1}, attemptsDropped: 2, attemptTrail: [
+      {attempt: 1, kind: "transport_retry", outcome: "error", failureClass: '<img src=x onerror="bad()">', startedMs: 0, durationMs: 2},
+      {attempt: 2, kind: "account_fallback", outcome: "complete", statusCode: 200, headersMs: 3, startedMs: 4, durationMs: 5},
+    ]});
+  });
+  f.review.state.apiKey = "synthetic-admin";
+  f.element("requestTraceInput").value = "synthetic-linked-trace";
+  await f.review.loadRequestDiagnostic();
+  assert.deepEqual(routes.filter(route => route !== "/admin/api/client-events"), ["/admin/api/performance?trace=synthetic-linked-trace"]);
+  const html = f.element("requestTraceTable").innerHTML;
+  assert.match(html, /网络重试/);
+  assert.match(html, /账号回退/);
+  assert.match(html, /无响应/);
+  assert.match(html, /&lt;img/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(f.element("requestTraceInfo").textContent, /省略 2 次/);
+  assert.match(f.element("requestTraceInfo").textContent, /请求失败 \/ 下游写入失败 \/ 流不完整/);
+  assert.equal(f.element("requestTraceLookup").disabled, false);
+});
+
+test("请求尝试查询拒绝非法 Trace 并在退出后丢弃迟到响应", async () => {
+  let resolve, calls = 0;
+  const f = fixture(async route => { if (route === "/admin/api/client-events") return response(204, {}); calls++; return new Promise(r => { resolve = r; }); });
+  f.review.state.apiKey = "synthetic-admin";
+  f.element("requestTraceInput").value = "private/prompt";
+  await f.review.loadRequestDiagnostic();
+  assert.equal(calls, 0);
+  assert.match(f.element("requestTraceInfo").textContent, /格式无效/);
+  f.element("requestTraceInput").value = "synthetic-trace";
+  const pending = f.review.loadRequestDiagnostic();
+  f.review.lockDashboard();
+  resolve(response(200, {status: 200, attemptTrail: [{kind: "account_fallback"}]}));
+  await pending;
+  assert.equal(f.element("requestTraceTable").innerHTML, "");
+  assert.equal(f.element("requestTraceInput").value, "");
+  assert.equal(f.element("requestTraceLookup").disabled, false);
+});
+
+test("请求尝试查询的旧响应不会覆盖新查询，失败不显示旧记录", async () => {
+  const replies = [];
+  const f = fixture(async route => route === "/admin/api/client-events" ? response(204, {}) : new Promise(r => replies.push(r)));
+  f.review.state.apiKey = "synthetic-admin";
+  f.element("requestTraceInput").value = "synthetic-old";
+  const old = f.review.loadRequestDiagnostic();
+  f.element("requestTraceInput").value = "synthetic-new";
+  const newer = f.review.loadRequestDiagnostic();
+  replies[1](response(404, {error: {message: "近期未找到该请求"}}));
+  await newer;
+  replies[0](response(200, {status: 200, attemptTrail: [{kind: "account_fallback"}]}));
+  await old;
+  assert.match(f.element("requestTraceInfo").textContent, /查询失败/);
+  assert.equal(f.element("requestTraceTable").innerHTML, "");
+});
 
 test("上游增量刷新保留签到列与展开积分行，行键互不冲突", () => {
   const f = fixture();

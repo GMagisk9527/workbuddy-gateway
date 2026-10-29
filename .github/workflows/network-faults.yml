@@ -1,0 +1,27 @@
+name: TCP network faults
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  network-faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.27.3'
+      - name: Build the pinned test-only Toxiproxy
+        env:
+          GOBIN: ${{ runner.temp }}/toxiproxy
+        run: go install github.com/Shopify/toxiproxy/v2/cmd/server@v2.13.0
+      - name: Exercise three protocols under real TCP faults
+        env:
+          WORKBUDDY_TOXIPROXY: ${{ runner.temp }}/toxiproxy/server
+        run: go test -race -tags=networkfaults -run '^TestNetworkFault' -count=1 -timeout=3m -v .

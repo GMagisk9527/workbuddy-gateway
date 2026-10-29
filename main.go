@@ -271,10 +271,19 @@ func doUpstreamRequest(r *http.Request, acc *Account, prof *upstreamProfile, ups
 		}
 
 		performanceFor(r).networkAttempt(try > 0)
+		attemptObservation := performanceFor(r).beginUpstreamAttempt(acc, try > 0)
 		if attemptStats != nil {
 			attemptStats.cancelSafe = false
 		}
 		resp, err := client.Do(req)
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		attemptObservation.response(status, err)
+		if err == nil && attemptObservation.p != nil {
+			resp.Body = &attemptDiagnosticBody{ReadCloser: resp.Body, observation: attemptObservation}
+		}
 		if retryCleanup != nil {
 			if err != nil {
 				retryCleanup()
@@ -4094,6 +4103,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				errBody, readErr := readUpstreamErrorBody(resp.Body, upstreamCancel, 1<<20)
 				recordPerformance(r, phaseUpstreamRead, readStarted, readErr != nil)
 				if readErr != nil {
+					performanceFor(r).rejectCurrentAttempt(attemptErrorClass(readErr, "error_body_read"), "")
 					status, code, message := http.StatusBadGateway, "upstream_error_body_read_failed", "上游错误响应读取失败，请稍后重试"
 					if errors.Is(readErr, errUpstreamErrorBodyTimeout) {
 						status, code, message = http.StatusGatewayTimeout, "upstream_error_body_timeout", errUpstreamErrorBodyTimeout.Error()
@@ -4115,6 +4125,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				// them into logs, cooldown/disabled state, or status snapshots.
 				safeErrStr := sanitizeUpstreamText(errStr)
 				rejection := classifyUpstreamRejection(errBody)
+				performanceFor(r).rejectCurrentAttempt(attemptHTTPFailure(resp.StatusCode), rejection.Code)
 				logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
 				debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
 					"upstream_host": prof.chatURL(),
@@ -4124,6 +4135,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				log.Printf("[#%d] 账号 %s [%s] 上游返回 HTTP %d，业务码=%s 类别=%s (耗时 %v)", reqID, acc.Path, prof.Label, resp.StatusCode, rejection.Code, rejection.Category, time.Since(startTime))
 				log.Printf("[外部接口] traceId=%s requestId=%d 上游=%s 状态码=%d 结果=失败 账号=%s", traceID, reqID, prof.chatURL(), resp.StatusCode, acc.Path)
 				if rejection.Code == "11128" {
+					performanceFor(r).rejectCurrentAttempt(rejection.Category, rejection.Code)
 					// 渠道/结构拒绝并不证明凭据失效或余额耗尽。不得换号重放、
 					// 禁用账号或删除凭据；保留上游状态及错误正文返回给调用方，
 					// 但隐去账号标识与令牌片段。
@@ -4133,6 +4145,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				}
 
 				if isQuotaExhausted(resp.StatusCode, errStr) {
+					performanceFor(r).rejectCurrentAttempt("quota_exhausted", rejection.Code)
 					markModelQuotaBlocked(acc, modelName, safeErrStr)
 					if selection == selectionProbeExhausted {
 						msg := fmt.Sprintf("当前模型 %s 已在余额耗尽账号 %s 上完成受控探测并确认需要付费额度，本次不再探测其他耗尽账号", modelName, acc.Path)
@@ -4146,6 +4159,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				}
 
 				if isModelRateLimited(errStr) {
+					performanceFor(r).rejectCurrentAttempt("rate_limited", rejection.Code)
 					until, ok := parseResetTime(errStr)
 					if !ok {
 						until = time.Now().Add(60 * time.Second)
@@ -4162,6 +4176,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				}
 
 				if isRateLimited(resp.StatusCode, errStr) {
+					performanceFor(r).rejectCurrentAttempt("rate_limited", rejection.Code)
 					// 429 频率限制：解析重置时间并屏蔽该账号，交由其他账号代偿
 					until, ok := parseResetTime(errStr)
 					if !ok {
@@ -4173,6 +4188,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				}
 
 				if isAuthFailure(resp.StatusCode, errStr) {
+					performanceFor(r).rejectCurrentAttempt("auth", rejection.Code)
 					// 授权失效（401/403 / token 无效 / 登录过期）：禁用该账号并删除凭据文件，
 					// 自动改用下一个可用账号，控制台提示用户重新登录
 					disableAccount(acc, fmt.Sprintf("上游鉴权失败 (HTTP %d): %s", resp.StatusCode, truncate(safeErrStr, 200)))

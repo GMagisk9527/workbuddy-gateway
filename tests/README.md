@@ -69,6 +69,30 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 静默保活、首增量期限、重放取消与结算、SSE 事件分帧和网络分段模糊测试；
 语义及兼容边界见 [SSE 稳定性说明](../docs/sse-liveness.md)。
 
+## TCP 网络故障
+
+额外的真实TCP回归使用固定版本Toxiproxy，普通 `go test ./...` 不需要安装。
+先在独立工具目录构建（不修改应用的 `go.mod`）：
+
+```powershell
+$env:GOBIN = Join-Path (Get-Location) '.codex-tmp/tools'
+go install github.com/Shopify/toxiproxy/v2/cmd/server@v2.13.0
+.\scripts\test-network-faults.ps1 -ToxiproxyPath .codex-tmp/tools/server.exe
+# 可选：加入自行构建的原生压缩代理，路径由调用者明确提供
+.\scripts\test-network-faults.ps1 -ToxiproxyPath .codex-tmp/tools/server.exe -CompressProxyPath <代理可执行文件绝对路径>
+```
+
+Linux/macOS：
+
+```bash
+GOBIN="$PWD/.codex-tmp/tools" go install github.com/Shopify/toxiproxy/v2/cmd/server@v2.13.0
+WORKBUDDY_TOXIPROXY="$PWD/.codex-tmp/tools/server" go test -race -tags=networkfaults -run '^TestNetworkFault' -count=1 -timeout=3m -v .
+```
+
+Go需1.27以上以构建该版本测试工具；Windows的 `-Race` 还需可用的C编译器。
+所选工具缺失或启动失败会报错，只有未指定的可选Rust代理链路会跳过。
+CI在Linux运行TCP故障回归。行为和隐私边界见[请求尝试与网络故障说明](../docs/attempt-trail-network-faults.md)。
+
 ## 网页
 
 ```bash

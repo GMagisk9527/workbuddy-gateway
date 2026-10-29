@@ -69,6 +69,10 @@ type requestPerformance struct {
 	streamSeen, streamComplete, downstreamFailed bool
 	cells                                        [performancePhaseCount]performanceCell
 	counters                                     performanceCounters
+	attemptTrail                                 [requestAttemptCapacity]requestAttemptRecord
+	attemptCount, currentAttempt                 int
+	attemptTotal                                 uint64
+	lastAttemptAccount                           *Account
 	live                                         *livePerformance
 	livePrev, liveNext                           *requestPerformance
 	liveRegistered, liveStream, liveFirstToken   bool
@@ -333,13 +337,16 @@ func (p *requestPerformance) finish(store *performanceStore, status int, cancele
 		p.counters.Failed = 1
 		p.cells[phaseTotal].failed = true
 	}
+	p.finishAttemptTrail(canceled)
 	counters, cells, protocol := p.counters, p.cells, p.protocol
+	attempts, attemptCount, attemptTotal := p.attemptTrail, p.attemptCount, p.attemptTotal
+	p.lastAttemptAccount = nil
 	p.mu.Unlock()
 	p.finishLive()
 	minute := now.Unix() / 60
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.rememberRequestLocked(p.traceID, protocol, status, now, counters, cells)
+	store.rememberRequestLocked(p.traceID, protocol, status, now, counters, cells, attempts, attemptCount, attemptTotal)
 	b := &store.minutes[(minute%performanceWindowMinutes+performanceWindowMinutes)%performanceWindowMinutes]
 	if b.minute > minute {
 		return
