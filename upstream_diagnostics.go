@@ -46,6 +46,7 @@ func reportUpstreamStreamRejection(r *http.Request, requestID uint64, model stri
 	if !errors.As(err, &rejection) {
 		return nil
 	}
+	performanceFor(r).rejectCurrentAttempt(rejection.info.Category, rejection.info.Code)
 	// A channel rejection before output is an explicit uncharged result. A
 	// rejection after output or an earlier ambiguous send cannot erase cost.
 	if p := statsAttemptFor(r); p != nil {

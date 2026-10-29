@@ -108,6 +108,16 @@
           <button id="performanceRefresh" type="button">读取链路性能</button>
         </div>
         <p id="performanceInfo" class="hint" role="status" aria-live="polite">点击读取当前性能指标。</p>
+        <div class="card-title">单次请求的尝试过程</div>
+        <div class="stats-controls">
+          <label>Trace ID<input id="requestTraceInput" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="填入请求的 X-Trace-ID"></label>
+          <button id="requestTraceLookup" type="button">查询请求</button>
+        </div>
+        <p id="requestTraceInfo" class="hint" role="status" aria-live="polite">保留最近 128 个已结束请求，最多 5 分钟；每次展示前 16 次上游尝试。</p>
+        <div class="table-wrap"><table id="requestTraceTable">
+          <thead><tr><th>次序</th><th>尝试类型</th><th>HTTP / 业务码</th><th>结果 / 原因</th><th>开始偏移</th><th>等待响应头</th><th>持续时间</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
         <div class="card-title">进行中的请求</div>
         <p class="hint">读取时刻的快照，不受五分钟窗口影响。阶段人数互斥；活跃流、等待首增量、写入中可能重叠。</p>
         <div id="performanceLiveSummary" class="hint"></div>

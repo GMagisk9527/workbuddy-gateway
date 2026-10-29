@@ -51,6 +51,7 @@
     performanceVersion: 0,
     performancePending: false,
     lastPerformance: null,
+    requestTraceVersion: 0,
     statsRenderKey: "",
     accountAlertsPending: false,
     accountAlertsLastPoll: 0,
@@ -231,6 +232,11 @@
     state.performanceVersion++;
     state.performancePending = false;
     state.lastPerformance = null;
+    state.requestTraceVersion++;
+    $("requestTraceInput").value = "";
+    $("requestTraceLookup").disabled = false;
+    $("requestTraceInfo").textContent = "登录后查询近期请求。";
+    $("requestTraceTable").querySelector("tbody").innerHTML = "";
 	state.logSettingsVersion++;
 	state.logSettings=null;
 	$("logBudgetInfo").textContent="";
@@ -1064,6 +1070,45 @@
         "</td><td>" + esc(performanceTime(phase.p95Ms)) + "</td><td>" + esc(performanceTime(phase.p99Ms)) + "</td></tr>";
     }).join("");
     $("performanceTable").querySelector("tbody").innerHTML = html || '<tr><td colspan="6" class="empty">暂无阶段样本</td></tr>';
+  }
+
+  function loadRequestDiagnostic() {
+    var version = ++state.requestTraceVersion, key = state.apiKey;
+    var trace = $("requestTraceInput").value.trim();
+    $("requestTraceTable").querySelector("tbody").innerHTML = "";
+    $("requestTraceLookup").disabled = false;
+    if (!key) return Promise.resolve();
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(trace)) {
+      $("requestTraceInfo").textContent = "Trace ID 格式无效。";
+      return Promise.resolve();
+    }
+    $("requestTraceLookup").disabled = true;
+    $("requestTraceInfo").textContent = "正在查询 " + trace + "…";
+    return api("/admin/api/performance?trace=" + encodeURIComponent(trace)).then(function (data) {
+      if (version !== state.requestTraceVersion || key !== state.apiKey) return;
+      var kinds = {initial: "首次调用", transport_retry: "网络重试", account_fallback: "账号回退", stream_replay: "同账号重放"};
+      var outcomes = {pending: "进行中", response_headers: "仅确认响应头", rejected: "上游拒绝", error: "失败", incomplete: "流不完整", complete: "完整"};
+      var attempts = Array.isArray(data.attemptTrail) ? data.attemptTrail.slice(0, 16) : [];
+      var counters = data.counters || {}, flags = [];
+      if (counters.failed) flags.push("请求失败");
+      if (counters.canceled) flags.push("已取消");
+      if (counters.downstreamErrors) flags.push("下游写入失败");
+      if (counters.incompleteStreams) flags.push("流不完整");
+      $("requestTraceTable").querySelector("tbody").innerHTML = attempts.map(function (a) {
+        return "<tr><td>" + esc(count(a.attempt)) + "</td><td>" + esc(kinds[a.kind] || a.kind || "未知") +
+          "</td><td>" + esc(a.statusCode || "无响应") + (a.businessCode ? " / " + esc(a.businessCode) : "") +
+          "</td><td>" + esc(outcomes[a.outcome] || a.outcome || "未知") + (a.failureClass ? " / " + esc(a.failureClass) : "") +
+          "</td><td>" + esc(performanceTime(a.startedMs)) + "</td><td>" + esc(performanceTime(a.headersMs)) +
+          "</td><td>" + esc(performanceTime(a.durationMs)) + "</td></tr>";
+      }).join("") || '<tr><td colspan="7" class="empty">该请求没有已记录的上游尝试</td></tr>';
+      $("requestTraceInfo").textContent = trace + " · 网关 HTTP " + (data.status || "—") + " · 已记录 " + attempts.length + " 次" +
+        (flags.length ? " · " + flags.join(" / ") : "") +
+        (data.attemptsDropped ? " · 超出容量省略 " + count(data.attemptsDropped) + " 次" : "") + "；上游 HTTP 200 本身不代表回复完整。";
+    }).catch(function (err) {
+      if (version === state.requestTraceVersion && key === state.apiKey) $("requestTraceInfo").textContent = "查询失败：" + (err.detail || err.message);
+    }).then(function () {
+      if (version === state.requestTraceVersion) $("requestTraceLookup").disabled = false;
+    });
   }
 
   function loadPerformance() {
@@ -2624,6 +2669,8 @@
     $("saveKey").addEventListener("click", saveKey);
     $("statsApply").addEventListener("click", function () { changeStatsFilter(false); });
     $("performanceRefresh").addEventListener("click", loadPerformance);
+    $("requestTraceLookup").addEventListener("click", loadRequestDiagnostic);
+    $("requestTraceInput").addEventListener("keydown", function (event) { if (event.key === "Enter") { event.preventDefault(); loadRequestDiagnostic(); } });
     $("performanceProtocol").addEventListener("change", function () { if (state.lastPerformance) renderPerformance(state.lastPerformance); });
     $("statsPeriod").addEventListener("change", function () { changeStatsFilter(true); });
     $("statsAccount").addEventListener("change", function () { changeStatsFilter(false); });
