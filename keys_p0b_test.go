@@ -70,7 +70,9 @@ func TestSnapshotFromLastMonthKeepsThisMonthUsage(t *testing.T) {
 	_, k := mustCreateKey(t, keyCreateOptions{Name: "cross-month", QuotaMonthly: 100})
 
 	now := time.Now().In(keyCST)
-	lastMonth := now.AddDate(0, -1, 0)
+	// AddDate normalizes Oct 31 minus one month back into October, so derive
+	// the previous month from the first day to keep this a cross-month fixture.
+	lastMonth := time.Date(now.Year(), now.Month(), 1, 12, 0, 0, 0, keyCST).AddDate(0, -1, 0)
 	writeSnapshotFile(t, dir, ledgerSnapshot{LastSeq: 1, Keys: map[string]*apiKeyUsage{
 		k.ID: {Total: 7, Daily: 0, Monthly: 7, DayKey: keyDayKey(now), MonthKey: keyMonthKey(lastMonth)},
 	}})
