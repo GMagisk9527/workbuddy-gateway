@@ -118,7 +118,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = withAffinityDigestIfEnabled(r, chatReq, modelName)
-	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
+	r, delayed := withRestrictedReplay(w, r, modelName, isStream)
+	defer delayed.Close()
+	resp, acc, prof, ok := delayed.upstreamChat(reqID, upstreamBytes, startTime)
 	if !ok {
 		return
 	}

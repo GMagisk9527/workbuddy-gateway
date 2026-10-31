@@ -3962,6 +3962,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		acc, selection, releaseSlot, err := acquireScheduledAccount(r, modelName, attempted, preferPath, reqID, traceID, cacheAffinityHint{key: affKey, inputBytes: len(upstreamBytes)})
 		recordPerformance(r, phaseAccount, accountStarted, err != nil)
 		if err != nil {
+			if delayed := restrictedReplayFor(r); delayed != nil && delayed.used && r.Context().Err() == nil && delayed.failure != nil {
+				delayed.failure.write(w, r)
+				return nil, nil, nil, false
+			}
 			if errors.Is(err, errSchedulingTimeout) || r.Context().Err() != nil {
 				recordModelFailure(modelName, "concurrent_wait_canceled")
 				w.Header().Set("Retry-After", "1")
@@ -4040,6 +4044,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				writeUpstreamError(w, r, http.StatusRequestTimeout, "request_canceled", "等待账号凭据时请求已取消或超时")
 				return nil, nil, nil, false
 			}
+			if delayed := restrictedReplayFor(r); delayed != nil && delayed.used && delayed.failure != nil {
+				delayed.failure.write(w, r)
+				return nil, nil, nil, false
+			}
 			lastAuthErr = err.Error()
 			continue
 		}
@@ -4092,6 +4100,8 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		}
 		// 上游非 200 响应处理
 		if resp.StatusCode >= 400 {
+			var restricted bool
+			failure := &restrictedFailure{status: resp.StatusCode}
 			retry := func() bool {
 				// Keep queued requests behind the rejection's cooldown/disable update.
 				defer releaseSlot()
@@ -4125,6 +4135,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				// them into logs, cooldown/disabled state, or status snapshots.
 				safeErrStr := sanitizeUpstreamText(errStr)
 				rejection := classifyUpstreamRejection(errBody)
+				failure.info, failure.message = rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, safeErrStr)
 				performanceFor(r).rejectCurrentAttempt(attemptHTTPFailure(resp.StatusCode), rejection.Code)
 				logUpstreamRejection(r, reqID, modelName, prof, resp.StatusCode, rejection)
 				debugEvent(r, "warn", "upstream_response_rejected", map[string]any{
@@ -4141,6 +4152,21 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 					// 但隐去账号标识与令牌片段。
 					recordModelFailure(modelName, rejection.Code)
 					writeUpstreamBusinessRejection(w, r, resp.StatusCode, rejection, fmt.Sprintf("upstream %d: %s", resp.StatusCode, safeErrStr))
+					return false
+				}
+				if resp.StatusCode == http.StatusForbidden && rejection.Code == "11140" {
+					performanceFor(r).rejectCurrentAttempt("account_restricted", rejection.Code)
+					// Preserve the existing persistent stop for this account. Only
+					// the incoming request may wait and try one other eligible account.
+					disableAccount(acc, fmt.Sprintf("上游账号受限 (HTTP %d): %s", resp.StatusCode, truncate(safeErrStr, 200)))
+					delayed := restrictedReplayFor(r)
+					if attempt+1 < poolSize && delayed.canWait(modelName, attempted) {
+						delayed.failure = failure
+						restricted = true
+						return true
+					}
+					recordModelFailure(modelName, rejection.Code)
+					failure.write(w, r)
 					return false
 				}
 
@@ -4201,6 +4227,22 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 				return false
 			}()
 			if retry {
+				delayed := restrictedReplayFor(r)
+				if restricted {
+					// The closure has released the credential lock, upstream body
+					// and account permit before the two-minute wait starts.
+					if err := delayed.wait(); err != nil {
+						if r.Context().Err() == nil {
+							failure.write(w, r)
+						}
+						return nil, nil, nil, false
+					}
+				} else if delayed != nil && delayed.used {
+					// A delayed fallback may not cascade across more accounts,
+					// including when that fallback returns 401/429 instead of 11140.
+					failure.write(w, r)
+					return nil, nil, nil, false
+				}
 				continue
 			}
 			return nil, nil, nil, false
@@ -4269,6 +4311,10 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 		return resp, acc, prof, true
 	}
 
+	if delayed := restrictedReplayFor(r); delayed != nil && delayed.used && delayed.failure != nil {
+		delayed.failure.write(w, r)
+		return nil, nil, nil, false
+	}
 	// 理论上不可达（poolSize 次尝试后未成功即已在循环内返回）
 	recordModelFailure(modelName, "all_cooldown")
 	debugEvent(r, "warn", "request_rejected_all_cooldown", map[string]any{
@@ -4378,7 +4424,9 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = withAffinityDigestIfEnabled(r, reqObj, modelName)
-	resp, acc, prof, ok := upstreamChat(w, r, reqID, modelName, upstreamBytes, startTime)
+	r, delayed := withRestrictedReplay(w, r, modelName, isStream)
+	defer delayed.Close()
+	resp, acc, prof, ok := delayed.upstreamChat(reqID, upstreamBytes, startTime)
 	if !ok {
 		return
 	}
