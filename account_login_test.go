@@ -109,6 +109,89 @@ func TestDeleteAccountCredentialAcceptsExactPoolPath(t *testing.T) {
 	}
 }
 
+func TestAccountDeleteEndpointIsolatesDuplicateBasenames(t *testing.T) {
+	isolatedGatewayConfig(t)
+	if err := applyGatewayConfig(gatewayFileConfig{AdminKey: "synthetic-delete-admin"}); err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, 2)
+	var pool []*Account
+	credential := []byte(`{"auth":{"accessToken":"synthetic-not-a-token"},"account":{"uid":"synthetic"}}`)
+	for i, dir := range []string{"cn", "intl"} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		paths[i], err = filepath.Abs(filepath.Join(dir, "workbuddy1.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths[i], credential, 0600); err != nil {
+			t.Fatal(err)
+		}
+		marker, err := json.Marshal(disabledMarker{Path: paths[i], Reason: "synthetic-disabled"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(markerPath(paths[i]), marker, 0600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(paths[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool = append(pool, &Account{Path: paths[i], Auth: &StoredAuth{}, Disabled: true, fingerprint: accountFingerprint(info)})
+	}
+	cfg.AuthExplicit, cfg.AuthFile = true, strings.Join(paths, ",")
+	accountMu.Lock()
+	previous := accounts
+	accounts = pool
+	accountMu.Unlock()
+	t.Cleanup(func() { accountMu.Lock(); accounts = previous; accountMu.Unlock() })
+	handler := newWebUIHandler()
+	post := func(name, key string) int {
+		raw, err := json.Marshal(map[string]string{"file": name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return adminRequest(handler, "POST", "/admin/api/account-delete", key, string(raw)).Code
+	}
+	if status := post(paths[1], ""); status != 401 {
+		t.Fatalf("unauthorized delete=%d", status)
+	}
+	for _, name := range []string{"workbuddy1.json", filepath.Join(filepath.Dir(paths[0]), "..", "workbuddy1.json")} {
+		if status := post(name, "synthetic-delete-admin"); status != 400 {
+			t.Fatalf("ambiguous/unknown path delete=%d", status)
+		}
+	}
+	if status := post(paths[1], "synthetic-delete-admin"); status != 200 {
+		t.Fatalf("selected account delete=%d", status)
+	}
+	for _, name := range []string{paths[1], markerPath(paths[1])} {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatalf("selected credential/marker still exists: %v", err)
+		}
+	}
+	if raw, err := os.ReadFile(paths[0]); err != nil || string(raw) != string(credential) {
+		t.Fatalf("other credential changed: %v", err)
+	}
+	if _, err := os.Stat(markerPath(paths[0])); err != nil {
+		t.Fatalf("other marker changed: %v", err)
+	}
+	accountMu.Lock()
+	remaining := append([]*Account(nil), accounts...)
+	accountMu.Unlock()
+	if len(remaining) != 1 || remaining[0].Path != paths[0] {
+		t.Fatalf("wrong account removed: %+v", remaining)
+	}
+	if status := post(paths[1], "synthetic-delete-admin"); status != 400 {
+		t.Fatalf("repeated delete must reject old target: %d", status)
+	}
+	if _, err := os.Stat(paths[0]); err != nil {
+		t.Fatalf("repeated delete affected other credential: %v", err)
+	}
+}
+
 // 授权失效的账号会以 Disabled 条目留在账号池中（凭据文件可能已被删除，
 // 只剩失效标记用于提示重新登录）。用户从网页显式删除时必须连账号条目一起移除，
 // 否则网页和 CLI 都会一直显示已经删掉的 workbuddyN.json。

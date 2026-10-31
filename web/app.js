@@ -72,14 +72,6 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
-  // The delete API is keyed by credential basename; status snapshots expose
-  // the full pool path, so normalize before rendering the action button.
-  function credentialName(path) {
-    var value = String(path === undefined || path === null ? "" : path).replace(/\\/g, "/");
-    var slash = value.lastIndexOf("/");
-    return slash >= 0 ? value.slice(slash + 1) : value;
-  }
-
   function num(v) {
     return (v === undefined || v === null || v === "") ? "-" : v;
   }
@@ -1539,7 +1531,7 @@
     var name = btn.getAttribute("data-account-delete");
     if (!name) return;
     if (!window.confirm("确定删除凭据 " + name + " ？\n\n" +
-        "会从账号池移除该账号，并删除运行目录下的对应凭据文件。统计与历史日志保留，操作不可撤销。")) return;
+        "会从账号池移除该账号，并删除上述路径对应的凭据文件。统计与历史日志保留，操作不可撤销。")) return;
     state.policyVersion++;
     api("/admin/api/account-delete", {method: "POST", body: {file: name}}).then(function () {
       showAlert("已删除凭据 " + name + "，账号池已同步移除。", true);
@@ -1613,7 +1605,7 @@
         "<td>" + esc(fmtTime(a.lastRefreshTime)) + "</td>" +
         "<td>" + esc(count(a.refreshFailCount)) + "</td>" +
         "<td><button class=\"ghost danger\" type=\"button\" data-account-delete=\"" +
-        esc(credentialName(a.path)) + "\">删除</button></td>" +
+        esc(a.path) + "\">删除</button></td>" +
         "</tr>");
       if (state.creditOpen[a.path]) {
         rows.push(creditDetailRow(a));
