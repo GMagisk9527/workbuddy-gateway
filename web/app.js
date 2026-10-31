@@ -72,6 +72,14 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // The delete API is keyed by credential basename; status snapshots expose
+  // the full pool path, so normalize before rendering the action button.
+  function credentialName(path) {
+    var value = String(path === undefined || path === null ? "" : path).replace(/\\/g, "/");
+    var slash = value.lastIndexOf("/");
+    return slash >= 0 ? value.slice(slash + 1) : value;
+  }
+
   function num(v) {
     return (v === undefined || v === null || v === "") ? "-" : v;
   }
@@ -1605,7 +1613,7 @@
         "<td>" + esc(fmtTime(a.lastRefreshTime)) + "</td>" +
         "<td>" + esc(count(a.refreshFailCount)) + "</td>" +
         "<td><button class=\"ghost danger\" type=\"button\" data-account-delete=\"" +
-        esc(a.path) + "\">删除</button></td>" +
+        esc(credentialName(a.path)) + "\">删除</button></td>" +
         "</tr>");
       if (state.creditOpen[a.path]) {
         rows.push(creditDetailRow(a));

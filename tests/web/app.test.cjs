@@ -154,6 +154,16 @@ test("请求尝试查询的旧响应不会覆盖新查询，失败不显示旧�
   assert.equal(f.element("requestTraceTable").innerHTML, "");
 });
 
+test("账号删除按钮提交凭据文件名而不是完整路径", () => {
+  const f = fixture();
+  const full = "/var/lib/workbuddy-gateway/accounts/workbuddy1.json";
+  f.review.renderAccounts([{path: full, state: "active"}]);
+  const html = f.element("accountsTable").innerHTML;
+  assert.match(html, /data-account-delete="workbuddy1\.json"/);
+  assert.doesNotMatch(html, /data-account-delete="\/var\/lib/);
+  audit("账号删除按钮使用凭据 basename", {full_path_removed: true});
+});
+
 test("上游增量刷新保留签到列与展开积分行，行键互不冲突", () => {
   const f = fixture();
   const accounts = [

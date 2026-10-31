@@ -79,6 +79,36 @@ func TestDeleteAccountCredentialGuardsAndRemoval(t *testing.T) {
 	}
 }
 
+func TestDeleteAccountCredentialAcceptsExactPoolPath(t *testing.T) {
+	isolatedGatewayConfig(t)
+	chdirTemp(t)
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "workbuddy8.json")
+	if err := os.WriteFile(target, []byte(`{"auth":{"accessToken":"synthetic-not-a-token"},"account":{"uid":"u"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	accountMu.Lock()
+	old := accounts
+	accounts = []*Account{{Path: target, Auth: &StoredAuth{}}}
+	accountMu.Unlock()
+	t.Cleanup(func() { accountMu.Lock(); accounts = old; accountMu.Unlock() })
+
+	// The browser historically submitted the status snapshot's full path. It
+	// is accepted only because it exactly identifies an existing pool account.
+	if _, err := deleteAccountCredential(target); err != nil {
+		t.Fatalf("exact pool path was rejected: %v", err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("exact pool path did not delete the credential")
+	}
+	if _, err := deleteAccountCredential(filepath.Join(dir, "other.json")); err == nil {
+		t.Fatal("arbitrary path-like credential was accepted")
+	}
+}
+
 // 授权失效的账号会以 Disabled 条目留在账号池中（凭据文件可能已被删除，
 // 只剩失效标记用于提示重新登录）。用户从网页显式删除时必须连账号条目一起移除，
 // 否则网页和 CLI 都会一直显示已经删掉的 workbuddyN.json。
