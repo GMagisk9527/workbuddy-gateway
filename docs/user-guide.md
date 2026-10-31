@@ -437,7 +437,7 @@ workbuddy-gateway serve -keepalive-hours ""
 调试日志不会记录 `Authorization`、Cookie、API Key、Access Token、Refresh Token 或完整请求体。只记录是否提供 Authorization，以及凭据的不可逆短哈希 `api_key_fingerprint`。
 
 模型请求入口（Chat、Responses、Messages 及 `messages/count_tokens`）在鉴权后限制请求体：
-普通／`identity` 请求最多 32 MiB，gzip／deflate／zstd 请求压缩体最多 16 MiB、解压后最多
+普通／`identity` 请求最多 32 MiB，gzip／deflate／zstd 请求压缩体最多 24 MiB、解压后最多
 32 MiB。超限返回各协议的 HTTP 413 错误；已声明超限长度的普通请求在读取前拒绝，
 未声明长度的请求按实际读取量限制。反向代理若设了更低上限，则先由代理拒绝。
 此限制控制单次请求大小；解析 JSON、构建上游请求及并发请求仍需要额外内存。
@@ -1039,7 +1039,7 @@ workbuddy-gateway serve -auth-dir ./auths
 - 水位过高返回 HTTP 503 `request_memory_pressure`；其他在途请求暂时占满字节预算返回 503 `request_body_budget_exceeded`，两者均带 `Retry-After: 1`。Messages 返回 Anthropic `overloaded_error`。新到达请求在读取 body 前拒绝，已排队者获得名额时重新检查水位；未知长度或压缩体可能在读取过程中发现预算不足，但不会进入模型调用。
 - 单个请求自身超过输入预算或原有大小上限时返回 HTTP 413，Messages 为 `request_too_large`，客户端应缩小上下文。拒绝发生在上游调用前，不产生模型消耗和未知用量记账。健康检查、模型列表和用量查询仍可访问。
 - 配置可热加载。缩小预算会阻止新的预留，已经预留的输入与正在输出的流继续完成。`memoryProtection:false` 关闭字节预算与水位保护，请求数量准入及原有单请求大小限制继续生效。
-- 输入预算与水位属于软保护，采样可能滞后，也不等于进程 RSS 的硬上限；JSON 对象、转换副本和聚合输出还有额外开销。单请求原有 16 MiB 压缩 / 32 MiB 解码上限保留，实际允许大小还受输入预算约束。无法读取 cgroup 时使用 Go 信号；未配置 Go 内存上限时只使用有效 cgroup 信号，两者均不可用时仍保留输入预算和数量限制。
+- 输入预算与水位属于软保护，采样可能滞后，也不等于进程 RSS 的硬上限；JSON 对象、转换副本和聚合输出还有额外开销。单请求上限为 24 MiB 压缩 / 32 MiB 解码，实际允许大小还受输入预算约束。无法读取 cgroup 时使用 Go 信号；未配置 Go 内存上限时只使用有效 cgroup 信号，两者均不可用时仍保留输入预算和数量限制。
 
 ### 负载感知与软亲和
 

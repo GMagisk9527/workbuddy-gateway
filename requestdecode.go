@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	// 压缩后最多收 16MiB；反向代理可另设更低的外层上限。
-	requestCompressedLimit = 16 << 20
+	// 压缩后最多收 24MiB；保留独立的解压上限和共享在途内存预算。
+	requestCompressedLimit = 24 << 20
 	// 明文或解压后的 JSON 最多 32MiB。
 	requestDecodedLimit = 32 << 20
 )
