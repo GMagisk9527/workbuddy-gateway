@@ -154,6 +154,35 @@ test("请求尝试查询的旧响应不会覆盖新查询，失败不显示旧�
   assert.equal(f.element("requestTraceTable").innerHTML, "");
 });
 
+test("不同目录同名账号的删除按钮保留完整目标并提交所选行", async () => {
+  for (const paths of [
+    ["/var/lib/workbuddy-gateway/cn/workbuddy1.json", "/var/lib/workbuddy-gateway/intl/workbuddy1.json"],
+    [String.raw`C:\accounts\cn\workbuddy1.json`, String.raw`C:\accounts\intl\workbuddy1.json`],
+  ]) {
+    const submitted = [], f = fixture(async (url, options) => {
+      if (url === "/admin/api/account-delete") submitted.push(JSON.parse(options.body).file);
+      return response(200, {});
+    });
+    f.review.state.apiKey = "synthetic-admin";
+    f.review.renderAccounts(paths.map(path => ({path, state: "active"})));
+    const html = f.element("accountsTable").innerHTML;
+    const targets = [...html.matchAll(/data-account-delete="([^"]+)"/g)].map(match => match[1]);
+    assert.deepEqual(targets, paths);
+    let confirmation = "";
+    f.window.confirm = message => { confirmation = message; return true; };
+    f.review.accountRowActions({target: {closest: () => ({getAttribute: () => targets[1]})}});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(submitted, [paths[1]]);
+    assert(confirmation.includes(paths[1]), "确认框必须区分同名账号所在目录");
+    assert(!confirmation.includes("运行目录下"), "凭据可位于显式指定的其他目录");
+    f.window.confirm = () => false;
+    f.review.accountRowActions({target: {closest: () => ({getAttribute: () => targets[0]})}});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(submitted, [paths[1]], "取消不能删除另一个同名账号");
+  }
+  audit("账号删除保留所选行完整标识", {duplicate_names_isolated: true});
+});
+
 test("上游增量刷新保留签到列与展开积分行，行键互不冲突", () => {
   const f = fixture();
   const accounts = [

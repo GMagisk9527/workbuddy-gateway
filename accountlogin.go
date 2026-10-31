@@ -313,12 +313,24 @@ func findLoginSession(id string) *loginSession {
 // deleteAccountCredential 删除指定凭据文件（只认账号池里已有的那个路径）。
 func deleteAccountCredential(name string) (string, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || name != filepath.Base(name) {
+	if name == "" {
 		return "", errors.New("凭据名无效")
 	}
+	// The web UI historically rendered the full account path into the delete
+	// button, while the API also accepts the basename contract. Accept either
+	// form only when a full path is an exact path already present in the pool;
+	// arbitrary path-like input is still rejected.
+	pathLike := name != filepath.Base(name)
 	accountMu.Lock()
 	target, duplicates := "", 0
 	for _, acc := range accounts {
+		if pathLike {
+			if acc.Path == name {
+				target, duplicates = acc.Path, 1
+				break
+			}
+			continue
+		}
 		if filepath.Base(acc.Path) == name {
 			duplicates++
 			target = acc.Path
@@ -329,6 +341,9 @@ func deleteAccountCredential(name string) (string, error) {
 		return "", errors.New("存在同名凭据，无法确定要删除哪一个")
 	}
 	if target == "" {
+		if pathLike {
+			return "", errors.New("凭据名无效")
+		}
 		return "", errors.New("账号不存在或已删除")
 	}
 	if !accountFileNamePattern.MatchString(filepath.Base(target)) {

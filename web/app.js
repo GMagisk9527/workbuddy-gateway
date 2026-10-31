@@ -1531,7 +1531,7 @@
     var name = btn.getAttribute("data-account-delete");
     if (!name) return;
     if (!window.confirm("确定删除凭据 " + name + " ？\n\n" +
-        "会从账号池移除该账号，并删除运行目录下的对应凭据文件。统计与历史日志保留，操作不可撤销。")) return;
+        "会从账号池移除该账号，并删除上述路径对应的凭据文件。统计与历史日志保留，操作不可撤销。")) return;
     state.policyVersion++;
     api("/admin/api/account-delete", {method: "POST", body: {file: name}}).then(function () {
       showAlert("已删除凭据 " + name + "，账号池已同步移除。", true);
