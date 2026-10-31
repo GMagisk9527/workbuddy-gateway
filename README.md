@@ -21,6 +21,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 - 网页配置页支持风险确认后的完整 JSON 编辑；API/Web 监听端口修改可热切换，已有连接与流继续完成。新端口被占用或配置无法应用时保留旧运行状态；显式 `-port` 仍优先于配置文件。
 - `config.json` 和账号凭据含敏感信息，已由 Git 忽略，不要公开分享。
 - 多 Harness 可使用 `upstream.requestProfile: "official"` 开启统一出站兼容；旧配置省略该项保持原行为。见[出站兼容说明](docs/outbound-compatibility.md)。
+- 上游返回账号受限 `403 / 11140` 时，当前请求等待两分钟后最多换号一次，流式等待发送心跳；受限账号保持停用。详见[受限请求等待](docs/restricted-request-replay.md)。
 
 ## 文档
 

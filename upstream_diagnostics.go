@@ -31,11 +31,11 @@ func (e *upstreamStreamRejection) clientMessage() string {
 
 func detectUpstreamStreamRejection(data []byte) *upstreamStreamRejection {
 	// Normal token chunks need no extra JSON decode.
-	if !bytes.Contains(data, []byte("11128")) {
+	if !bytes.Contains(data, []byte("11128")) && !bytes.Contains(data, []byte("11140")) {
 		return nil
 	}
 	info := classifyUpstreamRejection(data)
-	if info.Code != "11128" {
+	if info.Code != "11128" && info.Code != "11140" {
 		return nil
 	}
 	return &upstreamStreamRejection{info: info, body: string(data)}
@@ -176,6 +176,10 @@ func classifyUpstreamRejection(body []byte) upstreamRejection {
 				}
 			}
 		}
+	}
+	if info.Code == "11140" {
+		info.Category = "account_restricted"
+		return info
 	}
 	if info.Code != "11128" {
 		return info

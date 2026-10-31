@@ -21,6 +21,7 @@
 ```bash
 go vet ./...
 go test ./...
+go test -run '^TestRestrictedReplay' -count=1
 go test -run '^TestConfigEditor' -count=1
 go test -run 'TestGateway.*(HotSwitch|Port)|TestHotReload|TestUpstreamSync.*(HotSwitch|Shutdown)' -count=1
 go test -run 'TestAdmission|TestScheduling|TestCommonStream|TestGatewayControl' -count=1
