@@ -92,7 +92,7 @@ GOBIN="$PWD/.codex-tmp/tools" go install github.com/Shopify/toxiproxy/v2/cmd/ser
 WORKBUDDY_TOXIPROXY="$PWD/.codex-tmp/tools/server" go test -race -tags=networkfaults -run '^TestNetworkFault' -count=1 -timeout=3m -v .
 ```
 
-Go需1.27以上以构建该版本测试工具；Windows的 `-Race` 还需可用的C编译器。
+项目及测试工具均使用 `go.mod` 声明的 Go 1.27.3 或更新工具链；Windows的 `-Race` 还需可用的C编译器。
 所选工具缺失或启动失败会报错，只有未指定的可选Rust代理链路会跳过。
 CI在Linux运行TCP故障回归。行为和隐私边界见[请求尝试与网络故障说明](../docs/attempt-trail-network-faults.md)。
 

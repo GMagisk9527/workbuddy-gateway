@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-需要 `go.mod` 声明的 Go 1.26.5 或更新工具链。在项目根目录执行：
+需要 `go.mod` 声明的 Go 1.27.3 或更新工具链；CI 与构建脚本均以该声明为准。在项目根目录执行：
 
 ```bash
 go build -o workbuddy-gateway .
