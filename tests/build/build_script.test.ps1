@@ -46,7 +46,7 @@ function global:go {
         return
     }
     switch ($Arguments[0]) {
-        'version' { Write-Output 'go version go1.26.5 windows/amd64' }
+        'version' { Write-Output "go version go$global:BuildMockVersion windows/amd64" }
         'tool' {
             Write-Output @('windows/386', 'windows/amd64', 'windows/arm64', 'linux/386', 'linux/amd64', 'linux/arm', 'linux/arm64', 'darwin/amd64', 'darwin/arm64')
         }
@@ -68,16 +68,30 @@ function Test-ExpectedFailure {
 
 try {
     $global:BuildMockFail = ''
+    $global:BuildMockVersion = ((Get-Content -LiteralPath (Join-Path $projectRoot 'go.mod') | Where-Object { $_ -match '^go\s+' }) -replace '^go\s+', '').Trim()
     $global:BuildMockCalls = @()
     $allPath = Join-Path $testRoot 'all'
     & $scriptPath -OutputDir $allPath
     $manifest = Get-Content -LiteralPath (Join-Path $allPath 'build-manifest.json') -Raw | ConvertFrom-Json
+    Assert-Build ($manifest.minimum_go -eq $global:BuildMockVersion) '构建清单与 go.mod 最低工具链声明不一致'
     Assert-Build ($manifest.artifacts.Count -eq 9) '默认目标数不是 9'
     Assert-Build (@($manifest.artifacts | Where-Object { $_.goos -eq 'windows' }).Count -eq 3) 'Windows 目标数错误'
     Assert-Build (@($manifest.artifacts | Where-Object { $_.goos -eq 'linux' }).Count -eq 4) 'Linux 目标数错误'
     Assert-Build (@($manifest.artifacts | Where-Object { $_.goarch -eq 'arm' })[0].goarm -eq '7') 'ARM 默认值不是 7'
     Assert-Build (@(Get-Content -LiteralPath (Join-Path $allPath 'SHA256SUMS')).Count -eq 11) '校验和未覆盖全部二进制/清单/示例'
     Write-TestResult 'default-matrix-and-checksums'
+
+    $supportedVersion = $global:BuildMockVersion
+    $global:BuildMockVersion = '1.25.0'
+    $global:BuildMockCalls = @()
+    $tooOldOutput = Join-Path $testRoot 'too-old'
+    try {
+        Test-ExpectedFailure 'reject-unsupported-toolchain' @{ SkipTests = $true; OutputDir = $tooOldOutput }
+        Assert-Build (@($global:BuildMockCalls | Where-Object { $_.args[0] -ne 'version' }).Count -eq 0) '工具链过旧时不应进入检查或构建阶段'
+        Assert-Build (-not (Test-Path -LiteralPath $tooOldOutput)) '工具链过旧时不应生成构建产物'
+    } finally {
+        $global:BuildMockVersion = $supportedVersion
+    }
 
     $values = @{ GOOS = 'freebsd'; GOARCH = 'arm'; CGO_ENABLED = '1'; GOARM = '6'; GOAMD64 = 'v3'; GO386 = 'softfloat'; GOARM64 = 'v8.2' }
     foreach ($name in $envNames) { [Environment]::SetEnvironmentVariable($name, $values[$name], 'Process') }

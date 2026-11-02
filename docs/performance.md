@@ -238,4 +238,5 @@ go test -run '^$' -bench 'BenchmarkMessagesRequestConversion|BenchmarkConversion
 ```
 
 兼容回归另覆盖三协议真实 HTTP 转发、工具参数精度、请求大小与内存预算拒绝、
-SSE 不完整响应、取消/重试及用量结算。Go 1.26 与 Go 1.27 分别验证回退和直接解码路径。
+SSE 不完整响应、取消/重试及用量结算。当前最低工具链为 Go 1.27.3；默认构建与
+`GOEXPERIMENT=nojsonv2` 分别验证直接解码与备用解析路径，不再维护旧 Go 版本检测。

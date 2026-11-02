@@ -1392,7 +1392,7 @@ ExecStart=/opt/workbuddy-gateway/workbuddy-gateway serve -addr 0.0.0.0
 
 ## 从源码构建
 
-需要 `go.mod` 声明的 **Go 1.26.5 或更新工具链**：
+需要 `go.mod` 声明的 **Go 1.27.3 或更新工具链**；CI 与构建脚本均以该声明为准：
 
 ```bash
 git clone https://github.com/CangShui/workbuddy-gateway.git
