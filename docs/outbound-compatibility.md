@@ -158,7 +158,10 @@ system、developer 和 assistant 历史中的展示身份替换可在 `config.js
       "Claude": "WorkBuddy",
       "DeepSeek Harness": "WorkBuddy",
       "Codex": "WorkBuddy",
-      "ZCode": "WorkBuddy"
+      "ZCode": "WorkBuddy",
+      "Grok Build": "WorkBuddy",
+      "Grok": "WorkBuddy",
+      "Grok released by xAI": "WorkBuddy"
     }
   }
 }
@@ -169,7 +172,11 @@ user、tool、reasoning 实测值、工具参数和工具结果不参与。官�
 所以官方直连请求的原文不会被这套规则改写。
 显式配置会处理非代码正文中的匹配名称；Markdown 代码（含跨内容块的围栏/行内代码）保持不变。升级不自动补写已有配置，不导入完整请求采集或 Node SDK/Agent 身份伪装。
 
-## Codex、dsh、Claude Code 接入建议
+Grok Build 等客户端的首位模板可显式配置，例如 `"You are(.*)released by xAI": "You are WorkBuddy"`。本 fork 不默认添加此规则，也不在升级时补写配置。`(.*)` 是受限占位符，不是正则：只允许一次，必须有非空首尾固定文本，只匹配原始文本块开头、不跨行，动态部分最多 256 个 Unicode 字符，首个后缀结束匹配。更具体的规则优先，单块最多命中一次通配；映射到自身表示保留原文。规则不判断句子语义，启用前需确认不会误改正常任务说明。
+
+通配在协议合并前执行，不能跨原始块匹配。Markdown 代码保护沿用完整消息上下文；用户、工具结果、工具参数和 reasoning 均不参与。一条请求及其重试共用同一份不可变规则快照。省略配置继续保留精确中性前缀及 GUI 兼容，显式自定义映射只使用该映射；`identity.enabled=false` 关闭所有身份文字兼容。缺失身份元数据与上游渠道准入拒绝仍需分别诊断，不能以替换文本保证解决 11128。
+
+## Codex、dsh、Claude Code、Grok Build 接入建议
 
 Claude Code 名称配置、默认行为和 Messages 回归边界见
 [Messages 身份文本说明](messages-identity.md)。
@@ -179,6 +186,14 @@ Claude Code 名称配置、默认行为和 Messages 回归边界见
 - Codex / dsh 使用 Responses 时，可以原样提交 instructions、developer/user、工具与 reasoning.effort。
 - Claude Code 等使用 Messages 时，可以原样提交 system、thinking、output_config 和 Anthropic 工具。
 - 原生 Chat 客户端保留 system/developer 与 user 的区别。
+
+### 流式字段与历史回传
+
+- Chat 的 `delta.tool_calls` 省略值为 `""` 的 `id`、`type`、`function.name`；保留 `index`、`function.arguments` 与扩展字段。客户端按 `index` 累计参数。处理逐片完成，适用于全部模型与客户端。字段定义见 [OpenAI 流式工具调用说明](https://developers.openai.com/api/docs/guides/function-calling#streaming)。
+- Messages 的 thinking 开始事件包含 `thinking:""` 和 `signature:""`，随后发送 `thinking_delta`、`signature_delta` 和 `content_block_stop`，遵循 [Anthropic 流式事件示例](https://platform.claude.com/docs/en/build-with-claude/streaming#streaming-request-with-thinking)。当前结束签名由网关生成，仅用于本项目的兼容输出，不具备 Anthropic 服务端签名验证能力。
+- Chat 的非空 `reasoning_content` 原样传递；客户端在下一轮请求中完整回传推理历史。DeepSeek 带工具请求的要求见 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)。已经丢失的工具名称或推理文本无法由输出清理恢复，更新后使用新会话验证。
+
+本 fork 本次仅执行离线回归，覆盖交错工具分片、参数拼接、推理文本与工具结果回传；快速转发与普通转发输出保持一致。未发送收费模型请求，未验证真实 Grok CLI 或 DSH 完整会话，不据此声称上游会接受某个身份模板。
 
 当前 Responses 工具转译支持 function、namespace 子工具、custom 和 web_search
 的请求/响应保真映射。托管搜索的实际搜索结果仍由客户端执行；不能把本模式当作

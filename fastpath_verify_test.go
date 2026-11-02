@@ -460,3 +460,19 @@ func TestStreamFastPathEquivalence(t *testing.T) {
 		}
 	}
 }
+
+func TestFastToolIdentityCleanupParity(t *testing.T) {
+	for _, call := range []string{
+		`{"index":0,"id":"","type":"","function":{"name":"","arguments":""}}`,
+		`{"index":1,"id":null,"type":17,"function":{"name":null,"arguments":"{\"text\":","extension":{"name":"","id":""}}}`,
+		`{"index":2,"id":"call_b","type":"function","function":{"name":"echo","arguments":""}}`,
+		`{"index":0,"id":"stale","id":"","function":{"name":""}}`,
+		`{"index":0,"i\u0064":"","function":{"na\u006de":""}}`,
+		`null`,
+	} {
+		in := `{"choices":[{"delta":{"tool_calls":[` + call + `]},"finish_reason":""}]}`
+		if got, want := fastResult(in), cleanChunkJSON(in); !equivalentJSON(got, want) {
+			t.Fatalf("identity cleanup differs: got %s want %s", got, want)
+		}
+	}
+}

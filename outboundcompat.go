@@ -63,8 +63,8 @@ func prepareUpstreamChatRequest(obj map[string]any, r *http.Request, requestID u
 	if sanitizeMessages(obj) {
 		recordCompatibilityRule(r, "developer_to_system")
 	}
-	// 三个协议都可能在这里合并文本块。先在合并前处理每个块的开头，
-	// 再在 fallback/force 注入后补一次，避免后续块的前缀因拼接而丢失。
+	// 通配只匹配协议合并前的原始块。后续再次准备只处理普通兼容，
+	// fallback/force 的通配在注入时按各自边界和完整 Markdown 上下文处理。
 	logDSHPromptCompatibility(r, requestID, obj)
 	if profile == requestProfileOfficial {
 		mergeLeadingInstructionMessages(obj, r, requestID)

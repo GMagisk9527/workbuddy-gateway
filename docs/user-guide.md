@@ -21,6 +21,8 @@
 
 **v1.14.40（上游同步）**：显式启用 `identity` 且未提供自定义映射时，补齐 `workspace root → workspace base` 与 `are paths the user → are paths that the user`。本分支保留省略/空 `identity` 的精确前缀兼容，不自动改写旧配置或向用户自定义映射追加规则。
 
+**v1.14.43（本 fork 同步范围）**：修复 Chat 工具增量的空身份字段，补全 Messages thinking 开始事件的空 signature。新增需要显式配置的受限首位通配，保留旧配置、代码正文保护与账号/积分/亲和逻辑。详见[出站兼容说明](outbound-compatibility.md)。
+
 **v1.14.41**：移除重复的 `promptCompatibility` 替换模块，显式配置的文本替换统一使用 `identity.replacements`，启用后的七条内置规则和热加载均可用。旧配置若仍有该字段，仅兼容读取并提示已忽略，不会阻止启动或继续执行旧规则。
 
 **v1.14.24**：Chat 流式响应增加首字节前 SSE 心跳与最多一次安全重放；DSH 身份句和 GUI 环境说明扩展覆盖 assistant 历史、后续文本块及配置注入提示词。默认开启，可通过 `upstream` 配置关闭重放。

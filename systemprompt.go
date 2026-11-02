@@ -44,6 +44,10 @@ func configuredFallbackSystemPrompt() string {
 // Fast path for raw force and the legacy DSH identity edits. Configurable name
 // edits are checked in their complete message context below.
 func systemPromptForceSuffix(content, force string) (int, bool) {
+	return systemPromptForceSuffixWithIdentity(content, force, identitySnapshot())
+}
+
+func systemPromptForceSuffixWithIdentity(content, force string, settings identitySettings) (int, bool) {
 	tail, source := content, force
 	neutralOpening := dshGUIContextNeutral + dshGUIContextOpening[len(dshGUIContextSentence):]
 	for {
@@ -69,7 +73,12 @@ func systemPromptForceSuffix(content, force string) (int, bool) {
 	if strings.HasSuffix(tail, source) {
 		return len(tail) - len(source), true
 	}
-	if identity, changed := sanitizeSystemPromptPrefix(source); changed && strings.HasSuffix(tail, identity) {
+	old, replacement := identityPrefixReplacement(source, settings)
+	identity := source
+	if settings.enabled && old != "" {
+		identity = replacement + source[len(old):]
+	}
+	if identity != source && strings.HasSuffix(tail, identity) {
 		return len(tail) - len(identity), true
 	}
 	return 0, false
@@ -79,25 +88,36 @@ func systemPromptForceSuffix(content, force string) (int, bool) {
 // verify the exact wire text. Parsing force alone would mistake a closing fence
 // from the client for an opening fence. Configuration itself is never changed.
 func systemPromptForceWireMatches(existing, force, context string, start int, identityAllowed bool) bool {
+	return systemPromptForceWireMatchesWithIdentity(existing, force, context, start, identityAllowed, identitySnapshot())
+}
+
+func systemPromptForceWireMatchesWithIdentity(existing, force, context string, start int, identityAllowed bool, settings identitySettings) bool {
 	if existing == force {
 		return true
 	}
 	code := dshMarkdownCodeRanges(context)
-	wire, _ := normalizeDSHGUIContextPart(force, start, code)
+	wire := force
+	if settings.enabled && !settings.custom {
+		wire, _ = normalizeDSHGUIContextPart(force, start, code)
+	}
 	// The shared compatibility pass reparses Markdown after the GUI edit, then
 	// applies all configured name rules. Use that same order and message scope.
 	code = dshMarkdownCodeRanges(context[:start] + wire)
-	wire, _ = normalizeIdentityTextWithPrefix(wire, code, start, identityAllowed)
+	settings.suppressWildcard = true
+	wire, _ = normalizeIdentityText(wire, code, start, identityAllowed, settings)
 	return existing == wire
 }
 
 func systemPromptHasForce(content, force string) bool {
-	start, ok := systemPromptForceSuffix(content, force)
+	return systemPromptHasForceWithIdentity(content, force, identitySnapshot())
+}
+
+func systemPromptHasForceWithIdentity(content, force string, settings identitySettings) bool {
+	start, ok := systemPromptForceSuffixWithIdentity(content, force, settings)
 	if ok && (start == 0 || strings.HasSuffix(content[:start], "\n\n")) &&
-		systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, start == 0) {
+		systemPromptForceWireMatchesWithIdentity(content[start:], force, content[:start]+force, start, start == 0, settings) {
 		return true
 	}
-	settings := identitySnapshot()
 	if !settings.enabled || len(settings.replacements) == 0 {
 		return false
 	}
@@ -118,7 +138,7 @@ func systemPromptHasForce(content, force string) bool {
 		limit += min(extra, len(content)-limit)
 	}
 	first := len(content) - limit
-	if first == 0 && systemPromptForceWireMatches(content, force, force, 0, true) {
+	if first == 0 && systemPromptForceWireMatchesWithIdentity(content, force, force, 0, true, settings) {
 		return true
 	}
 	for pos := max(0, first-2); pos < len(content); {
@@ -127,7 +147,7 @@ func systemPromptHasForce(content, force string) bool {
 			break
 		}
 		start := pos + next + 2
-		if start >= first && systemPromptForceWireMatches(content[start:], force, content[:start]+force, start, false) {
+		if start >= first && systemPromptForceWireMatchesWithIdentity(content[start:], force, content[:start]+force, start, false, settings) {
 			return true
 		}
 		pos = start - 1 // Consecutive newlines have overlapping boundaries.
@@ -136,6 +156,10 @@ func systemPromptHasForce(content, force string) bool {
 }
 
 func systemPromptBlockHasForce(message map[string]any, force string) bool {
+	return systemPromptBlockHasForceWithIdentity(message, force, identitySnapshot())
+}
+
+func systemPromptBlockHasForceWithIdentity(message map[string]any, force string, settings identitySettings) bool {
 	text, parts := dshMessageText(message, false)
 	blocks, _ := message["content"].([]any)
 	if len(blocks) > 0 {
@@ -146,14 +170,14 @@ func systemPromptBlockHasForce(message map[string]any, force string) bool {
 			if len(parts) > 0 {
 				text += "\n"
 			}
-			return systemPromptForceWireMatches("", force, text+force, len(text), true)
+			return systemPromptForceWireMatchesWithIdentity("", force, text+force, len(text), true, settings)
 		}
 	}
 	if len(parts) == 0 {
 		return false
 	}
 	last := parts[len(parts)-1]
-	return systemPromptForceWireMatches(last.text, force, text[:last.start]+force, last.start, true)
+	return systemPromptForceWireMatchesWithIdentity(last.text, force, text[:last.start]+force, last.start, true, settings)
 }
 
 // prepareSystemPromptForUpstream 在 Chat、Responses、Messages 三个入口统一执行。
@@ -174,10 +198,35 @@ func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, request
 		recordCompatibilityRule(r, "leading_system_normalized")
 	}
 	settings := configuredSystemPrompts()
+	identity := identityStateForRequest(r).settings
 	force := settings.force
+	rawForce := force
 	forced := strings.TrimSpace(force) != ""
 	kind := "未修改"
 	messages, _ := obj["messages"].([]any)
+	if injected && len(messages) > 0 {
+		applyIdentityReplacements(map[string]any{"messages": []any{messages[0]}}, r, requestID)
+	}
+	if forced && len(messages) > 0 && identity.wildcardMayChange(force) {
+		first, _ := messages[0].(map[string]any)
+		context, _ := dshMessageText(first, false)
+		offset := len(context)
+		if _, blocks := first["content"].([]any); blocks {
+			if offset > 0 {
+				context += "\n"
+				offset++
+			}
+		} else if offset > 0 {
+			context += "\n\n"
+			offset += 2
+		}
+		context += force
+		if identity.enabled {
+			if rewritten, _, matched := identity.replaceWildcard(force, dshMarkdownCodeRanges(context), offset); matched {
+				force = rewritten
+			}
+		}
+	}
 	if forced && len(messages) > 0 {
 		if first, ok := messages[0].(map[string]any); ok {
 			old := first["content"]
@@ -186,14 +235,14 @@ func prepareSystemPromptForUpstream(obj map[string]any, r *http.Request, request
 				kind = "字符串"
 				if content == "" {
 					first["content"] = force
-				} else if !systemPromptHasForce(content, force) {
+				} else if !systemPromptHasForceWithIdentity(content, force, identity) && !systemPromptHasForceWithIdentity(content, rawForce, identity) {
 					first["content"] = content + "\n\n" + force
 				}
 			case []any:
 				kind = "内容块数组"
 				if len(content) > 0 {
 					if last, ok := content[len(content)-1].(map[string]any); ok && last["type"] == "text" {
-						if _, ok := last["text"].(string); ok && systemPromptBlockHasForce(first, force) {
+						if _, ok := last["text"].(string); ok && (systemPromptBlockHasForceWithIdentity(first, force, identity) || systemPromptBlockHasForceWithIdentity(first, rawForce, identity)) {
 							break // 兼容规范化前后均不重复追加同一配置指令。
 						}
 					}

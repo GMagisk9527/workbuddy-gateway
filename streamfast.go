@@ -699,7 +699,15 @@ func rewriteDeltaInto(src []byte, i int, dst []byte, m *chunkMeta) ([]byte, int,
 			}
 			first = false
 			dst = append(dst, src[ks:vs]...)
-			dst = append(dst, val...)
+			if bytes.Equal(key, keyToolCalls) && len(val) > 0 && val[0] == '[' {
+				var ok bool
+				dst, _, ok = rewriteToolIdentityInto(val, 0, dst, 0)
+				if !ok {
+					return dst, i, false
+				}
+			} else {
+				dst = append(dst, val...)
+			}
 		}
 		i = end
 
@@ -773,4 +781,79 @@ func keyDup(seen [][]byte, key []byte) bool {
 		}
 	}
 	return false
+}
+
+// Clean identity fields without decoding arguments or extension values. kind 0
+// is the tool-call array, 1 a call, 2 its function; recursion is bounded at 2.
+func rewriteToolIdentityInto(src []byte, i int, dst []byte, kind int) ([]byte, int, bool) {
+	open, close := byte('{'), byte('}')
+	if kind == 0 {
+		open, close = '[', ']'
+	}
+	if i >= len(src) || src[i] != open {
+		return dst, i, false
+	}
+	dst = append(dst, open)
+	i++
+	first := true
+	var seenBuf [32][]byte
+	seen := seenBuf[:0]
+	for {
+		i = skipWS(src, i)
+		if i >= len(src) {
+			return dst, i, false
+		}
+		if src[i] == close {
+			return append(dst, close), i + 1, true
+		}
+		start := i
+		var key []byte
+		if kind != 0 {
+			end, ok := skipString(src, i)
+			if !ok {
+				return dst, i, false
+			}
+			key = src[i+1 : end-1]
+			if bytes.IndexByte(key, '\\') >= 0 || keyDup(seen, key) || len(seen) >= len(seenBuf) {
+				return dst, i, false
+			}
+			seen = append(seen, key)
+			i = skipWS(src, end)
+			if i >= len(src) || src[i] != ':' {
+				return dst, i, false
+			}
+			i = skipWS(src, i+1)
+		}
+		vs := i
+		end, ok := skipValue(src, i)
+		if !ok {
+			return dst, i, false
+		}
+		drop := kind == 1 && (bytes.Equal(key, []byte("id")) || bytes.Equal(key, []byte("type"))) || kind == 2 && bytes.Equal(key, keyName)
+		drop = drop && bytes.Equal(src[vs:end], []byte(`""`))
+		if !drop {
+			if !first {
+				dst = append(dst, ',')
+			}
+			first = false
+			dst = append(dst, src[start:vs]...)
+			if kind == 0 && src[vs] == '{' || kind == 1 && bytes.Equal(key, keyFunction) && src[vs] == '{' {
+				dst, _, ok = rewriteToolIdentityInto(src, vs, dst, kind+1)
+				if !ok {
+					return dst, i, false
+				}
+			} else {
+				dst = append(dst, src[vs:end]...)
+			}
+		}
+		i = skipWS(src, end)
+		if i < len(src) && src[i] == ',' {
+			i++
+			continue
+		}
+		if i < len(src) && src[i] == close {
+			return append(dst, close), i + 1, true
+		}
+		return dst, i, false
+	}
 }

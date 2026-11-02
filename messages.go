@@ -159,8 +159,8 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		recordCompatibilityRule(r, "anthropic_attribution_consumed")
 	}
 
-	// Messages 会在转换时合并 system 文本块。先逐块处理，避免第二块开头的
-	// 已知前缀在 join 后落到正文中段而漏掉；后续共享步骤会再次幂等检查。
+	// 在协议拼接前处理原始块，保留完整消息的 Markdown 上下文。
+	// 后续共享步骤不再对合并后的文本重新执行通配。
 	compatMessages, _ := msgReq["messages"].([]any)
 	var compatSystem map[string]any
 	if system, exists := msgReq["system"]; exists {
@@ -857,7 +857,7 @@ func (s *anthropicStreamState) appendThinking(rc string) []byte {
 		s.blocks = append(s.blocks, anthropicContentSlot{kind: "thinking", text: s.thinking})
 		out = append(out, s.emit("content_block_start", map[string]any{
 			"index":         s.thinking.index,
-			"content_block": map[string]any{"type": "thinking", "thinking": ""},
+			"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
 		})...)
 	}
 	s.thinking.buf.WriteString(rc)

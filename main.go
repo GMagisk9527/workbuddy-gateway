@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	version = "1.14.41"
+	version = "1.14.43"
 
 	// 状态快照文件名：serve 后台周期写入，monitor 前台命令实时读取展示
 	statusSnapshotFile = "workbuddy-status.json"
@@ -5274,6 +5274,25 @@ func cleanChunkJSON(s string) string {
 				choice["finish_reason"] = nil
 			}
 			if delta, ok := choice["delta"].(map[string]any); ok {
+				// 工具增量的身份字段可省略；空值表示本片没有更新。
+				// 保留 index、参数片段和扩展字段，供客户端完整累计。
+				calls, _ := delta["tool_calls"].([]any)
+				for _, raw := range calls {
+					call, ok := raw.(map[string]any)
+					if !ok {
+						continue
+					}
+					for _, key := range []string{"id", "type"} {
+						if value, ok := call[key].(string); ok && value == "" {
+							delete(call, key)
+						}
+					}
+					if function, ok := call["function"].(map[string]any); ok {
+						if name, ok := function["name"].(string); ok && name == "" {
+							delete(function, "name")
+						}
+					}
+				}
 				for k, v := range delta {
 					if k == "function_call" && isEmptyFunctionCall(v) {
 						delete(delta, k)

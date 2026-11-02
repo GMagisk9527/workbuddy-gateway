@@ -1,5 +1,7 @@
 # DSH 历史回放与 GUI 环境说明兼容
 
+> **本 fork 同步说明：** v1.14.43 保留精确中性前缀和 GUI 兼容，以及完整消息范围内的 Markdown 代码保护；首位通配需要显式配置，不自动迁移已有配置。当前规则见[出站兼容说明](outbound-compatibility.md)。
+
 关联 [Issue #24](https://github.com/CangShui/workbuddy-gateway/issues/24)
 和 [Issue #21](https://github.com/CangShui/workbuddy-gateway/issues/21)。
 
