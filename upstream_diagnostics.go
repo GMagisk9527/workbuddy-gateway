@@ -41,12 +41,17 @@ func detectUpstreamStreamRejection(data []byte) *upstreamStreamRejection {
 	return &upstreamStreamRejection{info: info, body: string(data)}
 }
 
-func reportUpstreamStreamRejection(r *http.Request, requestID uint64, model string, prof *upstreamProfile, err error) *upstreamStreamRejection {
+func reportUpstreamStreamRejection(r *http.Request, requestID uint64, model string, acc *Account, prof *upstreamProfile, err error) *upstreamStreamRejection {
 	var rejection *upstreamStreamRejection
 	if !errors.As(err, &rejection) {
 		return nil
 	}
 	performanceFor(r).rejectCurrentAttempt(rejection.info.Category, rejection.info.Code)
+	if rejection.info.Code == "11140" && acc != nil {
+		// SSE/200 and HTTP/403 carry the same account restriction. Stop future
+		// scheduling, but never replay this stream (it may have emitted output).
+		restrictAccount(acc, "上游账号受限 (SSE): business_code=11140")
+	}
 	// A channel rejection before output is an explicit uncharged result. A
 	// rejection after output or an earlier ambiguous send cannot erase cost.
 	if p := statsAttemptFor(r); p != nil {
@@ -80,8 +85,8 @@ func writeUpstreamBusinessRejection(w http.ResponseWriter, r *http.Request, stat
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func writeAggregateBusinessRejection(w http.ResponseWriter, r *http.Request, requestID uint64, model string, prof *upstreamProfile, err error) bool {
-	if rejection := reportUpstreamStreamRejection(r, requestID, model, prof, err); rejection != nil {
+func writeAggregateBusinessRejection(w http.ResponseWriter, r *http.Request, requestID uint64, model string, acc *Account, prof *upstreamProfile, err error) bool {
+	if rejection := reportUpstreamStreamRejection(r, requestID, model, acc, prof, err); rejection != nil {
 		writeUpstreamBusinessRejection(w, r, http.StatusBadGateway, rejection.info, rejection.clientMessage())
 		return true
 	}

@@ -1736,6 +1736,16 @@ func markModelQuotaBlocked(acc *Account, model, msg string) {
 // disableAccount 将账号标记为失效（授权过期/撤销），禁止调度并删除凭据文件，
 // 同时写入持久化失效标记，便于控制台提示用户重新登录。
 func disableAccount(acc *Account, reason string) {
+	stopAccount(acc, reason, false)
+}
+
+// An account-level restriction is not proof that its credential is invalid.
+// Persist the scheduling stop without probing or deleting the credential.
+func restrictAccount(acc *Account, reason string) {
+	stopAccount(acc, reason, true)
+}
+
+func stopAccount(acc *Account, reason string, keepCredential bool) {
 	reason = sanitizeUpstreamText(reason)
 	accountMu.Lock()
 	acc.Disabled = true
@@ -1773,6 +1783,12 @@ func disableAccount(acc *Account, reason string) {
 		if werr := os.WriteFile(markerPath(path), data, 0600); werr != nil {
 			log.Printf("[Auth] 账号 %s 失效标记写入失败: %v", path, werr)
 		}
+	}
+
+	if keepCredential {
+		log.Printf("[Auth] 账号 %s 已停止调度；上游明确返回账号受限，保留凭据文件", path)
+		writeStatusSnapshot()
+		return
 	}
 
 	// 删除凭据前先做一次只读校验：删除不可逆，只有确认凭据真的不可用才销毁。
@@ -1892,9 +1908,12 @@ func clearDisabledMarker(path string) {
 	}
 }
 
-// isAuthFailure 判断上游响应是否为授权失效（401/403 / invalid token / 登录过期等）。
+// isAuthFailure recognizes 401 or explicit credential failure, not a bare 403.
 func isAuthFailure(statusCode int, body string) bool {
-	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+	// A generic 403 can be an edge/WAF or resource permission denial. Only
+	// 401 or explicit credential failure text proves authentication failure.
+	// Account restrictions (11140) are classified separately by the caller.
+	if statusCode == http.StatusUnauthorized {
 		return true
 	}
 	low := strings.ToLower(body)
@@ -4158,7 +4177,7 @@ func upstreamChat(w http.ResponseWriter, r *http.Request, reqID uint64, modelNam
 					performanceFor(r).rejectCurrentAttempt("account_restricted", rejection.Code)
 					// Preserve the existing persistent stop for this account. Only
 					// the incoming request may wait and try one other eligible account.
-					disableAccount(acc, fmt.Sprintf("上游账号受限 (HTTP %d): %s", resp.StatusCode, truncate(safeErrStr, 200)))
+					restrictAccount(acc, fmt.Sprintf("上游账号受限 (HTTP %d): %s", resp.StatusCode, truncate(safeErrStr, 200)))
 					delayed := restrictedReplayFor(r)
 					if attempt+1 < poolSize && delayed.canWait(modelName, attempted) {
 						delayed.failure = failure
@@ -4602,9 +4621,6 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			if mode == int32(fastPathShadow) {
 				shadowReport()
 			}
-			if guard.err() != nil {
-				return false
-			}
 			sawDone = sse.done
 			metadataLines = sse.metadata
 			scanErr := sse.Err()
@@ -4622,7 +4638,10 @@ func streamChatResponseWithReplay(w http.ResponseWriter, r *http.Request, resp *
 			}
 			if streamRejection != nil {
 				scanErr = streamRejection
-				reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+				reportUpstreamStreamRejection(r, reqID, modelName, acc, prof, scanErr)
+			}
+			if guard.err() != nil {
+				return false
 			}
 			if canReplayStream(scanErr, guard.hasData(), replays < replayBudget, r.Context().Err() != nil) {
 				return true
@@ -4752,7 +4771,7 @@ func writeChatAggregate(w http.ResponseWriter, r *http.Request, resp *http.Respo
 		if writeFirstTokenTimeout(w, r, err) {
 			return
 		}
-		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, acc, prof, err) {
 			return
 		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{
@@ -5184,6 +5203,11 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	if err := sse.Err(); err != nil {
 		var rejection *upstreamStreamRejection
 		if errors.As(err, &rejection) {
+			// A later business rejection cannot erase already reported usage.
+			// With no usage, retain the uncharged rejection path unchanged.
+			if len(usage) > 0 {
+				return nil, &aggregateUsageError{usage: usage, cause: rejection}
+			}
 			return nil, rejection
 		}
 		if errors.Is(err, errInvalidUpstreamChunk) {

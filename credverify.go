@@ -99,7 +99,7 @@ func verifyAccountUsable(ctx context.Context, auth StoredAuth) (bool, error) {
 	_, status, err := doJSONContext(ctx, cfg.HttpClient, http.MethodPost, prof.quotaSummaryURL(), headers, strings.NewReader("{}"))
 	if err != nil {
 		// 普通 403 可能只是权限不足或风控拒绝，不能据此确认 Token 失效。
-		// 仅修正只读凭据校验，不改变其他调用方的 403 停用规则。
+		// 与模型调用使用相同的保守分类：403 本身不证明凭据失效。
 		if status == http.StatusUnauthorized || isAuthFailure(0, err.Error()) {
 			log.Printf("[凭据校验] traceId=%s HTTP=%d 结果=不可用 原因=%v 说明=上游明确返回授权失效", traceID, status, err)
 			return false, nil // 上游明确拒绝：凭据确实不可用

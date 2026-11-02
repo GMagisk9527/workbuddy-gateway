@@ -1228,6 +1228,8 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		recordModelLatency(modelName, time.Since(startTime))
 	}()
 	scanErr := scanUpstreamSSE(body, state, writeEvent)
+	// A concurrently failed downstream write cannot undo an observed restriction.
+	streamRejection := reportUpstreamStreamRejection(r, reqID, modelName, acc, prof, scanErr)
 	session.heartbeat.Stop()
 	if writeFailed || guard.err() != nil {
 		writeFailed = true
@@ -1250,8 +1252,8 @@ func streamMessagesResponse(w http.ResponseWriter, r *http.Request, resp *http.R
 		if errors.Is(scanErr, errOutputBudget) {
 			reason, code = errOutputBudget.Error(), "output_budget_exceeded"
 		}
-		if rejection := reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr); rejection != nil {
-			reason, code = rejection.clientMessage(), rejection.info.Code
+		if streamRejection != nil {
+			reason, code = streamRejection.clientMessage(), streamRejection.info.Code
 		}
 		if errors.Is(scanErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("上游超过 %v 无数据，判定连接卡死并中断，本次回复不完整", currentIdleTimeout())
@@ -1323,7 +1325,7 @@ func writeMessagesAggregate(w http.ResponseWriter, r *http.Request, resp *http.R
 		if writeFirstTokenTimeout(w, r, err) {
 			return
 		}
-		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, acc, prof, err) {
 			businessRejection = true
 			return
 		}

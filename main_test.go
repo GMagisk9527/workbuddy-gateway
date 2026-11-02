@@ -591,7 +591,7 @@ func TestCheckinAccountCNAndSkipIntl(t *testing.T) {
 	}
 }
 
-// 验证授权失效识别（401/403 / invalid token / 登录过期等）
+// 403 alone is not credential failure; explicit authentication failures remain recognized.
 func TestIsAuthFailure(t *testing.T) {
 	cases := []struct {
 		status int
@@ -599,7 +599,11 @@ func TestIsAuthFailure(t *testing.T) {
 		want   bool
 	}{
 		{401, "{}", true},
-		{403, "{}", true},
+		{403, "{}", false},
+		{403, "<html>Access denied</html>", false},
+		{403, `{"msg":"permission denied for resource"}`, false},
+		{403, `{"msg":"invalid token"}`, true},
+		{403, `{"msg":"登录已过期"}`, true},
 		{400, `{"msg":"invalid token"}`, true},
 		{400, "unauthorized", true},
 		{400, "登录已过期", true},
