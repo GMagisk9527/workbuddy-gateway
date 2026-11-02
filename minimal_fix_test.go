@@ -219,8 +219,8 @@ func TestMinimalVerify403IsNotAlwaysInvalid(t *testing.T) {
 			}
 		})
 	}
-	if !isAuthFailure(http.StatusForbidden, "permission denied") {
-		t.Fatal("ordinary upstream 403 stop-account classification must stay unchanged")
+	if isAuthFailure(http.StatusForbidden, "permission denied") {
+		t.Fatal("ordinary upstream 403 must not disable an account without credential failure evidence")
 	}
 }
 

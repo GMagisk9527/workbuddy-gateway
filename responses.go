@@ -652,7 +652,7 @@ func writeResponsesAggregate(w http.ResponseWriter, r *http.Request, resp *http.
 		if writeFirstTokenTimeout(w, r, err) {
 			return
 		}
-		if writeAggregateBusinessRejection(w, r, reqID, modelName, prof, err) {
+		if writeAggregateBusinessRejection(w, r, reqID, modelName, acc, prof, err) {
 			return
 		}
 		debugEvent(r, "error", "aggregate_response_failed", map[string]any{
@@ -1306,12 +1306,6 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 		}
 	}
 	session.heartbeat.Stop()
-	if sseWriteErr != nil || guard.err() != nil {
-		// 客户端已断开：关闭响应体会取消上游请求，停止继续消耗额度。
-		_ = resp.Body.Close()
-		log.Printf("[#%d] 下游写入失败，已终止本次流 (账号 %s)", reqID, acc.Path)
-		return
-	}
 	sawDone = sse.done
 	scanErr := sse.Err()
 	if scanErr == nil {
@@ -1323,10 +1317,16 @@ func streamResponsesResponse(w http.ResponseWriter, r *http.Request, resp *http.
 	if streamRejection == nil {
 		// 读取层重放可能直接返回带业务码的错误（例如第二次请求收到 11128），
 		// 扫描循环没有对应的 data 行，这里补做一次识别，保留业务码。
-		streamRejection = reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+		streamRejection = reportUpstreamStreamRejection(r, reqID, modelName, acc, prof, scanErr)
 	} else {
 		scanErr = streamRejection
-		reportUpstreamStreamRejection(r, reqID, modelName, prof, scanErr)
+		reportUpstreamStreamRejection(r, reqID, modelName, acc, prof, scanErr)
+	}
+	if sseWriteErr != nil || guard.err() != nil {
+		// Preserve any observed restriction before handling a concurrent disconnect.
+		_ = resp.Body.Close()
+		log.Printf("[#%d] 下游写入失败，已终止本次流 (账号 %s)", reqID, acc.Path)
+		return
 	}
 	if scanErr == nil && finishReason != "" {
 		scanErr = validateMergedToolIdentity(toolCalls, toolOrder)
