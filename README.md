@@ -17,6 +17,7 @@ Windows 可使用 `.\workbuddy-gateway.exe`。管理端口默认 `8316`，模型
 - 首次启动会在工作目录生成完整的默认 `config.json`；已有配置不会自动补写或改写。默认单账号模型并发 `4`，全局不限；修改 `concurrent.MaxAcc/MaxGlobal` 可热加载。可按需要设置管理 Key、API 鉴权和身份替换。
 - 新生成配置最多保留 `8` 个在途请求，其中 `2` 个可同时读入/转换；最多排队 `8` 个、等待 `15` 秒。旧配置省略 `maxPreparing` 保持原整请求准入。账号选择感知负载，软亲和通常等待 `250` 毫秒，大上下文可根据近期上游缓存证据延长到 `1500` 毫秒；详见[分阶段准入与缓存亲和](docs/staged-admission-cache-affinity.md)。`admission` 和 `scheduling` 均可热加载。
 - 默认同 Key 内 FIFO、跨 Key 公平排队：`fairQueue` 省略或为 `true` 时启用，显式 `false` 恢复全局 FIFO。`maxWaitingPerKey` 仅在公平模式且有鉴权 Key 身份时生效，`0` 表示自动取总排队上限的一半向上取整；完整字段见 [config.example.json](config.example.json)，行为与 Trace 诊断见[公平准入与请求诊断](docs/fair-queue-request-diagnostics.md)。
+- v1.14.43 同步工具/Thinking 流式兼容修复，并提供显式配置的受限首位通配；旧配置和 Markdown 代码保护保留，详见[出站兼容说明](docs/outbound-compatibility.md)。
 - **后台价格探测默认关闭**，只有显式传入 `-allow-price-probes` 才开启；主动生成请求可能消耗积分。
 - 网页配置页支持风险确认后的完整 JSON 编辑；API/Web 监听端口修改可热切换，已有连接与流继续完成。新端口被占用或配置无法应用时保留旧运行状态；显式 `-port` 仍优先于配置文件。
 - `config.json` 和账号凭据含敏感信息，已由 Git 忽略，不要公开分享。

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"net/http"
 )
 
@@ -85,30 +84,5 @@ func logSystemPromptPrefixCompatibility(r *http.Request, obj map[string]any) {
 }
 
 func logDSHPromptCompatibility(r *http.Request, requestID uint64, obj map[string]any) {
-	anthropic := r != nil && r.URL != nil && r.URL.Path == "/v1/messages"
-	// Complete GUI phrases must be processed before configurable name rules.
-	gui := normalizeDSHGUIContextsForProtocol(obj, anthropic)
-	system := sanitizeMessageIdentityPrefixesForProtocol(obj, "system", anthropic)
-	assistant := sanitizeMessageIdentityPrefixesForProtocol(obj, "assistant", anthropic)
-	if system > 0 {
-		recordCompatibilityRule(r, "dsh_system_identity_prefix")
-	}
-	if assistant > 0 {
-		recordCompatibilityRule(r, "dsh_assistant_identity_prefix")
-	}
-	if gui > 0 {
-		recordCompatibilityRule(r, "dsh_gui_context_identity")
-	}
-	if system+assistant+gui == 0 {
-		return
-	}
-	trace := debugTraceID(r)
-	if trace == "" && r != nil {
-		trace = r.Header.Get("X-Trace-ID")
-	}
-	log.Printf("[DSH提示词兼容] traceId=%s requestId=%d system前缀=%d assistant前缀=%d GUI环境句=%d 结果=已应用兼容规则，未记录提示词正文", trace, requestID, system, assistant, gui)
-	debugEvent(r, "info", "dsh_prompt_compatibility", map[string]any{
-		"system_prefix_parts": system, "assistant_prefix_parts": assistant,
-		"gui_context_matches": gui, "prompt_body_logged": false,
-	})
+	applyOriginalIdentityReplacements(obj, r, requestID)
 }

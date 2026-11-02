@@ -58,7 +58,9 @@ go test -run 'TestModelRequest|TestDecodeModelRequest|TestConversionJSON|TestMar
 跨 Key／模型／协议及篡改拒绝、metadata 回显和能力边界。所有正文、标识及工具参数均为
 合成数据，全部夹具在本地构造，不读取用户会话或凭据。
 跨编译后的测试程序若在另一台机器运行，应提供同一提交的源码目录，并用 `WORKBUDDY_TEST_SOURCE_ROOT` 指定其绝对路径；这样即使使用 `-trimpath`，示例配置等文件测试也能正确定位，不必跳过这些测试。
-`identity_request_test.go` 验证文本替换仅由 `identity` 控制，七条内置规则显式启用、旧配置不改写及热加载保持有效；旧 `promptCompatibility` 字段只兼容读取并告警，不执行规则，不影响用户/工具内容，也不会放宽其他未知字段的校验。
+`identity_request_test.go` 验证 identity 开关、自定义词条及热加载，新增三入口 × 两种出站模式 × 流式/聚合 × 五种场景的 60 组本地 HTTP 回归，覆盖字面/通配、跨块代码保护及 user/tool 内容保护。
+`identity_wildcard_test.go` 覆盖受限通配的首位、单行、256 Unicode 字符边界、具体规则优先、映射自身、非法规则、热加载及脱敏日志；配置升级保持字节不变，不补写默认通配。
+`stream_test.go` 与 `fastpath_verify_test.go` 覆盖工具增量空身份字段、参数与扩展字段保留、快速路径一致性和多轮推理工具回传。`messages_test.go` 验证 thinking 开始事件的空 signature 及事件顺序。均使用本地合成上游，不代表真实渠道校验成功。
 可选历史采集离线重放见[出站兼容说明](../docs/outbound-compatibility.md#验证与边界)，默认不会读取私有材料。
 
 输出、额外尝试和日志边界回归集中在 `output_budget_test.go`、`retry_budget_test.go`、
