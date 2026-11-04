@@ -113,6 +113,10 @@ func inspectRequestCompatibility(r *http.Request, body map[string]any) requestCo
 			d.protocol = "messages"
 		case "/v1/chat/completions", "/chat/completions":
 			d.protocol = "chat_completions"
+		case "/v1/search":
+			d.protocol = "search"
+		case "/v1/fetch":
+			d.protocol = "fetch"
 		}
 	}
 	d.stream, _ = body["stream"].(bool)
