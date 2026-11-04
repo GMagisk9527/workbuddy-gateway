@@ -26,6 +26,9 @@ func newAPIHandler() http.Handler {
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/v1/usage", handleKeyUsage)
 	mux.HandleFunc("/models", handleModels)
+	// DSH Search / Fetch API compatibility.
+	mux.HandleFunc("/v1/search", withRequestBodyDecode(handleWebSearch))
+	mux.HandleFunc("/v1/fetch", withRequestBodyDecode(handleWebFetch))
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ping", handleHealth)
 	// 探测接口：先过管理员鉴权与回环检查，再解码请求体。
