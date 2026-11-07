@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenAiProtocols;
+using TypedMigration;
 
 namespace HttpMigration;
 
@@ -27,10 +28,10 @@ public static class OutboundPreparation
     }
     // The adapter keeps its document alive until this call has encoded all
     // borrowed scalars. Null means the original tree was already normalized.
-    internal static byte[]? PrepareParsed(JsonObject root,SystemPromptOptions settings,Action<int> reserve,int limit,Action<JsonObject>? inspect=null)
+    internal static byte[]? PrepareParsed(JsonObject root,SystemPromptOptions settings,Action<int> reserve,int limit,Action<JsonObject,bool>? inspect=null,bool canonicalInput=false)
     {
-        settings.Validate();var shadow=V.From(root);bool changed=Normalize(shadow,settings);
-        var normalized=changed?shadow.ToNode()!.AsObject():root;inspect?.Invoke(normalized);
+        settings.Validate();var shadow=V.From(root,canonicalInput);bool changed=Normalize(shadow,settings);
+        var normalized=changed?shadow.ToNode()!.AsObject():root;inspect?.Invoke(normalized,changed);
         if(!changed)return null;
         try{return OpenWire.Encode(normalized,limit,optimizeLarge:true,reserve:reserve);}
         catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded")
@@ -43,19 +44,20 @@ public static class OutboundPreparation
         readonly JsonElement raw;
         readonly JsonValueKind kind;
         readonly JsonNode? dom;
+        readonly bool canonical;
         Dictionary<string,V>? obj;List<V>? array;string? text;
         V(JsonElement e){raw=e;kind=e.ValueKind;}
-        V(JsonNode node){dom=node;kind=node.GetValueKind();}
+        V(JsonNode node,bool canonical){dom=node;kind=node.GetValueKind();this.canonical=canonical;}
         V(JsonValueKind k){kind=k;}
         internal static V From(JsonElement e)=>new(e);
-        internal static V From(JsonNode? node)=>node is null?new(JsonValueKind.Null):new(node);
+        internal static V From(JsonNode? node,bool canonical=false)=>node is null?new(JsonValueKind.Null):new(node,canonical);
         internal static V Text(string s)=>new(JsonValueKind.String){text=s};
         internal static V Object(params (string Key,V Value)[] pairs)=>new(JsonValueKind.Object){obj=pairs.ToDictionary(p=>p.Key,p=>p.Value,StringComparer.Ordinal)};
         internal static V Array(IEnumerable<V> values)=>new(JsonValueKind.Array){array=values.ToList()};
         internal bool Is(JsonValueKind k)=>kind==k;
         internal string Str()=>kind==JsonValueKind.String?text??(dom is JsonValue value&&value.TryGetValue<string>(out var decoded)?decoded:raw.GetString()!):"";
-        internal Dictionary<string,V> Obj=>obj??=dom is JsonObject json?json.ToDictionary(p=>p.Key,p=>From(p.Value),StringComparer.Ordinal):raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
-        internal List<V> Arr=>array??=dom is JsonArray json?json.Select(From).ToList():raw.EnumerateArray().Select(From).ToList();
+        internal Dictionary<string,V> Obj=>obj??=dom is JsonObject json?(canonical?GoJson.Ordered(json):json).ToDictionary(p=>p.Key,p=>From(p.Value,canonical),StringComparer.Ordinal):raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
+        internal List<V> Arr=>array??=dom is JsonArray json?json.Select(value=>From(value,canonical)).ToList():raw.EnumerateArray().Select(From).ToList();
         internal V? Get(string key)=>kind==JsonValueKind.Object?Obj.GetValueOrDefault(key):null;
         internal void Set(string key,V value)=>Obj[key]=value;
         internal bool Remove(string key)=>Obj.Remove(key);

@@ -19,7 +19,7 @@ public static class MessagesRequestAdapter
     static readonly JsonSerializerOptions EncodingOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
     static readonly GatewayJson NodeJson = new(EncodingOptions);
     static string Type(JsonElement root) => JsonFields.Text(JsonFields.Get(root, "thinking"), "type").Trim().ToLowerInvariant();
-    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null,Action<JsonElement>? inspectInput=null,Func<JsonObject,bool>? compatibility=null)
+    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null,Action<JsonElement>? inspectInput=null,Func<JsonObject,bool>? compatibility=null,Func<JsonObject,byte[]?>? prepareBody=null)
     {
         if (bytes.Length > limit) throw new RequestFailure("请求体超过大小限制", 413, "request_too_large");
         try
@@ -109,7 +109,9 @@ public static class MessagesRequestAdapter
             if (kind != "disabled" && outputEffort.Length > 0) raw["reasoning_effort"] = outputEffort;
             // Both local response modes consume an upstream SSE stream.
             raw["stream"] = true;
-            bool compatible=compatibility?.Invoke(raw)??(prompts is not null&&OutboundPreparation.IsCompatible(raw,prompts));
+            byte[]? prepared=prepareBody?.Invoke(raw);
+            bool compatible=prepareBody is not null||(compatibility?.Invoke(raw)??(prompts is not null&&OutboundPreparation.IsCompatible(raw,prompts)));
+            if(prepared is not null)return new(model,JsonFields.Get(root,"stream").ValueKind==JsonValueKind.True,thinking,hidden,prepared){OutboundCompatible=compatible};
             var rawSizes=new Dictionary<JsonValue,int>();
             int size=Size(raw, limit,rawSizes); // Check the complete escaped size before allocating UTF-8 output.
             byte[] encoded = GoJson.FormatUtf8(raw,size,rawSizes);

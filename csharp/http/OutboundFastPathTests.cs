@@ -12,15 +12,15 @@ internal static class OutboundFastPathTests
     {
         int checks=0;var settings=new SystemPromptOptions();
         JsonObject Base()=>JsonNode.Parse("{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"Keep these rules.\"},{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"a\",\"content\":\"result\"}],\"stream\":true}")!.AsObject();
-        void Verify(JsonObject root,bool expected,SystemPromptOptions? options=null)
+        void Verify(JsonObject root,bool expected,SystemPromptOptions? options=null,bool canonicalInput=false)
         {
             options??=settings;
             string original=root.ToJsonString();int reserved=0;string? digest=null;
             var affinity=new SessionAffinity(new(true,Mode:AffinityMode.Prefix));
-            byte[] input=OpenWire.Encode(root,OpenWire.RequestLimit,optimizeLarge:true);
+            byte[] input=canonicalInput?Encoding.UTF8.GetBytes(TypedMigration.GoJson.Format(root)):OpenWire.Encode(root,OpenWire.RequestLimit,optimizeLarge:true);
             byte[] reference=OutboundPreparation.Prepare(input,options,_=>{},OpenWire.RequestLimit);
             byte[]? parsed=OutboundPreparation.PrepareParsed(root,options,n=>reserved=n,OpenWire.RequestLimit,
-                normalized=>digest=affinity.PrefixDigest(normalized,false,null));
+                (normalized,changed)=>digest=affinity.PrefixDigest(normalized,canonicalInput&&!changed,null),canonicalInput);
             if(!reference.AsSpan().SequenceEqual(parsed??input)||root.ToJsonString()!=original||parsed is not null&&reserved!=parsed.Length)
                 throw new Exception("Parsed preparation changed normalization, ownership or reservation");
             if(digest is not null&&affinity.KeyFromPrefix("caller","m",digest,65536)!=affinity.Key("caller","m",null,reference))
@@ -35,6 +35,9 @@ internal static class OutboundFastPathTests
             checks++;
         }
         Verify(Base(),true);
+        Verify(Base(),true,canonicalInput:true);
+        var canonical=new JsonObject{["model"]="m",["messages"]=new JsonArray(new JsonObject{["role"]="user",["content"]=string.Concat(Enumerable.Repeat("中文 <>& \n \\",8192))}),["tools"]=new JsonArray(new JsonObject{["𐀀"]="supplementary",["\ue000"]="private-use",["<key>"]="value"})};
+        Verify(canonical,false,canonicalInput:true);
         Verify(OpenWire.Parse(Encoding.UTF8.GetBytes("{\"model\":\"m\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\""+new string('x',1<<20)+"\"}]}")),false);
         Verify(OpenWire.Parse(Encoding.UTF8.GetBytes("{\"model\":\"m\",\"stream\":true,\"messages\":[{\"role\":\"developer\",\"content\":\"Keep all rules.\"},{\"role\":\"user\",\"content\":\""+new string('x',65536)+"\\u4e2d\\n\\\"\"}]}")),false);
         var small=JsonNode.Parse("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"u\"}]}")!.AsObject();
@@ -89,7 +92,7 @@ internal static class OutboundFastPathTests
             }
             var candidate=new JsonObject{["model"]="m",["messages"]=list};
             bool compatible=OutboundPreparation.IsCompatible(candidate,settings);
-            Verify(candidate,compatible);if(compatible)proven++;
+            Verify(candidate,compatible,canonicalInput:attempt%2==0);if(compatible)proven++;
         }
         if(proven<10)throw new Exception("Compatibility fuzzing did not exercise enough accepted histories");
         Console.WriteLine(JsonSerializer.Serialize(new{outboundFastPathChecks=checks}));
