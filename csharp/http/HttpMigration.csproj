@@ -11,6 +11,12 @@
     <ILLinkTreatWarningsAsErrors>true</ILLinkTreatWarningsAsErrors>
     <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
   </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayNativeAot)' == 'true'">
+    <Compile Remove="Program.cs;*Tests.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(GatewayNativeAot)' != 'true'">
+    <Compile Remove="AotProgram.cs" />
+  </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="web/*" LogicalName="AdminAssets.%(Filename)%(Extension)" />
     <ProjectReference Include="../streaming/StreamingMigration.csproj" />

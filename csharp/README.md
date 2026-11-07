@@ -4,9 +4,10 @@ This directory contains the independently migrated .NET 11 RC3 gateway, its offl
 
 The GitHub Actions workflow uses Alpine 3.21 and `linux-musl-x64`, matching the production libc. It installs the native compiler only in an ephemeral build container and has no deployment credentials or deployment step.
 
-Two results are intentionally separate:
+Three results are intentionally separate:
 
-- `native-components` builds and runs the current gateway's JIT checks, seven foundation suites and frontend tests. It then compiles the SSE event writer plus key/ledger persistence checks to a native executable with reflection JSON disabled and linker/AOT warnings treated as errors. All 2,508 SSE variants must match the JIT legacy writer's byte fingerprint; native key creation, quota settlement, duplicate protection and durable reload must also pass.
+- `jit-regressions` runs the gateway's offline checks, seven foundation suites and frontend tests, with a separate timeout on each executable.
+- `native-components` compiles the SSE event writer plus key/ledger persistence checks to a native executable with reflection JSON disabled and linker/AOT warnings treated as errors. It links the exact event source files, without the unrelated streaming CLI/probe entry point. All 2,508 SSE variants must match the JIT legacy writer's byte fingerprint; native key creation, quota settlement, duplicate protection and durable reload must also pass.
 - `full-gateway-aot` attempts strict AOT publication of the entire HTTP application. This is currently expected to expose remaining reflection serialization and request-delegate diagnostics. A successful component executable is **not** a production gateway release. The full job must become green before claiming whole-application AOT compatibility.
 
 The SSE event writer emits canonical UTF-8 bytes directly, preserving the previous escaping, key order, thinking/tool events and error framing. Key and ledger disk JSON now use generated metadata while preserving the disk schema. Existing optimized message preparation is included unchanged.
@@ -22,3 +23,5 @@ dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --source h
 ```
 
 The native artifact is a validation executable, without a model endpoint. No production configuration, API Key, account or billing data is needed. Do not replace the deployed gateway with it.
+
+The full native executable has a production-only entry point (`--standalone` / `--standalone-pool`); JIT builds retain the existing test and probe commands. Both call the same standalone startup implementation. Test code is not made AOT-compatible by suppressing diagnostics or shipped in the production native binary.

@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p out/native-evidence
 dotnet publish bench-aot/BenchAot.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json \
-  -p:PublishAot=true -p:JsonSerializerIsReflectionEnabledByDefault=false -p:IlcTreatWarningsAsErrors=true -p:ILLinkTreatWarningsAsErrors=true \
+  -p:PublishAot=true -p:JsonSerializerIsReflectionEnabledByDefault=false -p:IlcTreatWarningsAsErrors=true -p:ILLinkTreatWarningsAsErrors=true -p:TrimmerSingleWarn=false \
   -p:GatewayAssemblies="$PWD/out/jit" -p:NuGetAudit=false -o out/native
 expected="$(cat out/verification/wire-sha.txt)"
 out/native/BenchAot --expect "$expected" > out/native-evidence/native.json

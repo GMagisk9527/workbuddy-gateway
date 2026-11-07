@@ -131,7 +131,7 @@
     "http/PreparationAdmission.cs": "ba8bf0fe520a382567c998a13ade6b2dafd756a58edfbe1fffc44b0cee42d717",
     "http/PreviewKeyDirectory.cs": "b35efd2432d9063f38704489a77fdac25ee30750de90a9eecd2dd97954708e6f",
     "http/PriceProbeState.cs": "87a7f684fe9d8f30abf405fce1719f8094691859e7ad1ecb10398069a27a023e",
-    "http/Program.cs": "31b11e0ddeee2bc881d1dade484fe56ee126ac216b630cefb02fe3a1256bdaa1",
+    "http/Program.cs": "e7ab5cbb89af78632c8e1a752d750a5e3018ba81d914cc3731c54c74f0bc78aa",
     "http/RequestAdmission.cs": "e4466a3f4aaa53d2c8015623579339733fa8812a268fe91c6f2ac726d2e78cf8",
     "http/RequestLogStore.cs": "2772aef48d50af1c9ba2cc2cef55a578f9c22e5f3ff589162405fa8cbe95aae6",
     "http/RequestLogTests.cs": "0e5ad35aec0f56a2daa61c1a442da25d1a1bfdc9f637fd6a61abf8a24baab4ea",
@@ -166,7 +166,7 @@
     "http/StandaloneTests.cs": "a71e3635ca4e014d0be5246ee0d70cedd0f63c57967bba8b2b0bee6884527dfe",
     "http/TokenEstimation.cs": "0591787a5f9509ac7de33432e21b0db6bd4d34f837ebcb665fc032ff12cd9a3b",
     "http/ZstdBody.cs": "d8d8977669b99c61484a31d9508f296e9f1608180628d7773780137715971396",
-    "http/HttpMigration.csproj": "9149d8381c7101c25cd4cf0dfd1ad97c26e44ae647b3822400c2ac93b081dd4f",
+    "http/HttpMigration.csproj": "7744e9a84abee05ef3b7ff4531f8278bbb8e6b7de9161068385094a89098f475",
     "openai-tests/HttpTests.cs": "619e5e5051deb664fa2cb3dd1b54a3a585ee7ce4a7a3c29ff2fd3a29f4e8be09",
     "openai-tests/Program.cs": "f2dfdc50b69672d16ca7dea22be187aa9753ca94272dd5971fed238e922dd5a4",
     "openai-tests/StreamTests.cs": "0b91108f0a3729971ba4f52712c7659563263e0cd61218a4eb3638204d2443b2",
@@ -198,12 +198,14 @@
     "bench-aot/LegacyEventWriter.cs": "5b5a57107ab57abcf0aaeaecd5f47b8a511d6344ad059fed87e80fbee0a2e0ba",
     "bench-aot/Program.cs": "088953dc97e172b34cc7da853c7d14a67a2906ac0e0555ae1391238a42a6e1de",
     "bench-aot/StorageChecks.cs": "79aed3f55f29b7b8f3ef108cf75f392f94f470da405844a81e8a54b52409b664",
-    "bench-aot/BenchAot.csproj": "134f7c810357a03fbe28d68bb4d73410d059d3de2bd261998de849e1242f72a0",
+    "bench-aot/BenchAot.csproj": "0e7ce7760b864e8243e53578c55fae2f893652c410c4c00fa1df5f421c668615",
     "http/web/app.js": "deef478bf4462f077f320234d8017cf871472b1c5ec0484cc2339b972222ce88",
     "http/web/index.html": "fbd854984813d13da575f5a07170363236f5e3b920f59d69c27a36d04e6ac2c5",
     "http/web/qrcodegen.js": "d234c412720d72a31af7b57a74c40781547f71386e19c4efa13fb5e1f8674a52",
     "http/web/style.css": "9bd0f24d944e30bd5af71c7acbb38eb052391640de08992814bf5054f06a3626",
-    "tests/web/app.test.cjs": "58781e07d02b95a767e95b3b4eaaeaeac48f1707b1a71a46ba748c8354b78567"
+    "tests/web/app.test.cjs": "58781e07d02b95a767e95b3b4eaaeaeac48f1707b1a71a46ba748c8354b78567",
+    "http/StandaloneHost.cs": "263d9ee5250c217828151cf27c0737a3e734264bb6f2ac51818a1c5d904ba76e",
+    "http/AotProgram.cs": "180a6ee5acda4f993a27cf39beec7d79d96004835e60474a88682c7839f56edc"
   },
   "hashNormalization": "Git blob bytes (UTF-8 source with LF line endings)"
 }
