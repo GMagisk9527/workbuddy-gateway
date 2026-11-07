@@ -162,9 +162,13 @@ public static class OpenWire
     }
     public static byte[] EncodeDocument(Action<Utf8JsonWriter> write,int limit,Action<int> reserve)
     {
-        using var count=new CountingBufferWriter(limit);
-        using(var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(counter);
-        int size=checked((int)count.Written);reserve(size);
+        int size;
+        using(var count=new CountingBufferWriter(limit))
+        {
+            using(var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(counter);
+            size=checked((int)count.Written);
+        }
+        reserve(size);
         using var output=new ExactBufferWriter(size);
         using(var writer=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(writer);
         return output.Finish();
