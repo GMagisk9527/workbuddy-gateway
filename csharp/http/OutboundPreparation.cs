@@ -93,10 +93,9 @@ public static class OutboundPreparation
         if(document.RootElement.ValueKind!=JsonValueKind.Object)throw new RequestFailure("请求体必须是 JSON 对象");
         var root=V.From(document.RootElement);
         if(!Normalize(root,settings))return input;
-        using var count=new CountStream(limit);using var writer=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
-        root.Write(writer);writer.Flush();int size=checked((int)count.Length);
-        reserve(size);byte[] result=new byte[size];using var output=new MemoryStream(result,true);
-        writer.Reset(output);root.Write(writer);writer.Flush();writer.Reset(Stream.Null);return result;
+        try{return OpenWire.EncodeDocument(root.Write,limit,reserve);}
+        catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded")
+        {throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");}
     }
     static bool Normalize(V root,SystemPromptOptions settings)
     {
@@ -210,14 +209,5 @@ public static class OutboundPreparation
             changed|=merged>0||deferred.Count>0;i=k;
         }
         return repaired;
-    }
-    sealed class CountStream(int limit):Stream
-    {
-        long count;
-        public override void Write(ReadOnlySpan<byte> b){if(b.Length>limit-count)throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");count+=b.Length;}
-        public override void Write(byte[] b,int o,int n)=>Write(b.AsSpan(o,n));
-        public override long Length=>count;public override bool CanWrite=>true;public override bool CanRead=>false;public override bool CanSeek=>false;
-        public override long Position{get=>count;set=>throw new NotSupportedException();}
-        public override void Flush(){ }public override int Read(byte[] b,int o,int n)=>throw new NotSupportedException();public override long Seek(long o,SeekOrigin s)=>throw new NotSupportedException();public override void SetLength(long n)=>throw new NotSupportedException();
     }
 }

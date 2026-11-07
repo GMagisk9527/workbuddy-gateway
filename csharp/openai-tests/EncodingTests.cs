@@ -83,6 +83,13 @@ internal static class EncodingTests
         if(!OpenWire.TryEncodePrefix(large,new byte[65536],out int prefixLength)||prefixLength!=65536)
             throw new Exception("Large canonical user prefix did not take the bounded path");
         checks++;
+        var exactTree=OpenWire.Parse(Encoding.UTF8.GetBytes("{\"payload\":\""+new string('x',1<<20)+"\",\"tail\":512}"));
+        byte[] exactReference=OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true);
+        _=OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true);
+        long allocated=GC.GetAllocatedBytesForCurrentThread();
+        for(int i=0;i<4;i++)if(!exactReference.AsSpan().SequenceEqual(OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true)))throw new Exception("Direct buffer encoding changed bytes");
+        allocated=(GC.GetAllocatedBytesForCurrentThread()-allocated)/4;
+        if(allocated>exactReference.Length+65536)throw new Exception("Large request encoding reintroduced a full-document buffer or copy");checks++;
         foreach(string sample in new[]{string.Concat(Enumerable.Repeat("中文 😀 line\nquote\"slash\\ ",2048)),new string('x',8192)+"\u2028\u2029"})
         {
             var tree=OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(new{role="user",content=sample},options));
@@ -118,6 +125,8 @@ internal static class EncodingTests
             if(!expected.AsSpan().SequenceEqual(actual))throw new Exception("UTF-8 writer changed the encoded JSON");
             int reserved=0;byte[] admitted=OpenWire.Encode(node,expected.Length,optimizeLarge:true,reserve:n=>reserved=n);
             if(reserved!=expected.Length||!expected.AsSpan().SequenceEqual(admitted))throw new Exception("Preallocation reservation changed the exact encoded size");
+            byte[] document=OpenWire.EncodeDocument(w=>{if(node is null)w.WriteNullValue();else node.WriteTo(w,options);},expected.Length,n=>reserved=n);
+            if(reserved!=expected.Length||!expected.AsSpan().SequenceEqual(document))throw new Exception("Callback encoding changed the wire representation");
             try{OpenWire.Encode(node,expected.Length-1,optimizeLarge:true);throw new Exception("Output budget was bypassed");}
             catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded"){}
             checks++;

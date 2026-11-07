@@ -205,8 +205,16 @@ def measure(mode, binary, case, server, env, directory, repeats, count, variant=
             elapsed = time.perf_counter() - started
             after = helpers.proc(child.pid)
             with server.guard:
-                assert server.calls - calls == count
+                actual_calls = server.calls - calls
             failures = [sample for sample in answers if not sample["ok"]]
+            if actual_calls != count or guard.is_set() or failures:
+                diagnostic={"mode":mode,"case":case,"round":repeats,"expectedUpstreamCalls":count,
+                            "actualUpstreamCalls":actual_calls,"memoryGuard":guard.is_set(),
+                            "peakRss":max(peak["rss"],after["hwm"]),"minAvailable":peak["available"],
+                            "failures":failures[:8]}
+                write_json(directory.parent/("failure-"+directory.name+".json"),diagnostic)
+                print(json.dumps(diagnostic),flush=True)
+            assert actual_calls == count, (mode,case,"unexpected upstream count",actual_calls,count)
             assert not guard.is_set() and not failures, (mode, case, "failed", failures[:2])
             return {"mode": mode, "protocol": protocol, "targetBytes": size, "wireBytes": len(body),
                     "concurrency": concurrency, "frames": frames, "round": repeats, "requests": count,

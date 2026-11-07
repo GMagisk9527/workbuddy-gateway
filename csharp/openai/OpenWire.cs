@@ -6,6 +6,7 @@ using TypedMigration;
 using StreamingMigration;
 using System.Runtime.InteropServices;
 using System.Text.Unicode;
+using System.Buffers;
 
 namespace OpenAiProtocols;
 
@@ -141,16 +142,32 @@ public static class OpenWire
         {
             if(capacity==0)
             {
-                using var count=new CountingStream(limit);
+                using var count=new CountingBufferWriter(limit);
                 using var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
-                WriteNode(counter,node);counter.Flush();capacity=checked((int)count.Length);
+                WriteNode(counter,node);counter.Flush();capacity=checked((int)count.Written);
             }
             reserve(capacity);
+        }
+        if(capacity>0&&budget is null)
+        {
+            using var output=new ExactBufferWriter(capacity);
+            using(var direct=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))
+            {WriteNode(direct,node,rawStrings);}
+            return output.Finish();
         }
         using var stream = new BudgetStream(limit,budget,capacity);
         using (var writer = new Utf8JsonWriter(stream, new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 }))
         { WriteNode(writer,node,capacity>0?rawStrings:null); }
         return stream.ToArray();
+    }
+    public static byte[] EncodeDocument(Action<Utf8JsonWriter> write,int limit,Action<int> reserve)
+    {
+        using var count=new CountingBufferWriter(limit);
+        using(var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(counter);
+        int size=checked((int)count.Written);reserve(size);
+        using var output=new ExactBufferWriter(size);
+        using(var writer=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(writer);
+        return output.Finish();
     }
     // Only take this path for large, already canonical UTF-8 request values.
     // It avoids MemoryStream growth and its final full-body copy. Streaming
@@ -284,15 +301,47 @@ public static class OpenWire
             }
         }
     }
-    sealed class CountingStream(long limit):Stream
+    sealed class CountingBufferWriter(long limit):IBufferWriter<byte>,IDisposable
     {
-        long count;
-        public override void Write(ReadOnlySpan<byte> value){if(value.Length>limit-count)throw new OpenAiFailure("output_budget_exceeded","输出超过大小限制",502);count+=value.Length;}
-        public override void Write(byte[] value,int offset,int length)=>Write(value.AsSpan(offset,length));
-        public override long Length=>count;public override bool CanRead=>false;public override bool CanSeek=>false;public override bool CanWrite=>true;
-        public override long Position{get=>count;set=>throw new NotSupportedException();}
-        public override void Flush(){}public override int Read(byte[] value,int offset,int length)=>throw new NotSupportedException();
-        public override long Seek(long offset,SeekOrigin origin)=>throw new NotSupportedException();public override void SetLength(long length)=>throw new NotSupportedException();
+        byte[]? scratch;internal long Written{get;private set;}
+        public Memory<byte> GetMemory(int sizeHint=0)
+        {
+            sizeHint=Math.Max(sizeHint,256);
+            if(scratch is null||scratch.Length<sizeHint)
+            {if(scratch is not null)ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=ArrayPool<byte>.Shared.Rent(sizeHint);}
+            return scratch;
+        }
+        public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
+        public void Advance(int count)
+        {
+            if(count<0||scratch is null||count>scratch.Length)throw new ArgumentOutOfRangeException(nameof(count));
+            if(count>limit-Written)throw new OpenAiFailure("output_budget_exceeded","输出超过大小限制",502);Written+=count;
+        }
+        public void Dispose(){if(scratch is not null){ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=null;}}
+    }
+    // Utf8JsonWriter's Stream constructor buffers the complete document itself.
+    // An IBufferWriter lets it write directly into the reserved result array.
+    // Pessimistic size hints near the end use a small pooled overflow buffer;
+    // only the bytes actually written are copied back into the result.
+    sealed class ExactBufferWriter(int size):IBufferWriter<byte>,IDisposable
+    {
+        readonly byte[] bytes=new byte[size];int written;byte[]? scratch;bool usingScratch;
+        public Memory<byte> GetMemory(int sizeHint=0)
+        {
+            sizeHint=Math.Max(1,sizeHint);
+            if(sizeHint<=bytes.Length-written){usingScratch=false;return bytes.AsMemory(written);}
+            if(scratch is null||scratch.Length<sizeHint)
+            {if(scratch is not null)ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=ArrayPool<byte>.Shared.Rent(sizeHint);}
+            usingScratch=true;return scratch;
+        }
+        public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
+        public void Advance(int count)
+        {
+            if(count<0||count>bytes.Length-written)throw new InvalidOperationException("JSON size mismatch");
+            if(usingScratch)scratch!.AsSpan(0,count).CopyTo(bytes.AsSpan(written));written+=count;
+        }
+        internal byte[] Finish(){if(written!=bytes.Length)throw new InvalidOperationException("JSON size mismatch");return bytes;}
+        public void Dispose(){if(scratch is not null){ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=null;}}
     }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget,int capacity=0) : Stream
     {
