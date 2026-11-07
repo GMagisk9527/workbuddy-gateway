@@ -1,0 +1,54 @@
+name: Isolated Native AOT and Go comparison
+
+on:
+  push:
+    branches: [codex/aot-go-bench-b28ac2a]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Compile the Go gateway and verify the Alpine Native AOT package
+        run: |
+          mkdir -p "$RUNNER_TEMP/gateway-pair"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/gateway-pair/workbuddy-go" .
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 42333795715
+          name: linux-musl-native-gateway
+          path: ${{ runner.temp }}/gateway-pair
+      - name: Exercise the same isolated HTTPS fixture
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/gateway-pair"
+          cd "$dir"
+          tar -xzf workbuddy-gateway-linux-musl-x64.tar.gz
+          echo '776f5f4db99178a66e652f97a36f6cbf0d4101f2d13d01137178dd396470e2b2  HttpMigration' | sha256sum -c -
+          docker build -t workbuddy-comparison - <<'DOCKERFILE'
+          FROM alpine:3.21
+          RUN apk add --no-cache python3 openssl zstd-libs libstdc++
+          DOCKERFILE
+          cpu=$(awk '/^Cpus_allowed_list:/ {split($2, cpus, /[-,]/); print cpus[1]}' /proc/self/status)
+          docker run --rm --network none --cpuset-cpus "$cpu" \
+            --add-host www.workbuddy.cn:127.0.0.1 --add-host www.codebuddy.cn:127.0.0.1 --add-host copilot.tencent.com:127.0.0.1 \
+            -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci/aot-bench:/bench:ro" workbuddy-comparison \
+            python3 -B /bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence
+          python3 -m json.tool "$dir/evidence/summary.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpine-native-aot-vs-go-benchmark
+          path: |
+            ${{ runner.temp }}/gateway-pair/evidence/*.json
+            ${{ runner.temp }}/gateway-pair/evidence/*.jsonl
+            ${{ runner.temp }}/gateway-pair/evidence/*/gateway.log
