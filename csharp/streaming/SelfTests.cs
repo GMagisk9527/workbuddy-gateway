@@ -1,0 +1,186 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Net;
+using System.Net.Sockets;
+
+namespace StreamingMigration;
+
+internal static class SelfTests
+{
+    const string Text = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+    const string Finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":3}}\n\n";
+    static void Check(bool ok, string name) { if (!ok) throw new InvalidOperationException("Assertion failed: " + name); }
+    public static async Task RunAsync()
+    {
+        var passed = new List<string>();
+        async Task Run(string name, Func<Task> action) { await action(); passed.Add(name); }
+        await Run("cancel blocked read and close upstream", async () =>
+        {
+            var source = new BlockingInput(); using var output = new MemoryStream(); using var cts = new CancellationTokenSource();
+            var task = StreamPump.RunAsync(source, output, new(), cts.Token);
+            await source.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cts.Cancel();
+            var r = await task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(r.Outcome == StreamOutcome.Cancelled && source.Closed && output.Length == 0, "cancel blocked");
+        });
+        await Run("write failure stops reading and closes upstream", async () =>
+        {
+            var source = new FragmentedInput(Encoding.UTF8.GetBytes(Text + Finish), 1);
+            using var output = new BrokenOutput(false);
+            var r = await StreamPump.RunAsync(source, output, new());
+            Check(r.Outcome == StreamOutcome.DownstreamFailed && source.Closed && source.Reads < Encoding.UTF8.GetByteCount(Text + Finish), "write failure");
+        });
+        await Run("flush failure is downstream failure", async () =>
+        {
+            var source = new FragmentedInput(Encoding.UTF8.GetBytes(Text + Finish), 1); using var output = new BrokenOutput(true);
+            var r = await StreamPump.RunAsync(source, output, new());
+            Check(r.Outcome == StreamOutcome.DownstreamFailed && source.Closed, "flush failure");
+        });
+        await Run("output arrives before upstream EOF", async () =>
+        {
+            var source = new BlockingInput(Encoding.UTF8.GetBytes(Text)); using var output = new SignallingOutput(); using var cts = new CancellationTokenSource();
+            var task = StreamPump.RunAsync(source, output, new(), cts.Token);
+            await output.Written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!task.IsCompleted, "did not aggregate entire response"); cts.Cancel();
+            var r = await task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(r.Outcome == StreamOutcome.Cancelled && source.Closed && !Encoding.UTF8.GetString(output.ToArray()).Contains("message_stop", StringComparison.Ordinal), "no fake finish on cancel");
+        });
+        await Run("read failure after finish is not success; measured usage survives", async () =>
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(Text + Finish);
+            var source = new FragmentedInput(bytes, 3, bytes.Length); using var output = new MemoryStream();
+            var r = await StreamPump.RunAsync(source, output, new()); string sse = Encoding.UTF8.GetString(output.ToArray());
+            Check(r.Outcome == StreamOutcome.Failed && r.Code == "read_error" && r.Usage.Output == 3 && source.Closed && !sse.Contains("message_stop", StringComparison.Ordinal), "truncated finish");
+        });
+        await Run("retained output budget fails closed", async () =>
+        {
+            var source = new FragmentedInput(Encoding.UTF8.GetBytes(Text + Finish)); using var output = new MemoryStream();
+            var r = await StreamPump.RunAsync(source, output, new(RetainedLimit: 511));
+            Check(r.Code == "output_budget_exceeded" && source.Closed && !Encoding.UTF8.GetString(output.ToArray()).Contains("message_stop", StringComparison.Ordinal), "budget");
+        });
+        await Run("terminal state cannot finish or feed twice", () =>
+        {
+            var state = new MessageStreamState("model", false); state.Feed(ChunkReader.Parse("{\"choices\":[{\"finish_reason\":\"stop\"}]}")); state.Finish();
+            int caught = 0;
+            try { state.Finish(); } catch (InvalidOperationException) { caught++; }
+            try { state.Feed(ChunkReader.Parse("{}")); } catch (InvalidOperationException) { caught++; }
+            Check(caught == 2, "terminal state"); return Task.CompletedTask;
+        });
+        await Run("opaque reasoning authenticates model, key and ciphertext", () =>
+        {
+            var codec = new ReasoningCodec(Program.TestKey, "model"); string token = codec.Seal("中文 reasoning");
+            Check(codec.Open(token) == "中文 reasoning", "roundtrip"); int rejected = 0;
+            try { new ReasoningCodec(Program.TestKey, "other").Open(token); } catch (CryptographicException) { rejected++; }
+            try { new ReasoningCodec(new byte[32], "model").Open(token); } catch (CryptographicException) { rejected++; }
+            string changed = token[..10] + (token[10] == 'a' ? 'b' : 'a') + token[11..];
+            try { codec.Open(changed); } catch (CryptographicException) { rejected++; }
+            Check(rejected == 3, "authenticated envelope"); return Task.CompletedTask;
+        });
+        await Run("hidden reasoning never emits plaintext", async () =>
+        {
+            string s = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"PRIVATE_REASONING\"}}]}\n\n" + Finish;
+            using var output = new MemoryStream(); var source = new FragmentedInput(Encoding.UTF8.GetBytes(s), 1);
+            var r = await StreamPump.RunAsync(source, output, new(WantThinking: true, Hidden: new ReasoningCodec(Program.TestKey, "test-model")));
+            string wire = Encoding.UTF8.GetString(output.ToArray());
+            Check(r.Outcome == StreamOutcome.Complete && wire.Contains("wbg-r1.", StringComparison.Ordinal) && !wire.Contains("PRIVATE_REASONING", StringComparison.Ordinal), "hidden");
+        });
+        await Run("large normal text is not retained like an aggregate", async () =>
+        {
+            string chunk = "data: " + JsonSerializer.Serialize(new { choices = new[] { new { delta = new { content = new string('x', 10000) } } } }) + "\n\n";
+            using var output = new MemoryStream(); var source = new FragmentedInput(Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat(chunk, 100)) + Finish));
+            var r = await StreamPump.RunAsync(source, output, new(RetainedLimit: 512));
+            Check(r.Outcome == StreamOutcome.Complete, "one MB text with one 512-byte slot charge");
+        });
+        await Run("raw usage evidence survives a later conversion failure", async () =>
+        {
+            string wire = "data: {\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":3,\"credits\":0.125,\"custom\":{\"source\":\"measured\"}},\"choices\":[]}\n\ndata: {oops}\n\n";
+            using var output = new MemoryStream(); var source = new FragmentedInput(Encoding.UTF8.GetBytes(wire));
+            var r = await StreamPump.RunAsync(source, output, new());
+            using var evidence = JsonDocument.Parse(r.RawUsageJson ?? "null");
+            Check(r.Outcome == StreamOutcome.Failed && r.Usage.Output == 3 && evidence.RootElement.GetProperty("credits").GetDecimal() == .125m &&
+                evidence.RootElement.GetProperty("custom").GetProperty("source").GetString() == "measured", "raw usage evidence");
+        });
+        await Run("real HTTP chunked response streams before completion", async () =>
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+            try
+            {
+                var releaseFinish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var server = Serve(listener, async stream =>
+                {
+                    await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n", timeout.Token);
+                    await Chunk(stream, Text, timeout.Token);
+                    await releaseFinish.Task.WaitAsync(timeout.Token);
+                    await Chunk(stream, Finish, timeout.Token); await Write(stream, "0\r\n\r\n", timeout.Token);
+                }, timeout.Token);
+                using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false });
+                using var response = await client.GetAsync(Address(listener), HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                using var output = new SignallingOutput();
+                var pump = StreamPump.RunAsync(await response.Content.ReadAsStreamAsync(timeout.Token), output, new(), timeout.Token);
+                await output.Written.Task.WaitAsync(timeout.Token); Check(!pump.IsCompleted, "HTTP streaming before finish"); releaseFinish.SetResult();
+                var r = await pump; await server;
+                Check(r.Outcome == StreamOutcome.Complete && Encoding.UTF8.GetString(output.ToArray()).Contains("message_stop", StringComparison.Ordinal), "HTTP completed");
+            }
+            finally { listener.Stop(); }
+        });
+        await Run("real HTTP truncated content-length fails after finish", async () =>
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+            try
+            {
+                var server = Serve(listener, stream => Write(stream,
+                    $"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {Encoding.UTF8.GetByteCount(Text + Finish) + 100}\r\nConnection: close\r\n\r\n" + Text + Finish, timeout.Token), timeout.Token);
+                using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false });
+                using var response = await client.GetAsync(Address(listener), HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                using var output = new MemoryStream();
+                var r = await StreamPump.RunAsync(await response.Content.ReadAsStreamAsync(timeout.Token), output, new(), timeout.Token); await server;
+                Check(r.Outcome == StreamOutcome.Failed && r.Code == "read_error" && r.Usage.Output == 3 && !Encoding.UTF8.GetString(output.ToArray()).Contains("message_stop", StringComparison.Ordinal), "HTTP truncation");
+            }
+            finally { listener.Stop(); }
+        });
+        Console.WriteLine(JsonSerializer.Serialize(new { passed = passed.Count, tests = passed }));
+    }
+    static string Address(TcpListener listener) => $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/synthetic";
+    static async Task Serve(TcpListener listener, Func<NetworkStream, Task> respond, CancellationToken cancellation)
+    {
+        using var connection = await listener.AcceptTcpClientAsync(cancellation);
+        await using var stream = connection.GetStream(); using var reader = new StreamReader(stream, leaveOpen: true);
+        while (await reader.ReadLineAsync(cancellation) is { Length: > 0 }) { }
+        await respond(stream);
+    }
+    static async Task Write(NetworkStream stream, string value, CancellationToken cancellation)
+    { await stream.WriteAsync(Encoding.UTF8.GetBytes(value), cancellation); await stream.FlushAsync(cancellation); }
+    static Task Chunk(NetworkStream stream, string value, CancellationToken cancellation) =>
+        Write(stream, Encoding.UTF8.GetByteCount(value).ToString("x", System.Globalization.CultureInfo.InvariantCulture) + "\r\n" + value + "\r\n", cancellation);
+    sealed class BrokenOutput(bool flushFailure) : MemoryStream
+    {
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        { if (!flushFailure) throw new IOException("Injected write failure"); return base.WriteAsync(buffer, cancellationToken); }
+        public override Task FlushAsync(CancellationToken cancellationToken) => throw new IOException("Injected flush failure");
+    }
+    sealed class SignallingOutput : MemoryStream
+    {
+        public TaskCompletionSource Written { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        { var r = base.WriteAsync(buffer, cancellationToken); Written.TrySetResult(); return r; }
+    }
+    sealed class BlockingInput(byte[]? prefix = null) : Stream
+    {
+        bool sent;
+        public bool Closed { get; private set; }
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!sent && prefix is not null) { sent = true; prefix.CopyTo(buffer); return prefix.Length; }
+            Entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); return 0;
+        }
+        protected override void Dispose(bool disposing) { Closed = true; base.Dispose(disposing); }
+        public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException(); public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException(); public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException(); public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}

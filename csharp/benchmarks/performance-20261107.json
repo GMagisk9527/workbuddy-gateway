@@ -1,0 +1,1109 @@
+{
+  "date": "2026-11-07",
+  "candidateSource": "6cb3be1eac1d56c82e4f86af38186b32a8dd9ed0",
+  "benchmarkSource": "c3cfe475baa10c6acf47af4dd5b330b784f82374",
+  "benchmarkRun": 42357069574,
+  "goSource": "cacf5a0",
+  "ciAotReferenceSource": "3e5e62fb588adecff963e3765597853a9ed58de8",
+  "deployedSourceUnchanged": "b28ac2af2b45426a2d89970b2af408e6ae1c6e9e",
+  "formalCandidateSha256": "fce1a7f256a8f44ee0d8c566174099acf0bc5a34cb75f194f25fa6161be435f6",
+  "ci": {
+    "tool": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 2.582,
+            "firstP95Ms": 3.178,
+            "completeMs": 4.491,
+            "requestsPerSecond": 208.48,
+            "idleMiB": 13.68,
+            "medianPeakMiB": 17.52,
+            "peakMiB": 17.67,
+            "cpuMsPerRequest": 2.61
+          },
+          "aot": {
+            "firstMs": 1.594,
+            "firstP95Ms": 2.344,
+            "completeMs": 3.781,
+            "requestsPerSecond": 238.36,
+            "idleMiB": 35.57,
+            "medianPeakMiB": 51.62,
+            "peakMiB": 51.76,
+            "cpuMsPerRequest": 1.9
+          },
+          "candidate": {
+            "firstMs": 1.625,
+            "firstP95Ms": 2.63,
+            "completeMs": 3.829,
+            "requestsPerSecond": 232.19,
+            "idleMiB": 36.11,
+            "medianPeakMiB": 51.92,
+            "peakMiB": 52.13,
+            "cpuMsPerRequest": 1.96
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 16.939,
+            "firstP95Ms": 19.388,
+            "completeMs": 19.644,
+            "requestsPerSecond": 50.71,
+            "idleMiB": 13.71,
+            "medianPeakMiB": 25.4,
+            "peakMiB": 26.21,
+            "cpuMsPerRequest": 14.53
+          },
+          "aot": {
+            "firstMs": 12.295,
+            "firstP95Ms": 14.738,
+            "completeMs": 14.533,
+            "requestsPerSecond": 67.43,
+            "idleMiB": 35.58,
+            "medianPeakMiB": 52.91,
+            "peakMiB": 63.5,
+            "cpuMsPerRequest": 9.75
+          },
+          "candidate": {
+            "firstMs": 12.628,
+            "firstP95Ms": 14.826,
+            "completeMs": 14.952,
+            "requestsPerSecond": 66.59,
+            "idleMiB": 36.14,
+            "medianPeakMiB": 52.08,
+            "peakMiB": 52.36,
+            "cpuMsPerRequest": 9.89
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 64.981,
+            "firstP95Ms": 74.712,
+            "completeMs": 70.977,
+            "requestsPerSecond": 51.99,
+            "idleMiB": 13.72,
+            "medianPeakMiB": 34.35,
+            "peakMiB": 37.08,
+            "cpuMsPerRequest": 13.64
+          },
+          "aot": {
+            "firstMs": 49.111,
+            "firstP95Ms": 59.779,
+            "completeMs": 54.177,
+            "requestsPerSecond": 66.7,
+            "idleMiB": 35.61,
+            "medianPeakMiB": 89.09,
+            "peakMiB": 91.02,
+            "cpuMsPerRequest": 9.89
+          },
+          "candidate": {
+            "firstMs": 50.717,
+            "firstP95Ms": 60.463,
+            "completeMs": 54.771,
+            "requestsPerSecond": 65.27,
+            "idleMiB": 36.13,
+            "medianPeakMiB": 62.27,
+            "peakMiB": 63.84,
+            "cpuMsPerRequest": 10.13
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 59.392,
+            "firstP95Ms": 65.484,
+            "completeMs": 62.001,
+            "requestsPerSecond": 16.02,
+            "idleMiB": 13.7,
+            "medianPeakMiB": 52.43,
+            "peakMiB": 55.57,
+            "cpuMsPerRequest": 49.17
+          },
+          "aot": {
+            "firstMs": 42.518,
+            "firstP95Ms": 47.483,
+            "completeMs": 44.936,
+            "requestsPerSecond": 22.16,
+            "idleMiB": 35.65,
+            "medianPeakMiB": 117.3,
+            "peakMiB": 209.59,
+            "cpuMsPerRequest": 31.61
+          },
+          "candidate": {
+            "firstMs": 42.366,
+            "firstP95Ms": 47.517,
+            "completeMs": 44.934,
+            "requestsPerSecond": 21.95,
+            "idleMiB": 36.18,
+            "medianPeakMiB": 89.49,
+            "peakMiB": 124.83,
+            "cpuMsPerRequest": 31.9
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 63.063,
+            "firstP95Ms": 76.673,
+            "completeMs": 71.518,
+            "requestsPerSecond": 50.98,
+            "idleMiB": 13.68,
+            "medianPeakMiB": 33.2,
+            "peakMiB": 33.61,
+            "cpuMsPerRequest": 14.24
+          },
+          "aot": {
+            "firstMs": 56.137,
+            "firstP95Ms": 63.205,
+            "completeMs": 57.609,
+            "requestsPerSecond": 63.28,
+            "idleMiB": 35.61,
+            "medianPeakMiB": 65.68,
+            "peakMiB": 78.79,
+            "cpuMsPerRequest": 11.36
+          },
+          "candidate": {
+            "firstMs": 52.552,
+            "firstP95Ms": 60.155,
+            "completeMs": 53.962,
+            "requestsPerSecond": 66.78,
+            "idleMiB": 36.13,
+            "medianPeakMiB": 57.28,
+            "peakMiB": 61.62,
+            "cpuMsPerRequest": 10.38
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 59.903,
+            "firstP95Ms": 70.436,
+            "completeMs": 65.546,
+            "requestsPerSecond": 56.51,
+            "idleMiB": 13.7,
+            "medianPeakMiB": 34.21,
+            "peakMiB": 38.45,
+            "cpuMsPerRequest": 12.01
+          },
+          "aot": {
+            "firstMs": 56.465,
+            "firstP95Ms": 65.799,
+            "completeMs": 58.488,
+            "requestsPerSecond": 61.69,
+            "idleMiB": 35.57,
+            "medianPeakMiB": 98.85,
+            "peakMiB": 112.96,
+            "cpuMsPerRequest": 11.29
+          },
+          "candidate": {
+            "firstMs": 55.936,
+            "firstP95Ms": 64.446,
+            "completeMs": 58.035,
+            "requestsPerSecond": 62.02,
+            "idleMiB": 36.09,
+            "medianPeakMiB": 64.05,
+            "peakMiB": 67.18,
+            "cpuMsPerRequest": 11.05
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1,
+          "concurrency": 4,
+          "frames": 1024,
+          "go": {
+            "firstMs": 20.281,
+            "firstP95Ms": 66.19,
+            "completeMs": 124.818,
+            "requestsPerSecond": 30.26,
+            "idleMiB": 13.71,
+            "medianPeakMiB": 18.96,
+            "peakMiB": 19.24,
+            "cpuMsPerRequest": 15.18
+          },
+          "aot": {
+            "firstMs": 18.181,
+            "firstP95Ms": 61.385,
+            "completeMs": 93.853,
+            "requestsPerSecond": 39.0,
+            "idleMiB": 35.66,
+            "medianPeakMiB": 52.41,
+            "peakMiB": 52.59,
+            "cpuMsPerRequest": 8.97
+          },
+          "candidate": {
+            "firstMs": 16.781,
+            "firstP95Ms": 59.707,
+            "completeMs": 94.981,
+            "requestsPerSecond": 38.93,
+            "idleMiB": 36.09,
+            "medianPeakMiB": 52.59,
+            "peakMiB": 52.75,
+            "cpuMsPerRequest": 9.17
+          }
+        }
+      ],
+      "completed": 9408,
+      "planned": 9408,
+      "strictCompleted": 6272
+    },
+    "user": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 75.77,
+            "firstP95Ms": 86.797,
+            "completeMs": 81.637,
+            "requestsPerSecond": 45.88,
+            "idleMiB": 13.7,
+            "medianPeakMiB": 40.23,
+            "peakMiB": 41.41,
+            "cpuMsPerRequest": 16.43
+          },
+          "aot": {
+            "firstMs": 57.429,
+            "firstP95Ms": 69.306,
+            "completeMs": 61.663,
+            "requestsPerSecond": 59.27,
+            "idleMiB": 35.71,
+            "medianPeakMiB": 85.35,
+            "peakMiB": 94.39,
+            "cpuMsPerRequest": 11.85
+          },
+          "candidate": {
+            "firstMs": 59.951,
+            "firstP95Ms": 72.763,
+            "completeMs": 64.158,
+            "requestsPerSecond": 56.59,
+            "idleMiB": 36.07,
+            "medianPeakMiB": 62.34,
+            "peakMiB": 63.52,
+            "cpuMsPerRequest": 12.3
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 70.271,
+            "firstP95Ms": 77.181,
+            "completeMs": 73.379,
+            "requestsPerSecond": 13.55,
+            "idleMiB": 13.7,
+            "medianPeakMiB": 61.1,
+            "peakMiB": 63.34,
+            "cpuMsPerRequest": 60.16
+          },
+          "aot": {
+            "firstMs": 50.121,
+            "firstP95Ms": 56.428,
+            "completeMs": 52.555,
+            "requestsPerSecond": 18.9,
+            "idleMiB": 35.62,
+            "medianPeakMiB": 140.67,
+            "peakMiB": 200.84,
+            "cpuMsPerRequest": 39.78
+          },
+          "candidate": {
+            "firstMs": 50.033,
+            "firstP95Ms": 55.425,
+            "completeMs": 52.525,
+            "requestsPerSecond": 18.98,
+            "idleMiB": 36.14,
+            "medianPeakMiB": 90.8,
+            "peakMiB": 108.88,
+            "cpuMsPerRequest": 39.35
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 74.002,
+            "firstP95Ms": 86.797,
+            "completeMs": 81.698,
+            "requestsPerSecond": 44.95,
+            "idleMiB": 13.71,
+            "medianPeakMiB": 38.76,
+            "peakMiB": 40.46,
+            "cpuMsPerRequest": 16.74
+          },
+          "aot": {
+            "firstMs": 63.808,
+            "firstP95Ms": 72.888,
+            "completeMs": 65.138,
+            "requestsPerSecond": 56.71,
+            "idleMiB": 35.59,
+            "medianPeakMiB": 65.42,
+            "peakMiB": 87.01,
+            "cpuMsPerRequest": 13.12
+          },
+          "candidate": {
+            "firstMs": 58.544,
+            "firstP95Ms": 67.261,
+            "completeMs": 60.377,
+            "requestsPerSecond": 60.16,
+            "idleMiB": 36.11,
+            "medianPeakMiB": 57.49,
+            "peakMiB": 60.3,
+            "cpuMsPerRequest": 12.17
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 67.047,
+            "firstP95Ms": 78.197,
+            "completeMs": 71.99,
+            "requestsPerSecond": 51.21,
+            "idleMiB": 13.69,
+            "medianPeakMiB": 40.97,
+            "peakMiB": 41.56,
+            "cpuMsPerRequest": 14.02
+          },
+          "aot": {
+            "firstMs": 69.783,
+            "firstP95Ms": 79.893,
+            "completeMs": 71.586,
+            "requestsPerSecond": 50.68,
+            "idleMiB": 35.59,
+            "medianPeakMiB": 100.57,
+            "peakMiB": 126.83,
+            "cpuMsPerRequest": 14.78
+          },
+          "candidate": {
+            "firstMs": 61.016,
+            "firstP95Ms": 69.6,
+            "completeMs": 63.181,
+            "requestsPerSecond": 57.09,
+            "idleMiB": 36.06,
+            "medianPeakMiB": 63.3,
+            "peakMiB": 64.84,
+            "cpuMsPerRequest": 12.7
+          }
+        }
+      ],
+      "completed": 5376,
+      "planned": 5376,
+      "strictCompleted": 3584
+    },
+    "bare": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 74.068,
+            "firstP95Ms": 85.475,
+            "completeMs": 79.519,
+            "requestsPerSecond": 46.65,
+            "idleMiB": 13.72,
+            "medianPeakMiB": 39.82,
+            "peakMiB": 42.9,
+            "cpuMsPerRequest": 16.09
+          },
+          "aot": {
+            "firstMs": 90.452,
+            "firstP95Ms": 102.405,
+            "completeMs": 94.665,
+            "requestsPerSecond": 40.05,
+            "idleMiB": 35.54,
+            "medianPeakMiB": 155.95,
+            "peakMiB": 208.54,
+            "cpuMsPerRequest": 20.13
+          },
+          "candidate": {
+            "firstMs": 46.017,
+            "firstP95Ms": 55.574,
+            "completeMs": 49.916,
+            "requestsPerSecond": 72.83,
+            "idleMiB": 36.05,
+            "medianPeakMiB": 60.67,
+            "peakMiB": 62.11,
+            "cpuMsPerRequest": 9.31
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 70.148,
+            "firstP95Ms": 75.881,
+            "completeMs": 73.417,
+            "requestsPerSecond": 13.64,
+            "idleMiB": 13.71,
+            "medianPeakMiB": 54.73,
+            "peakMiB": 63.23,
+            "cpuMsPerRequest": 59.96
+          },
+          "aot": {
+            "status": "reference_memory_pressure",
+            "failedRounds": 4,
+            "failedRequests": 131,
+            "successfulRequests": 317,
+            "peakMiB": 388.72
+          },
+          "candidate": {
+            "firstMs": 37.788,
+            "firstP95Ms": 42.126,
+            "completeMs": 40.3,
+            "requestsPerSecond": 24.75,
+            "idleMiB": 36.12,
+            "medianPeakMiB": 84.76,
+            "peakMiB": 102.46,
+            "cpuMsPerRequest": 29.04
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 72.696,
+            "firstP95Ms": 86.287,
+            "completeMs": 80.836,
+            "requestsPerSecond": 45.41,
+            "idleMiB": 13.71,
+            "medianPeakMiB": 40.48,
+            "peakMiB": 42.0,
+            "cpuMsPerRequest": 16.63
+          },
+          "aot": {
+            "firstMs": 91.722,
+            "firstP95Ms": 100.75,
+            "completeMs": 93.228,
+            "requestsPerSecond": 40.47,
+            "idleMiB": 35.67,
+            "medianPeakMiB": 129.12,
+            "peakMiB": 143.05,
+            "cpuMsPerRequest": 20.2
+          },
+          "candidate": {
+            "firstMs": 53.628,
+            "firstP95Ms": 61.95,
+            "completeMs": 55.344,
+            "requestsPerSecond": 65.21,
+            "idleMiB": 35.95,
+            "medianPeakMiB": 60.92,
+            "peakMiB": 64.25,
+            "cpuMsPerRequest": 10.94
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 66.884,
+            "firstP95Ms": 78.588,
+            "completeMs": 72.137,
+            "requestsPerSecond": 50.97,
+            "idleMiB": 13.7,
+            "medianPeakMiB": 40.44,
+            "peakMiB": 42.81,
+            "cpuMsPerRequest": 14.11
+          },
+          "aot": {
+            "firstMs": 99.414,
+            "firstP95Ms": 111.436,
+            "completeMs": 101.514,
+            "requestsPerSecond": 36.67,
+            "idleMiB": 35.57,
+            "medianPeakMiB": 149.57,
+            "peakMiB": 232.53,
+            "cpuMsPerRequest": 22.12
+          },
+          "candidate": {
+            "firstMs": 62.419,
+            "firstP95Ms": 71.602,
+            "completeMs": 64.233,
+            "requestsPerSecond": 56.23,
+            "idleMiB": 36.16,
+            "medianPeakMiB": 62.64,
+            "peakMiB": 64.85,
+            "cpuMsPerRequest": 12.88
+          }
+        }
+      ],
+      "completed": 5245,
+      "planned": 5376,
+      "strictCompleted": 3584
+    }
+  },
+  "productionHost": {
+    "tool": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 3.535,
+            "firstP95Ms": 28.804,
+            "completeMs": 10.097,
+            "requestsPerSecond": 65.04,
+            "idleMiB": 13.38,
+            "medianPeakMiB": 17.25,
+            "peakMiB": 17.38,
+            "cpuMsPerRequest": 4.79
+          },
+          "candidate": {
+            "firstMs": 4.967,
+            "firstP95Ms": 23.989,
+            "completeMs": 9.731,
+            "requestsPerSecond": 74.65,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 42.38,
+            "peakMiB": 42.88,
+            "cpuMsPerRequest": 3.12
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 28.763,
+            "firstP95Ms": 75.744,
+            "completeMs": 73.865,
+            "requestsPerSecond": 17.59,
+            "idleMiB": 13.38,
+            "medianPeakMiB": 25.88,
+            "peakMiB": 26.12,
+            "cpuMsPerRequest": 21.25
+          },
+          "candidate": {
+            "firstMs": 27.188,
+            "firstP95Ms": 65.622,
+            "completeMs": 31.971,
+            "requestsPerSecond": 22.52,
+            "idleMiB": 33.75,
+            "medianPeakMiB": 53.25,
+            "peakMiB": 53.5,
+            "cpuMsPerRequest": 14.79
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 193.275,
+            "firstP95Ms": 228.653,
+            "completeMs": 203.531,
+            "requestsPerSecond": 17.76,
+            "idleMiB": 13.75,
+            "medianPeakMiB": 33.11,
+            "peakMiB": 37.04,
+            "cpuMsPerRequest": 20.21
+          },
+          "candidate": {
+            "firstMs": 146.335,
+            "firstP95Ms": 202.294,
+            "completeMs": 178.526,
+            "requestsPerSecond": 20.03,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 60.18,
+            "peakMiB": 60.47,
+            "cpuMsPerRequest": 16.67
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 184.371,
+            "firstP95Ms": 195.857,
+            "completeMs": 191.727,
+            "requestsPerSecond": 5.39,
+            "idleMiB": 13.75,
+            "medianPeakMiB": 51.09,
+            "peakMiB": 52.25,
+            "cpuMsPerRequest": 69.79
+          },
+          "candidate": {
+            "firstMs": 119.316,
+            "firstP95Ms": 174.084,
+            "completeMs": 125.122,
+            "requestsPerSecond": 7.18,
+            "idleMiB": 34.0,
+            "medianPeakMiB": 66.05,
+            "peakMiB": 71.83,
+            "cpuMsPerRequest": 48.96
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 187.686,
+            "firstP95Ms": 261.058,
+            "completeMs": 201.005,
+            "requestsPerSecond": 17.78,
+            "idleMiB": 13.75,
+            "medianPeakMiB": 32.9,
+            "peakMiB": 35.67,
+            "cpuMsPerRequest": 20.83
+          },
+          "candidate": {
+            "firstMs": 138.805,
+            "firstP95Ms": 195.862,
+            "completeMs": 152.394,
+            "requestsPerSecond": 22.73,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 55.64,
+            "peakMiB": 56.39,
+            "cpuMsPerRequest": 15.83
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 188.092,
+            "firstP95Ms": 209.355,
+            "completeMs": 198.484,
+            "requestsPerSecond": 19.56,
+            "idleMiB": 13.75,
+            "medianPeakMiB": 33.14,
+            "peakMiB": 33.68,
+            "cpuMsPerRequest": 18.54
+          },
+          "candidate": {
+            "firstMs": 182.671,
+            "firstP95Ms": 213.487,
+            "completeMs": 184.384,
+            "requestsPerSecond": 20.61,
+            "idleMiB": 34.0,
+            "medianPeakMiB": 58.88,
+            "peakMiB": 59.52,
+            "cpuMsPerRequest": 17.5
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 1,
+          "concurrency": 4,
+          "frames": 1024,
+          "go": {
+            "firstMs": 77.488,
+            "firstP95Ms": 199.58,
+            "completeMs": 318.197,
+            "requestsPerSecond": 11.21,
+            "idleMiB": 13.75,
+            "medianPeakMiB": 17.88,
+            "peakMiB": 17.98,
+            "cpuMsPerRequest": 19.79
+          },
+          "candidate": {
+            "firstMs": 57.04,
+            "firstP95Ms": 176.839,
+            "completeMs": 271.232,
+            "requestsPerSecond": 13.61,
+            "idleMiB": 34.12,
+            "medianPeakMiB": 43.5,
+            "peakMiB": 43.5,
+            "cpuMsPerRequest": 13.96
+          }
+        }
+      ],
+      "completed": 672,
+      "planned": 672,
+      "strictCompleted": 672
+    },
+    "user": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 208.112,
+            "firstP95Ms": 283.005,
+            "completeMs": 224.264,
+            "requestsPerSecond": 14.82,
+            "idleMiB": 13.5,
+            "medianPeakMiB": 36.63,
+            "peakMiB": 38.67,
+            "cpuMsPerRequest": 24.58
+          },
+          "candidate": {
+            "firstMs": 177.79,
+            "firstP95Ms": 211.102,
+            "completeMs": 196.958,
+            "requestsPerSecond": 18.38,
+            "idleMiB": 34.0,
+            "medianPeakMiB": 60.62,
+            "peakMiB": 60.7,
+            "cpuMsPerRequest": 18.33
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 200.103,
+            "firstP95Ms": 259.166,
+            "completeMs": 207.584,
+            "requestsPerSecond": 4.59,
+            "idleMiB": 13.62,
+            "medianPeakMiB": 52.99,
+            "peakMiB": 57.79,
+            "cpuMsPerRequest": 84.58
+          },
+          "candidate": {
+            "firstMs": 134.799,
+            "firstP95Ms": 177.013,
+            "completeMs": 174.21,
+            "requestsPerSecond": 6.3,
+            "idleMiB": 34.12,
+            "medianPeakMiB": 65.87,
+            "peakMiB": 66.88,
+            "cpuMsPerRequest": 60.21
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 206.375,
+            "firstP95Ms": 270.612,
+            "completeMs": 224.659,
+            "requestsPerSecond": 15.86,
+            "idleMiB": 13.25,
+            "medianPeakMiB": 35.24,
+            "peakMiB": 35.95,
+            "cpuMsPerRequest": 24.38
+          },
+          "candidate": {
+            "firstMs": 181.12,
+            "firstP95Ms": 198.982,
+            "completeMs": 184.683,
+            "requestsPerSecond": 20.08,
+            "idleMiB": 34.0,
+            "medianPeakMiB": 55.4,
+            "peakMiB": 56.5,
+            "cpuMsPerRequest": 17.92
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 194.633,
+            "firstP95Ms": 260.297,
+            "completeMs": 209.737,
+            "requestsPerSecond": 17.22,
+            "idleMiB": 13.38,
+            "medianPeakMiB": 35.5,
+            "peakMiB": 39.64,
+            "cpuMsPerRequest": 21.88
+          },
+          "candidate": {
+            "firstMs": 184.822,
+            "firstP95Ms": 211.142,
+            "completeMs": 192.366,
+            "requestsPerSecond": 18.14,
+            "idleMiB": 34.12,
+            "medianPeakMiB": 57.86,
+            "peakMiB": 58.66,
+            "cpuMsPerRequest": 19.58
+          }
+        }
+      ],
+      "completed": 384,
+      "planned": 384,
+      "strictCompleted": 384
+    },
+    "bare": {
+      "results": [
+        {
+          "protocol": "messages",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 212.72,
+            "firstP95Ms": 332.978,
+            "completeMs": 228.062,
+            "requestsPerSecond": 14.74,
+            "idleMiB": 13.62,
+            "medianPeakMiB": 37.38,
+            "peakMiB": 39.43,
+            "cpuMsPerRequest": 25.42
+          },
+          "candidate": {
+            "firstMs": 131.407,
+            "firstP95Ms": 182.416,
+            "completeMs": 154.109,
+            "requestsPerSecond": 20.94,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 57.43,
+            "peakMiB": 57.63,
+            "cpuMsPerRequest": 15.83
+          }
+        },
+        {
+          "protocol": "messages",
+          "targetKiB": 4096,
+          "concurrency": 1,
+          "frames": 64,
+          "go": {
+            "firstMs": 204.496,
+            "firstP95Ms": 264.017,
+            "completeMs": 211.357,
+            "requestsPerSecond": 4.58,
+            "idleMiB": 13.62,
+            "medianPeakMiB": 52.16,
+            "peakMiB": 63.17,
+            "cpuMsPerRequest": 87.08
+          },
+          "candidate": {
+            "firstMs": 109.046,
+            "firstP95Ms": 159.476,
+            "completeMs": 114.888,
+            "requestsPerSecond": 7.95,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 67.75,
+            "peakMiB": 71.96,
+            "cpuMsPerRequest": 44.79
+          }
+        },
+        {
+          "protocol": "chat",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 214.078,
+            "firstP95Ms": 290.292,
+            "completeMs": 225.096,
+            "requestsPerSecond": 14.51,
+            "idleMiB": 13.62,
+            "medianPeakMiB": 37.54,
+            "peakMiB": 41.68,
+            "cpuMsPerRequest": 25.42
+          },
+          "candidate": {
+            "firstMs": 182.468,
+            "firstP95Ms": 206.503,
+            "completeMs": 190.179,
+            "requestsPerSecond": 20.04,
+            "idleMiB": 33.88,
+            "medianPeakMiB": 56.35,
+            "peakMiB": 56.62,
+            "cpuMsPerRequest": 18.33
+          }
+        },
+        {
+          "protocol": "responses",
+          "targetKiB": 1024,
+          "concurrency": 4,
+          "frames": 64,
+          "go": {
+            "firstMs": 199.346,
+            "firstP95Ms": 229.192,
+            "completeMs": 206.938,
+            "requestsPerSecond": 17.46,
+            "idleMiB": 13.38,
+            "medianPeakMiB": 37.7,
+            "peakMiB": 40.95,
+            "cpuMsPerRequest": 20.63
+          },
+          "candidate": {
+            "firstMs": 193.417,
+            "firstP95Ms": 212.801,
+            "completeMs": 199.44,
+            "requestsPerSecond": 18.09,
+            "idleMiB": 34.12,
+            "medianPeakMiB": 57.7,
+            "peakMiB": 59.04,
+            "cpuMsPerRequest": 20.42
+          }
+        }
+      ],
+      "completed": 384,
+      "planned": 384,
+      "strictCompleted": 384
+    }
+  },
+  "hostMetricsArchiveSha256": "0e849c1151351a2caf010bd2290c156ad92c91ab90abd433f48282b6c97f00e7",
+  "hy3": {
+    "calls": 10,
+    "billing": [
+      {
+        "protocol": "chat_completions",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "responses",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "messages",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "chat_completions",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "chat_completions",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "responses",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "responses",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "messages",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "messages",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      },
+      {
+        "protocol": "chat_completions",
+        "model": "hy3",
+        "status": 200,
+        "complete": true,
+        "credit": 0
+      }
+    ],
+    "isolatedProcessExited": true,
+    "productionDeploymentChanged": false,
+    "sourceCredentialsWritten": false,
+    "failure": null
+  },
+  "hy3Cases": [
+    {
+      "case": "chat-stream",
+      "status": 200,
+      "terminal": true
+    },
+    {
+      "case": "responses-stream",
+      "status": 200,
+      "terminal": true
+    },
+    {
+      "case": "messages-stream",
+      "status": 200,
+      "terminal": true
+    },
+    {
+      "case": "chat-tool-call",
+      "status": 200
+    },
+    {
+      "case": "chat-tool-return",
+      "status": 200
+    },
+    {
+      "case": "responses-tool-call",
+      "status": 200
+    },
+    {
+      "case": "responses-tool-return",
+      "status": 200
+    },
+    {
+      "case": "messages-tool-call",
+      "status": 200
+    },
+    {
+      "case": "messages-tool-return",
+      "status": 200
+    },
+    {
+      "case": "chat-after-compaction",
+      "status": 200,
+      "terminal": true
+    }
+  ]
+}

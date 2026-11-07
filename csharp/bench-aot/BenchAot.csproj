@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <DefineConstants Condition="'$(PublishAot)' == 'true'">$(DefineConstants);NATIVEAOT</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="StreamingMigration" Condition="'$(PublishAot)' != 'true'"><HintPath>$(GatewayAssemblies)/StreamingMigration.dll</HintPath></Reference>
+    <Reference Include="TypedMigration"><HintPath>$(GatewayAssemblies)/TypedMigration.dll</HintPath></Reference>
+    <Reference Include="KeySecurity"><HintPath>$(GatewayAssemblies)/KeySecurity.dll</HintPath></Reference>
+    <Reference Include="LedgerMigration"><HintPath>$(GatewayAssemblies)/LedgerMigration.dll</HintPath></Reference>
+    <Compile Include="../typed/GoJson.cs" Link="GoJson.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PublishAot)' == 'true'"><Compile Remove="LegacyEventWriter.cs" /></ItemGroup>
+  <ItemGroup Condition="'$(PublishAot)' == 'true'">
+    <Compile Include="../streaming/Events.cs" Link="Events.cs" />
+    <Compile Include="../streaming/EventWriter.cs" Link="EventWriter.cs" />
+  </ItemGroup>
+</Project>
