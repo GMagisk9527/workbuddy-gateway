@@ -131,7 +131,7 @@ def fixture(root, mode):
         write_json(console / "config.json", {"admission": {"maxActive": 8, "maxPreparing": 2}})
 
 
-def measure(mode, binary, case, server, env, directory, repeats, count):
+def measure(mode, binary, case, server, env, directory, repeats, count, variant="tool"):
     protocol, size, concurrency, frames = case
     fixture(directory, mode)
     args = [str(binary)]
@@ -173,6 +173,17 @@ def measure(mode, binary, case, server, env, directory, repeats, count):
             with server.guard:
                 server.output = DELTA * frames + TAIL
             body = helpers.make_body(protocol, size)
+            if variant == "user":
+                request = json.loads(body)
+                history = request["input"] if protocol == "responses" else request["messages"]
+                content = history[-1]["output"] if protocol == "responses" else history[-1]["content"]
+                if protocol == "messages": content = content[0]["content"]
+                if protocol == "responses": request["input"] = [{"role":"user","content":content}]
+                else:
+                    before = [m for m in history if m.get("role") == "system"]
+                    request["messages"] = before + [{"role":"user","content":content}]
+                body = json.dumps(request,ensure_ascii=False,separators=(",",":")).encode()
+
             for _ in range(4):
                 sample = helpers.request(PORT, protocol, body, frames)
                 assert sample["ok"], (mode, protocol, "case warmup", sample)
@@ -209,6 +220,7 @@ def main():
     parser.add_argument("aot", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--variant",choices=("tool","user"),default="tool")
     parser.add_argument("--rounds", type=int, default=3, choices=(1, 3, 7))
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16))
     parser.add_argument("--case-index", type=int, action="append", choices=range(len(CASES)))
@@ -231,7 +243,7 @@ def main():
         name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
         for name, path in modes.items()}, "cpuAffinity": sorted(os.sched_getaffinity(0)),
         "rounds": args.rounds, "requestsPerRound": args.requests, "fixture": "loopback HTTPS/HTTP1.1, TCP_NODELAY, fixed SSE",
-        "realModelCalls": 0})
+        "realModelCalls": 0,"variant":args.variant})
     rows = []
     with tempfile.TemporaryDirectory(prefix="gateway-benchmark-") as tmp, (args.out / "results.jsonl").open("w") as output:
         root = Path(tmp)
@@ -245,7 +257,7 @@ def main():
                     for mode in order:
                         directory = args.out / f"{index}-{repetition}-{mode}"
                         directory.mkdir()
-                        result = measure(mode, modes[mode], case, server, env, directory.resolve(), repetition, args.requests)
+                        result = measure(mode, modes[mode], case, server, env, directory.resolve(), repetition, args.requests,args.variant)
                         rows.append(result)
                         output.write(json.dumps(result) + "\n")
                         output.flush()
