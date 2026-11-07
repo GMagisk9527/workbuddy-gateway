@@ -35,7 +35,7 @@ jobs:
       - name: Compile the Go gateway and verify the Alpine Native AOT package
         run: |
           mkdir -p "$RUNNER_TEMP/gateway-pair"
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/gateway-pair/workbuddy-go" .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v3 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/gateway-pair/workbuddy-go" .
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -51,7 +51,7 @@ jobs:
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
             bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
             export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
-            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o /binary/optimized
+            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:IlcInstructionSet=x86-64-v3 -p:NuGetAudit=false -o /binary/optimized
           '
       - name: Exercise the same isolated HTTPS fixture
         shell: bash
