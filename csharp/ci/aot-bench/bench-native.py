@@ -39,6 +39,7 @@ CASES = (
 
 class Replay(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
 
     def log_message(self, *_):
         pass
@@ -207,6 +208,7 @@ def main():
     parser.add_argument("go", type=Path)
     parser.add_argument("aot", type=Path)
     parser.add_argument("out", type=Path)
+    parser.add_argument("--candidate", type=Path)
     parser.add_argument("--rounds", type=int, default=3, choices=(1, 3))
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16))
     args = parser.parse_args()
@@ -214,6 +216,8 @@ def main():
     assert {name for _, name in socket.if_nameindex()} == {"lo"}, "Isolated loopback network is required"
     os.nice(10)
     modes = {"go": args.go.resolve(), "aot": args.aot.resolve()}
+    if args.candidate is not None:
+        modes["candidate"] = args.candidate.resolve()
     env = {name: os.environ[name] for name in ("PATH", "LANG", "TZ") if name in os.environ}
     env.update(GOMEMLIMIT="512MiB", GOGC="100", GOMAXPROCS="1", DOTNET_PROCESSOR_COUNT="1",
                DOTNET_GCHeapHardLimit="0x20000000", DOTNET_EnableDiagnostics="0",
@@ -224,7 +228,7 @@ def main():
     write_json(args.out / "metadata.json", {"binaries": {
         name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
         for name, path in modes.items()}, "cpuAffinity": sorted(os.sched_getaffinity(0)),
-        "rounds": args.rounds, "requestsPerRound": args.requests, "fixture": "loopback HTTPS/HTTP1.1, fixed SSE",
+        "rounds": args.rounds, "requestsPerRound": args.requests, "fixture": "loopback HTTPS/HTTP1.1, TCP_NODELAY, fixed SSE",
         "realModelCalls": 0})
     rows = []
     with tempfile.TemporaryDirectory(prefix="gateway-benchmark-") as tmp, (args.out / "results.jsonl").open("w") as output:
@@ -233,7 +237,9 @@ def main():
             env["SSL_CERT_FILE"] = str(cert)
             for index, case in enumerate(CASES):
                 for repetition in range(args.rounds):
-                    order = list(modes) if (index + repetition) % 2 == 0 else list(reversed(modes))
+                    order = list(modes)
+                    offset = (index + repetition) % len(order)
+                    order = order[offset:] + order[:offset]
                     for mode in order:
                         directory = args.out / f"{index}-{repetition}-{mode}"
                         directory.mkdir()

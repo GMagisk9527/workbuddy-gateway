@@ -9,6 +9,21 @@ permissions:
   actions: read
 
 jobs:
+  jit-regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the Linux gateway and foundation regressions
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+            apk add --no-cache bash curl icu-libs libstdc++ zstd-libs python3 nodejs
+            curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
+            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
+            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            bash ci/verify.sh
+          '
   compare:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -27,6 +42,17 @@ jobs:
           run-id: 42333795715
           name: linux-musl-native-gateway
           path: ${{ runner.temp }}/gateway-pair
+      - name: Compile the optimized full gateway with strict Native AOT
+        shell: bash
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/gateway-pair:/binary" -w /src/csharp alpine:3.21 sh -ec '
+            apk add --no-cache bash curl clang build-base binutils zlib-dev openssl-dev icu-libs libstdc++ python3
+            curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
+            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
+            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o /binary/optimized
+          '
       - name: Exercise the same isolated HTTPS fixture
         shell: bash
         run: |
@@ -36,13 +62,15 @@ jobs:
           echo '776f5f4db99178a66e652f97a36f6cbf0d4101f2d13d01137178dd396470e2b2  HttpMigration' | sha256sum -c -
           docker build -t workbuddy-comparison - <<'DOCKERFILE'
           FROM alpine:3.21
-          RUN apk add --no-cache python3 openssl zstd-libs libstdc++
+          RUN apk add --no-cache python3 openssl zstd libstdc++
           DOCKERFILE
           cpu=$(awk '/^Cpus_allowed_list:/ {split($2, cpus, /[-,]/); print cpus[1]}' /proc/self/status)
           docker run --rm --network none --cpuset-cpus "$cpu" \
             --add-host www.workbuddy.cn:127.0.0.1 --add-host www.codebuddy.cn:127.0.0.1 --add-host copilot.tencent.com:127.0.0.1 \
-            -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci/aot-bench:/bench:ro" workbuddy-comparison \
-            python3 -B /bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence
+            -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci:/ci:ro" workbuddy-comparison sh -ec '
+              python3 -B /ci/smoke-gateway.py /binary/optimized/HttpMigration
+              python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence --candidate /binary/optimized/HttpMigration
+            '
           python3 -m json.tool "$dir/evidence/summary.json"
       - uses: actions/upload-artifact@v4
         if: always()

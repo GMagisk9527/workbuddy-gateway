@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using AccountMaintenance;
@@ -44,7 +45,10 @@ internal static class BodyLifetimeTests
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})foreach(bool stream in new[]{false,true})
         {
             string content=new('x',750<<10);object input=path.EndsWith("responses",StringComparison.Ordinal)?new{model="m",input=content,stream}:(object)new{model="m",messages=new[]{new{role="user",content}},stream};
-            using var response=await client.PostAsJsonAsync(path,input);string result=await response.Content.ReadAsStringAsync();
+            // Exercise both Kestrel body framing paths for every protocol.
+            using HttpContent body=stream?new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(input)):JsonContent.Create(input);
+            body.Headers.ContentType=new MediaTypeHeaderValue("application/json");
+            using var response=await client.PostAsync(path,body);string result=await response.Content.ReadAsStringAsync();
             Check(response.IsSuccessStatusCode,path+" should fit the budget after temporary buffers are released; got "+(int)response.StatusCode+" "+result);
             Check(stream?result.Contains(path.EndsWith("messages",StringComparison.Ordinal)?"message_stop":"[DONE]"):result.Contains("ok"),"Correct protocol completion");Check(resources.Used==0,"All reservations released");
         }

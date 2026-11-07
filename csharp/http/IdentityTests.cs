@@ -148,7 +148,7 @@ internal static class IdentityTests
         byte[] ApplyForce(byte[] input)=>OutboundPreparation.Prepare(input,forced,_=>{},32<<20);
         byte[] forceOnce=ApplyForce(Encoding.UTF8.GetBytes(arrayBody));
         Check(forceOnce.SequenceEqual(ApplyForce(forceOnce)),"Force in array content is idempotent after text replacement");
-        Check(IdentityRewrite.Transform("`Claude Code`",named)=="`Claude Code`","Force comparison preserves Markdown code");
+        Check(IdentityRewrite.Transform("`Claude Code`",IdentitySettings.Build(named))=="`Claude Code`","Force comparison preserves Markdown code");
 
         byte[] anthropic=JsonSerializer.SerializeToUtf8Bytes(new{model="m",system=new[]{new{type="text",text="Keep these rules."},new{type="text",text=ccSentence}},messages=new[]{new{role="user",content=ccSentence}}});
         var converted=MessagesRequestAdapter.Prepare(anthropic,Program.TestKey,prompts:new());
