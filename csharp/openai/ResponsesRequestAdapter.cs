@@ -9,9 +9,11 @@ namespace OpenAiProtocols;
 
 public static class ResponsesRequestAdapter
 {
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)=>Prepare(bytes,reasoningKey,null);
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility,Action<JsonElement>? inspectInput=null)
     {
-        var root = Parse(bytes); string model = Model(root);
+        using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
+        inspectInput?.Invoke(document.Original);
         bool encrypted = Items(root["include"]).Any(x => Text(x) == "reasoning.encrypted_content");
         foreach (var item in Items(root["input"]).OfType<JsonObject>())
         {
@@ -22,15 +24,15 @@ public static class ResponsesRequestAdapter
         Validate(root);
         var messages = new JsonArray();
         if (!string.IsNullOrWhiteSpace(Text(root["instructions"]))) messages.Add((JsonNode?)new JsonObject { ["role"] = "system", ["content"] = Text(root["instructions"]) });
-        if (root["input"] is JsonValue input && input.TryGetValue<string>(out var text))
-        { if (!string.IsNullOrWhiteSpace(text)) messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = text }); }
+        if (root["input"] is JsonValue input && IsString(input))
+        { if (HasText(input)) messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = BorrowScalar(input) }); }
         else
         {
             JsonObject? assistant = null; string reasoning = "";
             void Flush() { if (assistant is not null) messages.Add((JsonNode?)assistant); assistant = null; reasoning = ""; }
             foreach (var raw in Items(root["input"]))
             {
-                if (raw is JsonValue value && value.TryGetValue<string>(out var str)) { Flush(); messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = str }); continue; }
+                if (raw is JsonValue value && IsString(value)) { Flush(); messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = BorrowScalar(value) }); continue; }
                 if (raw is not JsonObject item) continue;
                 string type = Text(item["type"]);
                 if (type == "reasoning")
@@ -100,7 +102,8 @@ public static class ResponsesRequestAdapter
                 Require(matching.Length > 0, "tool_choice 指定的工具未在 tools 中定义"); chat["tool_choice"] = "required"; chat["tools"] = new JsonArray(matching);
             }
         }
-        return new(model, Bool(root["stream"]), Encode(chat, RequestLimit), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted);
+        bool compatible=compatibility?.Invoke(chat)??false;
+        return new(model, Bool(root["stream"]), Encode(chat, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted){OutboundCompatible=compatible};
     }
     static JsonArray Parts(JsonNode? content) => content is JsonArray arr ? (JsonArray)arr.DeepClone() : Text(content) != "" ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = Text(content) }) : [];
     public static string ReasoningText(JsonObject item)
@@ -111,17 +114,17 @@ public static class ResponsesRequestAdapter
     static JsonNode Content(JsonNode? raw)
     {
         if (raw is null) return JsonValue.Create("")!;
-        if (raw is JsonValue) return raw.DeepClone();
+        if (raw is JsonValue scalar) return BorrowScalar(scalar);
         var parts = new JsonArray();
         foreach (var part in Items(raw))
         {
-            if (part is JsonValue value && value.TryGetValue<string>(out var s)) { parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = s }); continue; }
+            if (part is JsonValue value && IsString(value)) { parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = BorrowScalar(value) }); continue; }
             if (part is not JsonObject p) continue;
             string type = Text(p["type"]);
             if (type is "input_text" or "output_text" or "text" or "refusal")
             {
                 string field = type == "refusal" ? "refusal" : "text";
-                if (p[field] is JsonValue text && text.TryGetValue<string>(out var t)) parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = t });
+                if (p[field] is JsonValue text && IsString(text)) parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = BorrowScalar(text) });
             }
             else if (type == "input_image" && Text(p["image_url"]) != "")
             {
@@ -143,6 +146,11 @@ public static class ResponsesRequestAdapter
         }
         if (type is "function_call_output" or "custom_tool_call_output")
         {
+            if(item["output"] is JsonValue scalar&&scalar.GetValueKind()==JsonValueKind.String)
+            {
+                yield return new(){["role"]="tool",["tool_call_id"]=Text(item["call_id"]),["content"]=scalar.TryGetValue<JsonElement>(out var raw)?JsonValue.Create(raw):scalar.DeepClone()};
+                yield break;
+            }
             var output = item["output"]; var texts = new List<string>(); var images = new JsonArray();
             bool typed = Items(output).OfType<JsonObject>().Any(p => Text(p["type"]) is "input_text" or "output_text" or "text" or "input_image" or "image_url");
             if (!typed) texts.Add(Stringify(output));
@@ -192,19 +200,19 @@ public static class ResponsesRequestAdapter
             Require(metadata is JsonObject, "metadata 必须是字符串键值对象"); Require(((JsonObject)metadata).Count <= 16, "metadata 最多允许 16 个键值对");
             foreach (var p in (JsonObject)metadata) Require(p.Key.EnumerateRunes().Count() <= 64 && p.Value is JsonValue v && v.TryGetValue<string>(out var s) && s.EnumerateRunes().Count() <= 512, "metadata 的键必须不超过 64 个字符，值必须是不超过 512 个字符的字符串");
         }
-        Require(r["input"] is null or JsonArray || r["input"] is JsonValue value && value.TryGetValue<string>(out _), "input 必须是字符串或消息数组");
+        Require(r["input"] is null or JsonArray || r["input"] is JsonValue value && IsString(value), "input 必须是字符串或消息数组");
         int index = -1;
         foreach (var raw in Items(r["input"]))
         {
-            index++; if (raw is JsonValue v && v.TryGetValue<string>(out _)) continue;
+            index++; if (raw is JsonValue v && IsString(v)) continue;
             Require(raw is JsonObject, $"input[{index}] 必须是消息对象"); var item = (JsonObject)raw!; string type = Text(item["type"]), prefix = $"input[{index}]: ";
             if (type is "" or "message")
             {
                 Require(Text(item["role"]) is "system" or "developer" or "user" or "assistant", prefix + "message.role 必须是 system/developer/user/assistant");
-                Require(item["content"] is null or JsonArray || item["content"] is JsonValue text && text.TryGetValue<string>(out _), prefix + "message.content 必须是字符串或内容块数组");
+                Require(item["content"] is null or JsonArray || item["content"] is JsonValue text && IsString(text), prefix + "message.content 必须是字符串或内容块数组");
                 foreach (var part in Items(item["content"]))
                 {
-                    if (part is JsonValue partValue && partValue.TryGetValue<string>(out _)) continue;
+                    if (part is JsonValue partValue && IsString(partValue)) continue;
                     Require(part is JsonObject, prefix + "消息内容块结构非法"); var p = (JsonObject)part!; string kind = Text(p["type"]);
                     Require(kind is "input_text" or "output_text" or "text" or "refusal" or "input_image", prefix + "Chat 上游不支持此消息内容块类型");
                     if (kind == "input_image") Require(Text(p["image_url"]) != "", prefix + "Chat 上游要求 input_image.image_url，不支持仅含 file_id 的图片");

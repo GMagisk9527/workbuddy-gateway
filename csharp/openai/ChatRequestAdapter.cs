@@ -1,23 +1,37 @@
 using System.Text.Json.Nodes;
+using System.Runtime.InteropServices;
 using static OpenAiProtocols.OpenWire;
 
 namespace OpenAiProtocols;
 
 public static class ChatRequestAdapter
 {
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes)=>Prepare(bytes,null,false);
+    // consumeInput transfers ownership of a full input array to the prepared request.
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes,Func<JsonObject,bool>? compatibility,bool consumeInput=false,Action<System.Text.Json.JsonElement>? inspectInput=null)
     {
-        var root = Parse(bytes); string model = Model(root);
+        using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
+        inspectInput?.Invoke(document.Original);
         Require(root["messages"] is JsonArray { Count: > 0 }, "messages 字段缺失或为空");
         foreach (var raw in (JsonArray)root["messages"]!)
         {
             Require(raw is JsonObject, "messages 必须包含消息对象");
             var message = (JsonObject)raw!; string role = Text(message["role"]);
             Require(role is "user" or "assistant" or "system" or "developer" or "tool" or "function", "messages.role 无效");
-            Require(message["content"] is null or JsonArray || message["content"] is JsonValue v && v.TryGetValue<string>(out _), "messages.content 必须是字符串或内容块数组");
+            Require(message["content"] is null or JsonArray || message["content"] is JsonValue v && IsString(v), "messages.content 必须是字符串或内容块数组");
         }
-        bool stream = Bool(root["stream"]); root["model"] = model; root["stream"] = true;
-        return new(model, stream, Encode(root, RequestLimit), ClientProtocol.Chat, new Dictionary<string, ResponseTool>(), new());
+        bool stream = Bool(root["stream"]);
+        bool explicitStream=root["stream"] is JsonValue streamValue&&streamValue.TryGetValue<bool>(out var rawStream)&&rawStream;
+        bool explicitModel=root["model"] is JsonValue modelValue&&modelValue.TryGetValue<string>(out var rawModel)&&rawModel==model;
+        root["model"] = model; root["stream"] = true;
+        bool compatible=compatibility?.Invoke(root)??false;
+        if(stream&&explicitStream&&explicitModel&&!document.HasDuplicates&&document.HasCanonicalStrings()&&OpenWire.IsMinified(document.Raw.Span))
+        {
+            if(consumeInput&&MemoryMarshal.TryGetArray(document.Raw,out ArraySegment<byte> raw)&&raw.Offset==0&&raw.Count==raw.Array!.Length)
+                return new(model,true,raw.Array,ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
+            return new(model,true,document.Raw.ToArray(),ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
+        }
+        return new(model, stream, Encode(root, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Chat, new Dictionary<string, ResponseTool>(), new()){OutboundCompatible=compatible};
     }
     // Normalize empty protocol noise while retaining extension fields and exact argument fragments.
     public static JsonObject Clean(JsonObject chunk)

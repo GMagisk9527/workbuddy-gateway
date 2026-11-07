@@ -31,6 +31,8 @@ public sealed record ToolName
 }
 public abstract record Content;
 public sealed record StringContent(string Text) : Content;
+// Used only during a request document's lifetime, before byte serialization.
+internal sealed record BorrowedTextContent(JsonElement Text) : Content;
 public sealed record BlocksContent(ImmutableArray<Block> Blocks) : Content;
 public sealed record EmptyContent : Content;
 public sealed record InvalidContent : Content;
@@ -66,8 +68,10 @@ public sealed record ChatImage(string Url) : ChatPart;
 public sealed record ChatToolCall(ToolCallId Id, ToolName Name, string Arguments);
 public abstract record ChatMessage;
 public sealed record TextMessage(MessageRole Role, string Text) : ChatMessage;
+internal sealed record BorrowedTextMessage(MessageRole Role,JsonElement Text) : ChatMessage;
 public sealed record UserPartsMessage(ImmutableArray<ChatPart> Parts) : ChatMessage;
 public sealed record ToolMessage(ToolCallId Id, string Text) : ChatMessage;
+internal sealed record BorrowedToolMessage(ToolCallId Id, JsonElement Text) : ChatMessage;
 public sealed record AssistantMessage(string Text, ImmutableArray<string> Thoughts, ImmutableArray<ChatToolCall> Calls) : ChatMessage;
 public sealed record ChatRequest(string? SystemText, ImmutableArray<ChatMessage> Messages,
     bool HasTools, ImmutableArray<InputTool> Tools, string? ToolChoice);

@@ -3,6 +3,10 @@ using System.Text;
 using System.Text.Json;
 using AccountScheduling;
 using KeySecurity;
+using System.Runtime.InteropServices;
+using System.Text.Json.Nodes;
+using TypedMigration;
+using OpenAiProtocols;
 
 namespace HttpMigration;
 
@@ -33,6 +37,47 @@ public sealed class SessionAffinity
     {options.Validate();this.options=options;this.time=time??TimeProvider.System;}
     public int Count{get{lock(sync)return entries.Count;}}
     public bool UsesSession=>options is{Enabled:true,Mode:not AffinityMode.Prefix};
+    internal int PrefixBytes=>options.PrefixBytes;
+    // Hash just the same bounded tools/first-two-message fragments while the
+    // converted tree is alive. Large fragments use the original byte scanner.
+    internal string? PrefixDigest(JsonObject root,bool canonical,string? session)
+    {
+        var current=options;
+        if(!current.Enabled||current.Mode==AffinityMode.Session||current.Mode!=AffinityMode.Prefix&&session is not null)return null;
+        if(root["messages"] is not JsonArray{Count:>0} messages)return null;
+        using var hash=IncrementalHash.CreateHash(HashAlgorithmName.SHA256);hash.AppendData("affinity-prefix-v1\0"u8);
+        bool Add(JsonNode? node,ReadOnlySpan<byte> label)
+        {
+            int remaining=current.PrefixBytes;
+            bool Fits(JsonNode? value)
+            {
+                if(remaining<0)return false;
+                switch(value)
+                {
+                    case null:remaining-=4;break;
+                    case JsonObject obj:
+                        remaining-=2;foreach(var p in obj){remaining-=p.Key.Length*6+4;if(!Fits(p.Value))return false;}break;
+                    case JsonArray array:
+                        remaining-=2;foreach(var item in array){remaining--;if(!Fits(item))return false;}break;
+                    case JsonValue v when v.TryGetValue<JsonElement>(out var element):remaining-=checked(JsonMarshal.GetRawUtf8Value(element).Length*6);break;
+                    case JsonValue v when v.TryGetValue<string>(out var text):remaining-=checked(text.Length*6+2);break;
+                    default:remaining-=64;break;
+                }
+                return remaining>=0;
+            }
+            if(!Fits(node))return false;
+            byte[] bytes=canonical?Encoding.UTF8.GetBytes(GoJson.Format(node)):OpenWire.Encode(node,current.PrefixBytes);
+            hash.AppendData(label);hash.AppendData(bytes.AsSpan(0,Math.Min(bytes.Length,current.PrefixBytes)));return true;
+        }
+        if(root.TryGetPropertyValue("tools",out var tools)&&!Add(tools,"tools\0"u8))return null;
+        for(int i=0;i<Math.Min(2,messages.Count);i++)if(!Add(messages[i],i==0?"msg0\0"u8:"msg1\0"u8))return null;
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+    internal string? KeyFromPrefix(string? caller,string model,string prefix,int prefixBytes)
+    {
+        if(!options.Enabled||options.Mode==AffinityMode.Session||string.IsNullOrEmpty(caller)||options.PrefixBytes!=prefixBytes)return null;
+        return Digest("affinity-prefix-key-v1",caller,KeyRules.Model(model),prefix);
+    }
     public AccountId? Lookup(string? key)
     {
         if(!options.Enabled||key is null)return null;
@@ -118,6 +163,27 @@ public sealed class SessionAffinity
             foreach(string name in new[]{"conversation_id","conversationId","session_id","sessionId"})
                 if(source.TryGetValue(name,out var value))return Digest("session",value);
         return null;
+    }
+    internal static string? SessionDigest(IHeaderDictionary headers,JsonElement original)
+    {
+        string? fromHeaders=SessionDigest(headers,"{}"u8);if(fromHeaders is not null)return fromHeaders;
+        var top=new Dictionary<string,string>();var metadata=new Dictionary<string,string>();
+        foreach(var property in original.EnumerateObject())
+        {
+            if(property.Name=="metadata"&&property.Value.ValueKind==JsonValueKind.Object)
+            {metadata.Clear();foreach(var field in property.Value.EnumerateObject())Seed(field.Name,field.Value,metadata);}
+            else Seed(property.Name,property.Value,top);
+        }
+        foreach(var source in new[]{top,metadata})
+            foreach(string name in new[]{"conversation_id","conversationId","session_id","sessionId"})
+                if(source.TryGetValue(name,out var value))return Digest("session",value);
+        return null;
+        static void Seed(string name,JsonElement field,Dictionary<string,string> destination)
+        {
+            if(name is not ("conversation_id" or "conversationId" or "session_id" or "sessionId"))return;
+            destination.Remove(name);
+            if(field.ValueKind==JsonValueKind.String&&JsonMarshal.GetRawUtf8Value(field).Length<=3074&&ValidSeed(field.GetString()) is{} value)destination[name]=value;
+        }
     }
     static void ReadSeed(ref Utf8JsonReader reader,string name,Dictionary<string,string> result)
     {

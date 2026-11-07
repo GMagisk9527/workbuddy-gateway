@@ -9,7 +9,8 @@ using TypedMigration;
 
 namespace HttpMigration;
 
-public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody);
+public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody)
+{public bool OutboundCompatible{get;init;}}
 
 public static class MessagesRequestAdapter
 {
@@ -18,7 +19,7 @@ public static class MessagesRequestAdapter
     static readonly JsonSerializerOptions EncodingOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
     static readonly GatewayJson NodeJson = new(EncodingOptions);
     static string Type(JsonElement root) => JsonFields.Text(JsonFields.Get(root, "thinking"), "type").Trim().ToLowerInvariant();
-    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null)
+    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null,Action<JsonElement>? inspectInput=null,Func<JsonObject,bool>? compatibility=null)
     {
         if (bytes.Length > limit) throw new RequestFailure("请求体超过大小限制", 413, "request_too_large");
         try
@@ -27,6 +28,7 @@ public static class MessagesRequestAdapter
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.Null) throw new RequestFailure("请求体必须是 JSON 对象");
             if (root.ValueKind != JsonValueKind.Object) throw new JsonException();
+            inspectInput?.Invoke(root);
             // Go decodes known generation scalars to float64 before validation.
             foreach (var scalar in new[] { JsonFields.Get(root, "max_tokens"), JsonFields.Get(root, "temperature"), JsonFields.Get(root, "top_p"), JsonFields.Get(root, "top_k"), JsonFields.Get(JsonFields.Get(root, "thinking"), "budget_tokens") })
                 if (scalar.ValueKind == JsonValueKind.Number && (!scalar.TryGetDouble(out double number) || !double.IsFinite(number))) throw new JsonException();
@@ -64,7 +66,7 @@ public static class MessagesRequestAdapter
             }
             RequestValidation.Input(root); RequestValidation.Output(root);
 
-            var typed=WireReader.Read(root);
+            var typed=WireReader.ReadBorrowed(root);
             if(prompts is not null)typed=IdentityRewrite.BeforeMap(typed,root,prompts.Identity);
             var mapped = MessageMapper.Map(typed);
             var messages = mapped.Messages;
@@ -107,9 +109,11 @@ public static class MessagesRequestAdapter
             if (kind != "disabled" && outputEffort.Length > 0) raw["reasoning_effort"] = outputEffort;
             // Both local response modes consume an upstream SSE stream.
             raw["stream"] = true;
-            int size=Size(raw, limit); // Check the complete escaped size before allocating UTF-8 output.
-            byte[] encoded = GoJson.FormatUtf8(raw,size);
-            return new(model, JsonFields.Get(root, "stream").ValueKind == JsonValueKind.True, thinking, hidden, encoded);
+            bool compatible=compatibility?.Invoke(raw)??(prompts is not null&&OutboundPreparation.IsCompatible(raw,prompts));
+            var rawSizes=new Dictionary<JsonValue,int>();
+            int size=Size(raw, limit,rawSizes); // Check the complete escaped size before allocating UTF-8 output.
+            byte[] encoded = GoJson.FormatUtf8(raw,size,rawSizes);
+            return new(model, JsonFields.Get(root, "stream").ValueKind == JsonValueKind.True, thinking, hidden, encoded){OutboundCompatible=compatible};
         }
         catch (JsonException) { throw new RequestFailure("无效的 JSON 请求体"); }
         catch (InvalidOperationException) { throw new RequestFailure("无效的 JSON 字段或 Unicode 文本"); }
@@ -149,7 +153,7 @@ public static class MessagesRequestAdapter
     static string Canonical(JsonNode? node) => GoJson.Format(node);
     static string Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out string? text) ? text : "";
     // Count Go's UTF-8/HTML escaping without allocating the expanded string.
-    static int Size(JsonNode? node, int limit)
+    static int Size(JsonNode? node, int limit,Dictionary<JsonValue,int>? rawSizes=null)
     {
         int count = 0;
         void Add(int n) { if (n > limit - count) throw new RequestFailure("转换后的请求超过大小限制", 413, "request_too_large"); count += n; }
@@ -169,7 +173,8 @@ public static class MessagesRequestAdapter
                     Add(2); for (int n = 0; n < list.Count; n++) { if (n > 0) Add(1); Walk(list[n]); }
                     break;
                 case JsonValue scalar:
-                    if (scalar.TryGetValue<string>(out string? text)) Quote(text);
+                    if(GoJson.TryRawString(scalar,out _,out int size)){Add(size);if(rawSizes is not null)rawSizes[scalar]=size;}
+                    else if (scalar.TryGetValue<string>(out string? text)) Quote(text);
                     else Add(scalar.ToJsonString(EncodingOptions).Length);
                     break;
             }

@@ -208,26 +208,40 @@ public static class LocalGateway
             memory.Retain(input.Length); // Compressed wire bytes are no longer retained by ReadBody.
             if (keyLease?.Identity is not null) derivedReasoningKey = keyLease.ReasoningKey.ToArray();
             byte[] reasoningKey = derivedReasoningKey ?? options.ReasoningKey;
+            var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
+            string? sessionDigest=null;bool usesSession=affinity.UsesSession;
+            string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;
+            Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>
+            {
+                bool unchanged=OutboundPreparation.IsCompatible(root,currentPrompts);
+                if(unchanged)prefixDigest=affinity.PrefixDigest(root,protocol is null,sessionDigest);
+                return unchanged;
+            }:null;
+            Action<JsonElement>? inspect=usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
-                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input),
-                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey),
+                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility,consumeInput:true,inspectInput:inspect),
+                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect),
                 _ => null
             };
-            var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
-            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null) :
-                new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body);
+            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null,compatibility) :
+                new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body){OutboundCompatible=openAi.OutboundCompatible};
             modelName=prepared.Model;
             trace?.Model(prepared.Model);
-            memory.Reserve(prepared.UpstreamBody.Length);
-            string? sessionDigest=affinity.UsesSession?SessionAffinity.SessionDigest(c.Request.Headers,input):null;
+            if(!ReferenceEquals(input,prepared.UpstreamBody))memory.Reserve(prepared.UpstreamBody.Length);
             input=[];
             // Streaming adapters need tool/response metadata, not the old request body.
             if(openAi is not null)openAi=openAi with{Body=[]};
             memory.Retain(prepared.UpstreamBody.Length);
-            if(options.DirectUpstream)prepared=prepared with{UpstreamBody=OutboundPreparation.Prepare(prepared.UpstreamBody,currentPrompts,memory.Reserve,options.MaxRequestBytes)};
+            if(options.DirectUpstream)
+            {
+                if(prepared.OutboundCompatible)
+                {if(prepared.UpstreamBody.Length>options.MaxRequestBytes)throw new RequestFailure("出站请求超过大小限制",413,"request_too_large");}
+                else prepared=prepared with{UpstreamBody=OutboundPreparation.Prepare(prepared.UpstreamBody,currentPrompts,memory.Reserve,options.MaxRequestBytes)};
+            }
             memory.Retain(prepared.UpstreamBody.Length);
-            affinityKey=affinity.Key(keyLease?.Identity?.Id,prepared.Model,sessionDigest,prepared.UpstreamBody);
+            affinityKey=prefixDigest is not null?affinity.KeyFromPrefix(keyLease?.Identity?.Id,prepared.Model,prefixDigest,prefixBytes):null;
+            affinityKey??=affinity.Key(keyLease?.Identity?.Id,prepared.Model,sessionDigest,prepared.UpstreamBody);
             admission?.FinishPreparing();if(preparing){resources.Preparing.Release(); preparing = false;}
             if(options.Catalog is { } directory && !directory.Allows(prepared.Model))throw new RequestFailure("模型被网关禁用",403,"permission_error");
             if(options.DirectUpstream&&prepared.Stream){replay=new(c,prepared.Model,true,timeouts.Keepalive);replay.StartWaiting();}
@@ -431,7 +445,8 @@ public static class LocalGateway
                 if (read.IsCompleted) return body!;
             }
             finally { reader.AdvanceTo(buffer.End); }
-            read = await reader.ReadAsync(cancellation);
+            int next=Math.Min(size-written,32<<10);
+            read = next>0?await reader.ReadAtLeastAsync(next,cancellation):await reader.ReadAsync(cancellation);
         }
     }
     internal static async Task<byte[]> ReadBounded(Stream source, int limit, CancellationToken cancellation, Action<int>? reserve = null)

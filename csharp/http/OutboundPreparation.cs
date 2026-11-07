@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace HttpMigration;
 
@@ -18,23 +19,32 @@ public sealed record SystemPromptOptions(string Fallback="You are a helpful assi
 // argument strings are never rewritten.
 public static class OutboundPreparation
 {
+    // Evaluate the same policy against the parsed tree, without modifying it.
+    // A false result leaves byte preparation to the regular normalization path.
+    internal static bool IsCompatible(JsonObject root,SystemPromptOptions settings)
+    {
+        settings.Validate();return !Normalize(V.From(root),settings);
+    }
     // Lazily materialize just the objects/arrays being edited. Large content and
     // tool schemas remain borrowed JsonElements for the lifetime of this call.
     internal sealed class V
     {
         readonly JsonElement raw;
         readonly JsonValueKind kind;
+        readonly JsonNode? dom;
         Dictionary<string,V>? obj;List<V>? array;string? text;
         V(JsonElement e){raw=e;kind=e.ValueKind;}
+        V(JsonNode node){dom=node;kind=node.GetValueKind();}
         V(JsonValueKind k){kind=k;}
         internal static V From(JsonElement e)=>new(e);
+        internal static V From(JsonNode? node)=>node is null?new(JsonValueKind.Null):new(node);
         internal static V Text(string s)=>new(JsonValueKind.String){text=s};
         internal static V Object(params (string Key,V Value)[] pairs)=>new(JsonValueKind.Object){obj=pairs.ToDictionary(p=>p.Key,p=>p.Value,StringComparer.Ordinal)};
         internal static V Array(IEnumerable<V> values)=>new(JsonValueKind.Array){array=values.ToList()};
         internal bool Is(JsonValueKind k)=>kind==k;
-        internal string Str()=>kind==JsonValueKind.String?text??raw.GetString()!:"";
-        internal Dictionary<string,V> Obj=>obj??=raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
-        internal List<V> Arr=>array??=raw.EnumerateArray().Select(From).ToList();
+        internal string Str()=>kind==JsonValueKind.String?text??(dom is JsonValue value&&value.TryGetValue<string>(out var decoded)?decoded:raw.GetString()!):"";
+        internal Dictionary<string,V> Obj=>obj??=dom is JsonObject json?json.ToDictionary(p=>p.Key,p=>From(p.Value),StringComparer.Ordinal):raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
+        internal List<V> Arr=>array??=dom is JsonArray json?json.Select(From).ToList():raw.EnumerateArray().Select(From).ToList();
         internal V? Get(string key)=>kind==JsonValueKind.Object?Obj.GetValueOrDefault(key):null;
         internal void Set(string key,V value)=>Obj[key]=value;
         internal bool Remove(string key)=>Obj.Remove(key);
@@ -45,6 +55,8 @@ public static class OutboundPreparation
             if(obj is not null){w.WriteStartObject();foreach(var p in obj){w.WritePropertyName(p.Key);p.Value.Write(w);}w.WriteEndObject();}
             else if(array is not null){w.WriteStartArray();foreach(var v in array)v.Write(w);w.WriteEndArray();}
             else if(text is not null)w.WriteStringValue(text);
+            else if(dom is not null)dom.WriteTo(w);
+            else if(kind==JsonValueKind.Null)w.WriteNullValue();
             else raw.WriteTo(w);
         }
     }
@@ -53,7 +65,16 @@ public static class OutboundPreparation
         settings.Validate();if(input.Length>limit)throw new RequestFailure("出站请求超过大小限制",413,"request_too_large");
         using var document=JsonDocument.Parse(input,new JsonDocumentOptions{MaxDepth=256});
         if(document.RootElement.ValueKind!=JsonValueKind.Object)throw new RequestFailure("请求体必须是 JSON 对象");
-        var root=V.From(document.RootElement);bool changed=false;
+        var root=V.From(document.RootElement);
+        if(!Normalize(root,settings))return input;
+        using var count=new CountStream(limit);using var writer=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
+        root.Write(writer);writer.Flush();int size=checked((int)count.Length);
+        reserve(size);byte[] result=new byte[size];using var output=new MemoryStream(result,true);
+        writer.Reset(output);root.Write(writer);writer.Flush();writer.Reset(Stream.Null);return result;
+    }
+    static bool Normalize(V root,SystemPromptOptions settings)
+    {
+        bool changed=false;
         string effort=root.S("reasoning_effort");
         if(effort is "" or "off" or "none") {changed|=root.Remove("reasoning_effort");changed|=root.Remove("reasoning_summary");}
         else if(string.IsNullOrWhiteSpace(root.S("reasoning_summary"))){root.Set("reasoning_summary",V.Text("auto"));changed=true;}
@@ -113,11 +134,7 @@ public static class OutboundPreparation
                     if(msg.S("reasoning")==""){msg.Set("reasoning",V.Text(value.Length==0?" ":value));changed=true;}
                 }
         }
-        if(!changed)return input;
-        using var count=new CountStream(limit);using var writer=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
-        root.Write(writer);writer.Flush();int size=checked((int)count.Length);
-        reserve(size);byte[] result=new byte[size];using var output=new MemoryStream(result,true);
-        writer.Reset(output);root.Write(writer);writer.Flush();writer.Reset(Stream.Null);return result;
+        return changed;
     }
     static List<V> RepairTools(List<V> messages,ref bool changed)
     {
