@@ -17,8 +17,8 @@ internal static class Program
         Console.InputEncoding = new UTF8Encoding(false); Console.OutputEncoding = new UTF8Encoding(false);
         if (args is ["--self-test"])
         {
-            var stream = await StreamTests.Run(); var http = await HttpTests.Run();
-            Console.WriteLine(JsonSerializer.Serialize(new { streamTests = stream.Count, httpTests = http.Count, stream, http }, Json)); return;
+            var stream = await StreamTests.Run(); var http = await HttpTests.Run();var encoding=EncodingTests.Run();
+            Console.WriteLine(JsonSerializer.Serialize(new { streamTests = stream.Count, httpTests = http.Count, encodingTests=encoding, stream, http }, Json)); return;
         }
         if (args is not ["--probe"]) throw new ArgumentException("Use --probe or --self-test");
         while (await Console.In.ReadLineAsync() is { } line)

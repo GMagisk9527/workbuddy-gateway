@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using System.Text.Encodings.Web;
 using TypedMigration;
 using StreamingMigration;
+using System.Runtime.InteropServices;
 
 namespace OpenAiProtocols;
 
@@ -54,8 +55,39 @@ public static class OpenWire
     {
         using var stream = new BudgetStream(limit,budget);
         using (var writer = new Utf8JsonWriter(stream, new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 }))
-        { if (node is null) writer.WriteNullValue(); else node.WriteTo(writer, Json); }
+        { WriteNode(writer,node); }
         return stream.ToArray();
+    }
+    static void WriteNode(Utf8JsonWriter writer,JsonNode? node)
+    {
+        switch(node)
+        {
+            case null:writer.WriteNullValue();return;
+            case JsonObject obj:
+                writer.WriteStartObject();foreach(var p in obj){writer.WritePropertyName(p.Key);WriteNode(writer,p.Value);}writer.WriteEndObject();return;
+            case JsonArray array:
+                writer.WriteStartArray();foreach(var item in array)WriteNode(writer,item);writer.WriteEndArray();return;
+            case JsonValue value when value.TryGetValue<JsonElement>(out var element)&&element.ValueKind==JsonValueKind.String:
+                var raw=JsonMarshal.GetRawUtf8Value(element);
+                if(raw.Length>=256&&CanonicalString(raw[1..^1])){writer.WriteRawValue(raw,skipInputValidation:true);return;}
+                break;
+        }
+        node.WriteTo(writer,Json);
+    }
+    // Reuse validated, already canonical UTF-8 string tokens. Unusual escapes or
+    // characters still use the normal encoder, keeping the exact wire format.
+    static bool CanonicalString(ReadOnlySpan<byte> raw)
+    {
+        while(!raw.IsEmpty)
+        {
+            int i=raw.IndexOf((byte)'\\');
+            var plain=i<0?raw:raw[..i];
+            if(JavaScriptEncoder.UnsafeRelaxedJsonEscaping.FindFirstCharacterToEncodeUtf8(plain)>=0)return false;
+            if(i<0)return true;
+            if(i+1>=raw.Length||raw[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
+            raw=raw[(i+2)..];
+        }
+        return true;
     }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget) : Stream
     {

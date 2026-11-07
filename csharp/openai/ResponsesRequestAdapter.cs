@@ -143,6 +143,11 @@ public static class ResponsesRequestAdapter
         }
         if (type is "function_call_output" or "custom_tool_call_output")
         {
+            if(item["output"] is JsonValue scalar&&scalar.GetValueKind()==JsonValueKind.String)
+            {
+                yield return new(){["role"]="tool",["tool_call_id"]=Text(item["call_id"]),["content"]=scalar.DeepClone()};
+                yield break;
+            }
             var output = item["output"]; var texts = new List<string>(); var images = new JsonArray();
             bool typed = Items(output).OfType<JsonObject>().Any(p => Text(p["type"]) is "input_text" or "output_text" or "text" or "input_image" or "image_url");
             if (!typed) texts.Add(Stringify(output));

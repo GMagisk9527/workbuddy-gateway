@@ -6,6 +6,7 @@
   <!-- Opt-in Native AOT publication with strict compiler and linker diagnostics. -->
   <PropertyGroup Condition="'$(GatewayNativeAot)' == 'true'">
     <PublishAot>true</PublishAot>
+    <OptimizationPreference>Speed</OptimizationPreference>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
     <ILLinkTreatWarningsAsErrors>true</ILLinkTreatWarningsAsErrors>
     <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
