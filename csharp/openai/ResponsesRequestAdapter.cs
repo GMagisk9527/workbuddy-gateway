@@ -9,9 +9,10 @@ namespace OpenAiProtocols;
 
 public static class ResponsesRequestAdapter
 {
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)=>Prepare(bytes,reasoningKey,null);
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility)
     {
-        var root = Parse(bytes); string model = Model(root);
+        using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
         bool encrypted = Items(root["include"]).Any(x => Text(x) == "reasoning.encrypted_content");
         foreach (var item in Items(root["input"]).OfType<JsonObject>())
         {
@@ -100,7 +101,8 @@ public static class ResponsesRequestAdapter
                 Require(matching.Length > 0, "tool_choice 指定的工具未在 tools 中定义"); chat["tool_choice"] = "required"; chat["tools"] = new JsonArray(matching);
             }
         }
-        return new(model, Bool(root["stream"]), Encode(chat, RequestLimit), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted);
+        bool compatible=compatibility?.Invoke(chat)??false;
+        return new(model, Bool(root["stream"]), Encode(chat, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted){OutboundCompatible=compatible};
     }
     static JsonArray Parts(JsonNode? content) => content is JsonArray arr ? (JsonArray)arr.DeepClone() : Text(content) != "" ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = Text(content) }) : [];
     public static string ReasoningText(JsonObject item)
@@ -145,7 +147,7 @@ public static class ResponsesRequestAdapter
         {
             if(item["output"] is JsonValue scalar&&scalar.GetValueKind()==JsonValueKind.String)
             {
-                yield return new(){["role"]="tool",["tool_call_id"]=Text(item["call_id"]),["content"]=scalar.DeepClone()};
+                yield return new(){["role"]="tool",["tool_call_id"]=Text(item["call_id"]),["content"]=scalar.TryGetValue<JsonElement>(out var raw)?JsonValue.Create(raw):scalar.DeepClone()};
                 yield break;
             }
             var output = item["output"]; var texts = new List<string>(); var images = new JsonArray();

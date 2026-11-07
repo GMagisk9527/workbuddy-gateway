@@ -9,7 +9,8 @@ using TypedMigration;
 
 namespace HttpMigration;
 
-public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody);
+public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody)
+{public bool OutboundCompatible{get;init;}}
 
 public static class MessagesRequestAdapter
 {
@@ -107,9 +108,10 @@ public static class MessagesRequestAdapter
             if (kind != "disabled" && outputEffort.Length > 0) raw["reasoning_effort"] = outputEffort;
             // Both local response modes consume an upstream SSE stream.
             raw["stream"] = true;
+            bool compatible=prompts is not null&&OutboundPreparation.IsCompatible(raw,prompts);
             int size=Size(raw, limit); // Check the complete escaped size before allocating UTF-8 output.
             byte[] encoded = GoJson.FormatUtf8(raw,size);
-            return new(model, JsonFields.Get(root, "stream").ValueKind == JsonValueKind.True, thinking, hidden, encoded);
+            return new(model, JsonFields.Get(root, "stream").ValueKind == JsonValueKind.True, thinking, hidden, encoded){OutboundCompatible=compatible};
         }
         catch (JsonException) { throw new RequestFailure("无效的 JSON 请求体"); }
         catch (InvalidOperationException) { throw new RequestFailure("无效的 JSON 字段或 Unicode 文本"); }

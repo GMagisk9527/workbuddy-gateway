@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace HttpMigration;
 
@@ -18,6 +19,45 @@ public sealed record SystemPromptOptions(string Fallback="You are a helpful assi
 // argument strings are never rewritten.
 public static class OutboundPreparation
 {
+    // Prove the common case is unchanged while its parsed request is still alive.
+    // Any uncertain role, prompt rule or tool ordering uses the full normalizer.
+    internal static bool IsCompatible(JsonObject root,SystemPromptOptions settings)
+    {
+        settings.Validate();
+        static string Text(JsonNode? n)=>n is JsonValue v&&v.TryGetValue<string>(out var s)?s:"";
+        if(!string.IsNullOrWhiteSpace(settings.Force)||root.ContainsKey("reasoning_effort")||root.ContainsKey("reasoning_summary")||Text(root["model"]).Trim().StartsWith("deepseek",StringComparison.OrdinalIgnoreCase))return false;
+        if(root["messages"] is not JsonArray{Count:>0} messages||messages[0] is not JsonObject first||Text(first["role"])!="system")return false;
+        var identity=IdentitySettings.Build(settings.Identity);var ids=new HashSet<string>(StringComparer.Ordinal);var pending=new Queue<string>();
+        foreach(var item in messages)
+        {
+            if(item is not JsonObject message)return false;
+            string role=Text(message["role"]);
+            if(role is not ("system" or "assistant" or "user" or "tool" or "function"))return false;
+            if(identity.Enabled&&role is "system" or "assistant")
+            {
+                if(message["content"] is JsonValue text&&identity.MightMatch(Text(text),true))return false;
+                if(message["content"] is JsonArray parts)
+                    foreach(var part in parts.OfType<JsonObject>())
+                        if(Text(part["type"])=="text"&&identity.MightMatch(Text(part["text"]),true))return false;
+            }
+            if(role=="tool")
+            {
+                if(!pending.TryDequeue(out string? id)||Text(message["tool_call_id"])!=id)return false;
+                continue;
+            }
+            if(pending.Count>0)return false;
+            if(role=="assistant"&&message["tool_calls"] is JsonArray{Count:>0} calls)
+            {
+                foreach(var call in calls)
+                {
+                    string id=call is JsonObject c?Text(c["id"]):"";
+                    if(id.Length==0||id!=id.Trim()||!ids.Add(id))return false;
+                    pending.Enqueue(id);
+                }
+            }
+        }
+        return pending.Count==0;
+    }
     // Lazily materialize just the objects/arrays being edited. Large content and
     // tool schemas remain borrowed JsonElements for the lifetime of this call.
     internal sealed class V

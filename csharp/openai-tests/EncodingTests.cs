@@ -32,6 +32,19 @@ internal static class EncodingTests
             Compare(JsonNode.Parse("\""+new string('x',512)+escape+"\""));
         foreach(JsonNode? value in new JsonNode?[]{null,JsonValue.Create(1.234m),JsonValue.Create(ulong.MaxValue),new JsonObject{["control"]=JsonValue.Create("\u0001"),["nested"]=new JsonArray(JsonNode.Parse("\""+new string('z',2048)+"\""),true,null)}})
             Compare(value);
+        byte[] requestBytes=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"metadata\":{\"session_id\":\"synthetic\",\"label\":\"中文\"},\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c\",\"output\":\""+new string('x',8192)+"\"}]}");
+        var responseRequest=ResponsesRequestAdapter.Prepare(requestBytes,Program.Key);
+        Array.Fill(requestBytes,(byte)' ');
+        if(responseRequest.Metadata["session_id"]?.GetValue<string>()!="synthetic"||responseRequest.Metadata["label"]?.GetValue<string>()!="中文")
+            throw new Exception("Response metadata borrowed disposed request memory");
+        using(var owned=JsonDocument.Parse(responseRequest.Body))
+            if(owned.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=new string('x',8192))throw new Exception("Encoded response request borrowed input memory");
+        checks++;
+        byte[] chatBytes=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\""+new string('y',8192)+"\"}]}");
+        var chatRequest=ChatRequestAdapter.Prepare(chatBytes);Array.Fill(chatBytes,(byte)' ');
+        using(var owned=JsonDocument.Parse(chatRequest.Body))
+            if(owned.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=new string('y',8192))throw new Exception("Encoded chat request borrowed input memory");
+        checks++;
         return checks;
 
         void Compare(JsonNode? node)
@@ -48,9 +61,9 @@ internal static class EncodingTests
                 catch(InvalidOperationException){checks++;return;}
                 throw new Exception("Invalid UTF-16 must follow the reference encoder's rejection");
             }
-            byte[] expected=bytes.ToArray(),actual=OpenWire.Encode(node,expected.Length);
+            byte[] expected=bytes.ToArray(),actual=OpenWire.Encode(node,expected.Length,optimizeLarge:true);
             if(!expected.AsSpan().SequenceEqual(actual))throw new Exception("UTF-8 writer changed the encoded JSON");
-            try{OpenWire.Encode(node,expected.Length-1);throw new Exception("Output budget was bypassed");}
+            try{OpenWire.Encode(node,expected.Length-1,optimizeLarge:true);throw new Exception("Output budget was bypassed");}
             catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded"){}
             checks++;
         }
