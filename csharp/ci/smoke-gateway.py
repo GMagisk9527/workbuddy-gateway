@@ -187,6 +187,8 @@ def exercise(command, root, network, extra_env):
         count_body = {"model": "test-model", "messages": messages}
         count = request("/v1/messages/count_tokens", token, count_body)["input_tokens"]
         assert count > 0
+        error = request("/v1/messages/count_tokens", token, status=405, decode=False)
+        assert "仅支持 POST 请求".encode() in error
         request("/v1/responses", token, {"input": []}, status=400)
         if network:
             for coding in ("gzip", "zstd"):

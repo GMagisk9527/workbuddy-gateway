@@ -3,8 +3,7 @@
     <TargetFramework>net11.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><EnableNETAnalyzers>true</EnableNETAnalyzers>
   </PropertyGroup>
-  <!-- Opt-in only. The current application still has AOT diagnostics to resolve;
-       never suppress them or use this candidate for production before native tests. -->
+  <!-- Opt-in Native AOT publication with strict compiler and linker diagnostics. -->
   <PropertyGroup Condition="'$(GatewayNativeAot)' == 'true'">
     <PublishAot>true</PublishAot>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>

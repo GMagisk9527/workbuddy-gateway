@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -44,12 +45,18 @@ namespace HttpMigration;
 [JsonSerializable(typeof(double))]
 internal partial class GatewayJson : JsonSerializerContext
 {
+    // Keep ASP.NET's HTTP escaping behavior separate from file and upstream JSON.
+    private static readonly GatewayJson Http = new(new JsonSerializerOptions(JsonSerializerDefaults.Web)
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    });
+
     internal static Task WriteAsync(HttpContext context, object value) =>
-        context.Response.WriteAsJsonAsync(value, Default.Object, cancellationToken: context.RequestAborted);
+        context.Response.WriteAsJsonAsync(value, Http.Object, cancellationToken: context.RequestAborted);
 
     internal static byte[] Encode(object value) => JsonSerializer.SerializeToUtf8Bytes(value, Default.Object);
 
-    internal static IResult Result(object value) => Results.Json(value, Default.Object);
+    internal static IResult Result(object value) => Results.Json(value, Http.Object);
 }
 
 // These formats use the previous default JSON casing, unlike the HTTP responses.
