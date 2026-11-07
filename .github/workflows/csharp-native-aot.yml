@@ -2,7 +2,7 @@ name: CSharp Linux Native AOT
 
 on:
   push:
-    branches: [codex/linux-native-aot]
+    branches: [main]
     paths: ['csharp/**', '.github/workflows/csharp-native-aot.yml']
   pull_request:
     paths: ['csharp/**', '.github/workflows/csharp-native-aot.yml']
