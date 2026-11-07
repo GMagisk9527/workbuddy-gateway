@@ -8,6 +8,18 @@ A read-only inspection of the retained production statistics found 283 completed
 
 The console and credit ledger already read explicit upstream cache usage. Thus these low values are not explained solely by a percentage display formula. No cache hits should be inferred from local prefix similarity or fabricated when the upstream reports zero.
 
+## DSH 0.2.2-rc.1 client-side prerequisite
+
+The user confirmed DSH `0.2.2-rc.1`. The corresponding published `@deepseek-ai/dsh-llm-pi-ai` package declares `@earendil-works/pi-ai: ^1.3.0`. Its compatibility gate withholds `sendSessionAffinityHeaders` and `sessionAffinityFormat` from configurable profiles. Adding `compat.sendSessionAffinityHeaders: true` to a profile is therefore not a supported setting in that release.
+
+The verified minimum matching dependency, pi-ai `1.3.0`, sends no session-affinity headers for a generic third-party OpenAI Chat provider by default. It does send `session_id` for an OpenAI Responses call with a session ID and the default OpenAI session-affinity format. DSH passes its actual `options.sessionId` into the adapter; the configurable static header map alone cannot generate that per-conversation value. The installed dependency lock and any custom header-contributing plugins were not inspected, so published-source defaults do not prove that every live request lacks the field.
+
+For this DSH version, selecting `openai-responses` as the gateway provider's API is the available protocol-level path to transmit its real session identity without a fixed shared header or an unsupported compatibility override. Keep the existing endpoint, credentials and model. Actual client traffic, reverse-proxy preservation of `session_id`, and HY4 cache improvement still require a live DSH conversation after deployment. The gateway intentionally continues creating independent correlation IDs for Chat requests without an identity; it cannot safely infer which identical prompts belong to the same private conversation.
+
+pi-ai `1.3.0` also reads Chat cache usage from standard nested `prompt_tokens_details.cached_tokens`, then vendor top-level `prompt_cache_hit_tokens`/`cached_tokens`; its input counter excludes cache reads and writes. The gateway history input counter contains the whole upstream prompt count, so compare `cached / prompt` in gateway history against `cacheRead / (uncached input + cacheRead + cacheWrite)` on that client, using the same requests. Different windows or denominators cannot establish a cache defect.
+
+Package integrity values and inspected source hashes are retained in [the provenance record](benchmarks/dsh-0.2.2-rc.1-session-provenance.json). These source checks do not substitute for a real DSH run.
+
 ## Confirmed migration defects and fix
 
 Go's `conversation.go` prepares `X-Conversation-ID`, `X-Conversation-Request-ID` and `X-Conversation-Message-ID` before protocol conversion and retains them through internal retries. The C# direct upstream path previously applied account authentication and trace headers but did not attach these conversation fields. Its local account affinity used a client-session digest independently. Local account affinity alone does not transmit session identity to the upstream.

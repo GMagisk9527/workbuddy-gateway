@@ -1,0 +1,45 @@
+{
+  "scope": "Published source inspection only; the user-installed dependency lock and actual DSH traffic were not inspected.",
+  "dshVersionReportedByUser": "0.2.2-rc.1",
+  "packages": [
+    {
+      "name": "@deepseek-ai/dsh-llm-pi-ai",
+      "version": "0.2.2-rc.1",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/dsh-llm-pi-ai/-/dsh-llm-pi-ai-0.2.2-rc.1.tgz",
+      "integrity": "sha512-druY5fR7w3NVBLQ88Jrh19sxOA7KTk5tzv57sCH8Awj9Zr7MzEzUb8XuQPDgCXmsWmZrKlKbKC6JUg9guVi34A==",
+      "dependencies": {
+        "@earendil-works/pi-ai": "^1.3.0"
+      },
+      "sources": [
+        {
+          "file": "index.js",
+          "sha256": "76c02050e4b061df530fdfe965cb81aae0067404ef1a43cc102ae9af57894e87"
+        }
+      ]
+    },
+    {
+      "name": "@earendil-works/pi-ai",
+      "version": "1.3.0",
+      "tarball": "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.3.0.tgz",
+      "integrity": "sha512-KaBI8x7q7sPoFUXICNGD9efHzDG+oRNwVvkA9jdIsSQWH1RjFssOlEGsbLtewUPPgCrvmz0l2KTgSLXTyj3acw==",
+      "dependencies": {},
+      "sources": [
+        {
+          "file": "openai-completions.js",
+          "sha256": "4b3875e5ec18c5e2d06ce12409feb2554563fd2c392a5c1773af968b265e2bea"
+        },
+        {
+          "file": "openai-responses.js",
+          "sha256": "abb110a531362658ce21c478a782bcac936ef41e922a80b067f444ccf3c39f7e"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    "dsh-llm-pi-ai 0.2.2-rc.1 declares pi-ai ^1.3.0 and marks sendSessionAffinityHeaders/sessionAffinityFormat as withheld from custom compatibility configuration.",
+    "The adapter requestHeaders hook receives the real per-call options.sessionId; static custom headers alone cannot generate per-session identities.",
+    "Verified pi-ai 1.3.0 generic OpenAI Chat does not send session headers by default; Responses sends session_id for its default openai session-affinity format.",
+    "pi-ai 1.3.0 Chat cache usage reads prompt_tokens_details.cached_tokens, then prompt_cache_hit_tokens, then cached_tokens; it subtracts cache reads/writes from its uncached input count.",
+    "Switching protocol still requires a live DSH conversation to verify end-to-end identity propagation and HY4 cache behavior."
+  ]
+}
