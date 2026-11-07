@@ -10,7 +10,7 @@ namespace OpenAiProtocols;
 public static class ResponsesRequestAdapter
 {
     public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)=>Prepare(bytes,reasoningKey,null);
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility,Action<JsonElement>? inspectInput=null)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility,Action<JsonElement>? inspectInput=null,Func<JsonObject,byte[]?>? prepareBody=null)
     {
         using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
         inspectInput?.Invoke(document.Original);
@@ -102,8 +102,9 @@ public static class ResponsesRequestAdapter
                 Require(matching.Length > 0, "tool_choice 指定的工具未在 tools 中定义"); chat["tool_choice"] = "required"; chat["tools"] = new JsonArray(matching);
             }
         }
-        bool compatible=compatibility?.Invoke(chat)??false;
-        return new(model, Bool(root["stream"]), Encode(chat, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted){OutboundCompatible=compatible};
+        byte[]? prepared=prepareBody?.Invoke(chat);
+        bool compatible=prepareBody is not null||(compatibility?.Invoke(chat)??false);
+        return new(model, Bool(root["stream"]), prepared??Encode(chat, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Responses, map, (JsonObject?)Copy(root["metadata"]) ?? new(), encrypted){OutboundCompatible=compatible};
     }
     static JsonArray Parts(JsonNode? content) => content is JsonArray arr ? (JsonArray)arr.DeepClone() : Text(content) != "" ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = Text(content) }) : [];
     public static string ReasoningText(JsonObject item)

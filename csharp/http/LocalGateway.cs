@@ -210,25 +210,31 @@ public static class LocalGateway
             byte[] reasoningKey = derivedReasoningKey ?? options.ReasoningKey;
             var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
             string? sessionDigest=null;bool usesSession=affinity.UsesSession;
-            string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;
+            string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;bool preparedReserved=false;
             Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>
             {
                 bool unchanged=OutboundPreparation.IsCompatible(root,currentPrompts);
                 if(unchanged)prefixDigest=affinity.PrefixDigest(root,protocol is null,sessionDigest);
                 return unchanged;
             }:null;
+            Func<System.Text.Json.Nodes.JsonObject,byte[]?>? prepareOpenAi=options.DirectUpstream?root=>
+                OutboundPreparation.PrepareParsed(root,currentPrompts,size=>{memory.Reserve(size);preparedReserved=true;},options.MaxRequestBytes,
+                    (normalized,changed)=>prefixDigest=affinity.PrefixDigest(normalized,false,sessionDigest)):null;
+            Func<System.Text.Json.Nodes.JsonObject,byte[]?>? prepareMessages=options.DirectUpstream?root=>
+                OutboundPreparation.PrepareParsed(root,currentPrompts,size=>{memory.Reserve(size);preparedReserved=true;},options.MaxRequestBytes,
+                    (normalized,changed)=>prefixDigest=affinity.PrefixDigest(normalized,!changed,sessionDigest),canonicalInput:true):null;
             Action<JsonElement>? inspect=usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
-                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility,consumeInput:true,inspectInput:inspect),
-                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect),
+                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility,consumeInput:true,inspectInput:inspect,prepareBody:prepareOpenAi),
+                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect,prepareOpenAi),
                 _ => null
             };
-            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null,compatibility) :
+            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null,compatibility,prepareMessages) :
                 new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body){OutboundCompatible=openAi.OutboundCompatible};
             modelName=prepared.Model;
             trace?.Model(prepared.Model);
-            if(!ReferenceEquals(input,prepared.UpstreamBody))memory.Reserve(prepared.UpstreamBody.Length);
+            if(!preparedReserved&&!ReferenceEquals(input,prepared.UpstreamBody))memory.Reserve(prepared.UpstreamBody.Length);
             input=[];
             // Streaming adapters need tool/response metadata, not the old request body.
             if(openAi is not null)openAi=openAi with{Body=[]};

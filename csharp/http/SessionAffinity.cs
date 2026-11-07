@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using TypedMigration;
 using OpenAiProtocols;
+using System.Buffers;
 
 namespace HttpMigration;
 
@@ -39,7 +40,8 @@ public sealed class SessionAffinity
     public bool UsesSession=>options is{Enabled:true,Mode:not AffinityMode.Prefix};
     internal int PrefixBytes=>options.PrefixBytes;
     // Hash just the same bounded tools/first-two-message fragments while the
-    // converted tree is alive. Large fragments use the original byte scanner.
+    // converted tree is alive. Canonical OpenAI fragments stop encoding at the
+    // bound; other large fragments keep the original byte-scanner fallback.
     internal string? PrefixDigest(JsonObject root,bool canonical,string? session)
     {
         var current=options;
@@ -65,7 +67,17 @@ public sealed class SessionAffinity
                 }
                 return remaining>=0;
             }
-            if(!Fits(node))return false;
+            if(!Fits(node))
+            {
+                if(canonical)return false;
+                byte[] rented=ArrayPool<byte>.Shared.Rent(current.PrefixBytes);
+                try
+                {
+                    if(!OpenWire.TryEncodePrefix(node,rented.AsSpan(0,current.PrefixBytes),out int written))return false;
+                    hash.AppendData(label);hash.AppendData(rented.AsSpan(0,written));return true;
+                }
+                finally{ArrayPool<byte>.Shared.Return(rented,clearArray:true);}
+            }
             byte[] bytes=canonical?Encoding.UTF8.GetBytes(GoJson.Format(node)):OpenWire.Encode(node,current.PrefixBytes);
             hash.AppendData(label);hash.AppendData(bytes.AsSpan(0,Math.Min(bytes.Length,current.PrefixBytes)));return true;
         }

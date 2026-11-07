@@ -135,6 +135,22 @@ internal static class AffinityTests
         }
         var huge=System.Text.Json.Nodes.JsonNode.Parse("{\"messages\":[{\"role\":\"user\",\"content\":\""+new string('x',1<<20)+"\"}]}")!.AsObject();
         Check(affinity.PrefixDigest(huge,true,null) is null,"Large first-message prefix retains bounded byte-scanner fallback");
+        Check(affinity.PrefixDigest(huge,false,null) is not null,"Large canonical OpenAI prefix uses bounded encoding");
+        var options=new JsonSerializerOptions{Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping};
+        for(int i=0;i<60;i++)foreach(int prefixBytes in new[]{2048,4096,65536})
+        {
+            var current=new SessionAffinity(new(true,Mode:AffinityMode.Prefix,PrefixBytes:prefixBytes));
+            string sample=string.Concat(Enumerable.Repeat((i%4) switch{0=>"hello ",1=>"中文 😀 ",2=>"line\nquote\"slash\\ ",_=>"<>& \u2028\u2029 "},4096));
+            var raw=new System.Text.Json.Nodes.JsonObject{["model"]="m",["messages"]=new System.Text.Json.Nodes.JsonArray(
+                new System.Text.Json.Nodes.JsonObject{["role"]="system",["content"]=i%2==0?sample:"instructions"},
+                new System.Text.Json.Nodes.JsonObject{["role"]="user",["content"]=sample})};
+            if(i%3==0)raw["tools"]=new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject{["type"]="function",["description"]=sample});
+            var root=OpenAiProtocols.OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(raw,options));
+            byte[] bytes=OpenAiProtocols.OpenWire.Encode(root,2<<20);
+            string? digest=current.PrefixDigest(root,false,null);
+            if(digest is not null)Check(current.KeyFromPrefix("caller","m",digest,prefixBytes)==current.Key("caller","m",null,bytes),"Bounded large prefix preserves the exact affinity key");
+            else Check(i%4!=0,"Canonical ASCII prefix must not fall back to a complete body scan");
+        }
     }
     static async Task SchedulingChecks(AccountId a,AccountId b)
     {

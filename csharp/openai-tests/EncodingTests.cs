@@ -63,6 +63,48 @@ internal static class EncodingTests
             if(result.RootElement.GetProperty("messages").GetArrayLength()!=expected)throw new Exception("UTF-8 user input changed whitespace semantics");
             checks++;
         }
+        var prefixSamples=samples.Take(8).Concat(new[]{new string('x',1<<20),"first\\nsecond\\t"+new string('z',8192)});
+        foreach(string sample in prefixSamples)
+        {
+            var tree=OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(new JsonObject{
+                ["role"]="user",["content"]=new JsonArray(new JsonObject{["type"]="text",["text"]=sample}),
+                ["after"]=new JsonArray(true,null,JsonValue.Create(1.23m))},options));
+            byte[] expected=OpenWire.Encode(tree,OpenWire.RequestLimit);
+            foreach(int limit in new[]{1,2,3,7,31,127,256,1024,2048,4096,65536})
+            {
+                byte[] output=new byte[limit];
+                if(OpenWire.TryEncodePrefix(tree,output,out int written)&&
+                    (written!=Math.Min(limit,expected.Length)||!output.AsSpan(0,written).SequenceEqual(expected.AsSpan(0,written))))
+                    throw new Exception("Bounded JSON prefix changed the encoded bytes");
+                checks++;
+            }
+        }
+        var large=OpenWire.Parse(Encoding.UTF8.GetBytes("{\"role\":\"user\",\"content\":\""+new string('x',1<<20)+"\"}"));
+        if(!OpenWire.TryEncodePrefix(large,new byte[65536],out int prefixLength)||prefixLength!=65536)
+            throw new Exception("Large canonical user prefix did not take the bounded path");
+        checks++;
+        var exactTree=OpenWire.Parse(Encoding.UTF8.GetBytes("{\"payload\":\""+new string('x',1<<20)+"\",\"tail\":512}"));
+        byte[] exactReference=OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true);
+        _=OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true);
+        long allocated=GC.GetAllocatedBytesForCurrentThread();
+        for(int i=0;i<4;i++)if(!exactReference.AsSpan().SequenceEqual(OpenWire.Encode(exactTree,OpenWire.RequestLimit,optimizeLarge:true)))throw new Exception("Direct buffer encoding changed bytes");
+        allocated=(GC.GetAllocatedBytesForCurrentThread()-allocated)/4;
+        if(allocated>exactReference.Length+65536)throw new Exception("Large request encoding reintroduced a full-document buffer or copy");checks++;
+        foreach(string sample in new[]{string.Concat(Enumerable.Repeat("中文 😀 line\nquote\"slash\\ ",2048)),new string('x',8192)+"\u2028\u2029"})
+        {
+            var tree=OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(new{role="user",content=sample},options));
+            var encoded=OpenWire.Encode(tree,OpenWire.RequestLimit);
+            foreach(int limit in Enumerable.Range(32,64))
+            {
+                var prefix=new byte[limit];
+                if(OpenWire.TryEncodePrefix(tree,prefix,out int written)&&!prefix.AsSpan(0,written).SequenceEqual(encoded.AsSpan(0,written)))
+                    throw new Exception("Partial UTF-8 lookahead changed the prefix");
+                checks++;
+            }
+            var request=ResponsesRequestAdapter.Prepare(JsonSerializer.SerializeToUtf8Bytes(new{model="m",input=new[]{new{role="user",content=sample}}},options),Program.Key);
+            using var document=JsonDocument.Parse(request.Body);
+            if(document.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=sample)throw new Exception("String validation changed Unicode or escaping");checks++;
+        }
         return checks;
 
         void Compare(JsonNode? node)
@@ -81,6 +123,10 @@ internal static class EncodingTests
             }
             byte[] expected=bytes.ToArray(),actual=OpenWire.Encode(node,expected.Length,optimizeLarge:true);
             if(!expected.AsSpan().SequenceEqual(actual))throw new Exception("UTF-8 writer changed the encoded JSON");
+            int reserved=0;byte[] admitted=OpenWire.Encode(node,expected.Length,optimizeLarge:true,reserve:n=>reserved=n);
+            if(reserved!=expected.Length||!expected.AsSpan().SequenceEqual(admitted))throw new Exception("Preallocation reservation changed the exact encoded size");
+            byte[] document=OpenWire.EncodeDocument(w=>{if(node is null)w.WriteNullValue();else node.WriteTo(w,options);},expected.Length,n=>reserved=n);
+            if(reserved!=expected.Length||!expected.AsSpan().SequenceEqual(document))throw new Exception("Callback encoding changed the wire representation");
             try{OpenWire.Encode(node,expected.Length-1,optimizeLarge:true);throw new Exception("Output budget was bypassed");}
             catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded"){}
             checks++;

@@ -1,7 +1,8 @@
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using OpenAiProtocols;
+using TypedMigration;
 
 namespace HttpMigration;
 
@@ -25,6 +26,17 @@ public static class OutboundPreparation
     {
         settings.Validate();return !Normalize(V.From(root),settings);
     }
+    // The adapter keeps its document alive until this call has encoded all
+    // borrowed scalars. Null means the original tree was already normalized.
+    internal static byte[]? PrepareParsed(JsonObject root,SystemPromptOptions settings,Action<int> reserve,int limit,Action<JsonObject,bool>? inspect=null,bool canonicalInput=false)
+    {
+        settings.Validate();var shadow=V.From(root,canonicalInput);bool changed=Normalize(shadow,settings);
+        var normalized=changed?shadow.ToNode()!.AsObject():root;inspect?.Invoke(normalized,changed);
+        if(!changed)return null;
+        try{return OpenWire.Encode(normalized,limit,optimizeLarge:true,reserve:reserve);}
+        catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded")
+        {throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");}
+    }
     // Lazily materialize just the objects/arrays being edited. Large content and
     // tool schemas remain borrowed JsonElements for the lifetime of this call.
     internal sealed class V
@@ -32,24 +44,39 @@ public static class OutboundPreparation
         readonly JsonElement raw;
         readonly JsonValueKind kind;
         readonly JsonNode? dom;
+        readonly bool canonical;
         Dictionary<string,V>? obj;List<V>? array;string? text;
         V(JsonElement e){raw=e;kind=e.ValueKind;}
-        V(JsonNode node){dom=node;kind=node.GetValueKind();}
+        V(JsonNode node,bool canonical){dom=node;kind=node.GetValueKind();this.canonical=canonical;}
         V(JsonValueKind k){kind=k;}
         internal static V From(JsonElement e)=>new(e);
-        internal static V From(JsonNode? node)=>node is null?new(JsonValueKind.Null):new(node);
+        internal static V From(JsonNode? node,bool canonical=false)=>node is null?new(JsonValueKind.Null):new(node,canonical);
         internal static V Text(string s)=>new(JsonValueKind.String){text=s};
         internal static V Object(params (string Key,V Value)[] pairs)=>new(JsonValueKind.Object){obj=pairs.ToDictionary(p=>p.Key,p=>p.Value,StringComparer.Ordinal)};
         internal static V Array(IEnumerable<V> values)=>new(JsonValueKind.Array){array=values.ToList()};
         internal bool Is(JsonValueKind k)=>kind==k;
         internal string Str()=>kind==JsonValueKind.String?text??(dom is JsonValue value&&value.TryGetValue<string>(out var decoded)?decoded:raw.GetString()!):"";
-        internal Dictionary<string,V> Obj=>obj??=dom is JsonObject json?json.ToDictionary(p=>p.Key,p=>From(p.Value),StringComparer.Ordinal):raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
-        internal List<V> Arr=>array??=dom is JsonArray json?json.Select(From).ToList():raw.EnumerateArray().Select(From).ToList();
+        internal Dictionary<string,V> Obj=>obj??=dom is JsonObject json?(canonical?GoJson.Ordered(json):json).ToDictionary(p=>p.Key,p=>From(p.Value,canonical),StringComparer.Ordinal):raw.EnumerateObject().GroupBy(p=>p.Name).ToDictionary(g=>g.Key,g=>From(g.Last().Value),StringComparer.Ordinal);
+        internal List<V> Arr=>array??=dom is JsonArray json?json.Select(value=>From(value,canonical)).ToList():raw.EnumerateArray().Select(From).ToList();
         internal V? Get(string key)=>kind==JsonValueKind.Object?Obj.GetValueOrDefault(key):null;
         internal void Set(string key,V value)=>Obj[key]=value;
         internal bool Remove(string key)=>Obj.Remove(key);
         internal string S(string key)=>Get(key)?.Str()??"";
         internal string Role=>S("role").Trim().ToLowerInvariant();
+        internal JsonNode? ToNode()
+        {
+            if(kind==JsonValueKind.Object)return new JsonObject(Obj.Select(p=>new KeyValuePair<string,JsonNode?>(p.Key,p.Value.ToNode())));
+            if(kind==JsonValueKind.Array)return new JsonArray(Arr.Select(v=>v.ToNode()).ToArray());
+            if(text is not null)return JsonValue.Create(text);
+            if(kind==JsonValueKind.Null)return null;
+            if(dom is JsonValue value)
+            {
+                if(value.TryGetValue<JsonElement>(out var element))return JsonValue.Create(element);
+                if(value.TryGetValue<string>(out var decoded))return JsonValue.Create(decoded);
+                return value.DeepClone();
+            }
+            return JsonValue.Create(raw);
+        }
         internal void Write(Utf8JsonWriter w)
         {
             if(obj is not null){w.WriteStartObject();foreach(var p in obj){w.WritePropertyName(p.Key);p.Value.Write(w);}w.WriteEndObject();}
@@ -67,10 +94,9 @@ public static class OutboundPreparation
         if(document.RootElement.ValueKind!=JsonValueKind.Object)throw new RequestFailure("请求体必须是 JSON 对象");
         var root=V.From(document.RootElement);
         if(!Normalize(root,settings))return input;
-        using var count=new CountStream(limit);using var writer=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
-        root.Write(writer);writer.Flush();int size=checked((int)count.Length);
-        reserve(size);byte[] result=new byte[size];using var output=new MemoryStream(result,true);
-        writer.Reset(output);root.Write(writer);writer.Flush();writer.Reset(Stream.Null);return result;
+        try{return OpenWire.EncodeDocument(root.Write,limit,reserve);}
+        catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded")
+        {throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");}
     }
     static bool Normalize(V root,SystemPromptOptions settings)
     {
@@ -184,14 +210,5 @@ public static class OutboundPreparation
             changed|=merged>0||deferred.Count>0;i=k;
         }
         return repaired;
-    }
-    sealed class CountStream(int limit):Stream
-    {
-        long count;
-        public override void Write(ReadOnlySpan<byte> b){if(b.Length>limit-count)throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");count+=b.Length;}
-        public override void Write(byte[] b,int o,int n)=>Write(b.AsSpan(o,n));
-        public override long Length=>count;public override bool CanWrite=>true;public override bool CanRead=>false;public override bool CanSeek=>false;
-        public override long Position{get=>count;set=>throw new NotSupportedException();}
-        public override void Flush(){ }public override int Read(byte[] b,int o,int n)=>throw new NotSupportedException();public override long Seek(long o,SeekOrigin s)=>throw new NotSupportedException();public override void SetLength(long n)=>throw new NotSupportedException();
     }
 }

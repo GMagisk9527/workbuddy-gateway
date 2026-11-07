@@ -6,6 +6,7 @@ using TypedMigration;
 using StreamingMigration;
 using System.Runtime.InteropServices;
 using System.Text.Unicode;
+using System.Buffers;
 
 namespace OpenAiProtocols;
 
@@ -21,6 +22,9 @@ public sealed class OpenAiFailure(string code, string message, int status = 400)
 public static class OpenWire
 {
     public const int RequestLimit = 32 << 20;
+    // Keep small writer scratch reusable without retaining multi-megabyte
+    // pessimistic encoder buffers in per-thread shared-pool caches.
+    static readonly ArrayPool<byte> RequestScratch=ArrayPool<byte>.Create(65536,4);
     static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
     public static JsonNode? Copy(JsonNode? node) => node?.DeepClone();
     public static string Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : "";
@@ -85,7 +89,10 @@ public static class OpenWire
         if(value.TryGetValue<JsonElement>(out var element)&&element.ValueKind==JsonValueKind.String)
         {
             var raw=JsonMarshal.GetRawUtf8Value(element);
-            if(raw.Length>=256&&CanonicalString(raw[1..^1]))return true;
+            // Type validation needs valid Unicode, not canonical wire escaping.
+            // JSON parsing has checked ordinary escapes; Unicode escapes retain
+            // the decoder path so malformed surrogate pairs still fail there.
+            if(raw.Length>=256&&Utf8.IsValid(raw)&&raw.IndexOf("\\u"u8)<0)return true;
         }
         return value.TryGetValue<string>(out _);
     }
@@ -130,14 +137,44 @@ public static class OpenWire
             throw new OpenAiFailure("invalid_request", "model 必须是 1～256 字节的有效 UTF-8 字符串，不能包含空白或控制字符");
         return model;
     }
-    public static byte[] Encode(JsonNode? node, long limit,IRetainedOutputBudget? budget=null,bool optimizeLarge=false)
+    public static byte[] Encode(JsonNode? node, long limit,IRetainedOutputBudget? budget=null,bool optimizeLarge=false,Action<int>? reserve=null)
     {
         Dictionary<JsonValue,JsonElement>? rawStrings=null;
         int capacity=optimizeLarge&&budget is null&&TryEncodedSize(node,limit,out int size,out rawStrings)?size:0;
+        if(reserve is not null)
+        {
+            if(capacity==0)
+            {
+                using var count=new CountingBufferWriter(limit);
+                using var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
+                WriteNode(counter,node);counter.Flush();capacity=checked((int)count.Written);
+            }
+            reserve(capacity);
+        }
+        if(capacity>0&&budget is null)
+        {
+            using var output=new ExactBufferWriter(capacity);
+            using(var direct=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))
+            {WriteNode(direct,node,rawStrings);}
+            return output.Finish();
+        }
         using var stream = new BudgetStream(limit,budget,capacity);
         using (var writer = new Utf8JsonWriter(stream, new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 }))
         { WriteNode(writer,node,capacity>0?rawStrings:null); }
         return stream.ToArray();
+    }
+    public static byte[] EncodeDocument(Action<Utf8JsonWriter> write,int limit,Action<int> reserve)
+    {
+        int size;
+        using(var count=new CountingBufferWriter(limit))
+        {
+            using(var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(counter);
+            size=checked((int)count.Written);
+        }
+        reserve(size);
+        using var output=new ExactBufferWriter(size);
+        using(var writer=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(writer);
+        return output.Finish();
     }
     // Only take this path for large, already canonical UTF-8 request values.
     // It avoids MemoryStream growth and its final full-body copy. Streaming
@@ -213,6 +250,105 @@ public static class OpenWire
             raw=raw[(i+2)..];
         }
         return true;
+    }
+    // Encode only a bounded prefix of an already validated request tree. A
+    // noncanonical string falls back to the complete encoder; no partial result
+    // may be used when false is returned. Large canonical strings stay UTF-8.
+    public static bool TryEncodePrefix(JsonNode? node,Span<byte> destination,out int written)
+    {
+        var writer=new PrefixWriter(destination);
+        bool result=writer.Walk(node,0);written=writer.Written;return result;
+    }
+    ref struct PrefixWriter(Span<byte> destination)
+    {
+        readonly Span<byte> bytes=destination;
+        public int Written{get;private set;}
+        bool Full=>Written==bytes.Length;
+        void Put(ReadOnlySpan<byte> value)
+        {int take=Math.Min(value.Length,bytes.Length-Written);value[..take].CopyTo(bytes[Written..]);Written+=take;}
+        void One(byte value){if(!Full)bytes[Written++]=value;}
+        bool Name(string name)
+        {
+            if(name.Length>4096)return false;
+            One((byte)'"');Put(JsonEncodedText.Encode(name,JavaScriptEncoder.UnsafeRelaxedJsonEscaping).EncodedUtf8Bytes);One((byte)'"');return true;
+        }
+        public bool Walk(JsonNode? node,int depth)
+        {
+            if(Full)return true;
+            if(depth>256)return false;
+            switch(node)
+            {
+                case null:Put("null"u8);return true;
+                case JsonObject obj:
+                    One((byte)'{');bool first=true;
+                    foreach(var p in obj)
+                    {
+                        if(Full)return true;
+                        if(!first)One((byte)',');first=false;if(Full)return true;
+                        if(!Name(p.Key))return false;One((byte)':');if(!Walk(p.Value,depth+1))return false;
+                    }
+                    One((byte)'}');return true;
+                case JsonArray array:
+                    One((byte)'[');for(int i=0;i<array.Count&&!Full;i++){if(i>0)One((byte)',');if(!Walk(array[i],depth+1))return false;}One((byte)']');return true;
+                case JsonValue value when value.TryGetValue<JsonElement>(out var element):
+                    var raw=JsonMarshal.GetRawUtf8Value(element);
+                    if(element.ValueKind==JsonValueKind.String)
+                    {
+                        // Inspect beyond the cut so a split escape cannot look
+                        // canonical, and finish at most one partial UTF-8 rune.
+                        int count=Math.Min(raw.Length-2,bytes.Length-Written+8);
+                        for(int extra=0;extra<3&&count<raw.Length-2&&(raw[count+1]&0xc0)==0x80;extra++)count++;
+                        if(!CanonicalString(raw.Slice(1,count)))return false;
+                    }
+                    Put(raw);return true;
+                case JsonValue value:
+                    if(value.TryGetValue<string>(out var text)&&text.Length>4096)return false;
+                    Put(Encode(value,RequestLimit));return true;
+                default:return false;
+            }
+        }
+    }
+    sealed class CountingBufferWriter(long limit):IBufferWriter<byte>,IDisposable
+    {
+        byte[]? scratch;internal long Written{get;private set;}
+        public Memory<byte> GetMemory(int sizeHint=0)
+        {
+            sizeHint=Math.Max(sizeHint,256);
+            if(scratch is null||scratch.Length<sizeHint)
+            {if(scratch is not null)RequestScratch.Return(scratch,clearArray:true);scratch=RequestScratch.Rent(sizeHint);}
+            return scratch;
+        }
+        public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
+        public void Advance(int count)
+        {
+            if(count<0||scratch is null||count>scratch.Length)throw new ArgumentOutOfRangeException(nameof(count));
+            if(count>limit-Written)throw new OpenAiFailure("output_budget_exceeded","输出超过大小限制",502);Written+=count;
+        }
+        public void Dispose(){if(scratch is not null){RequestScratch.Return(scratch,clearArray:true);scratch=null;}}
+    }
+    // Utf8JsonWriter's Stream constructor buffers the complete document itself.
+    // An IBufferWriter lets it write directly into the reserved result array.
+    // Pessimistic size hints near the end use a small pooled overflow buffer;
+    // only the bytes actually written are copied back into the result.
+    sealed class ExactBufferWriter(int size):IBufferWriter<byte>,IDisposable
+    {
+        readonly byte[] bytes=new byte[size];int written;byte[]? scratch;bool usingScratch;
+        public Memory<byte> GetMemory(int sizeHint=0)
+        {
+            sizeHint=Math.Max(1,sizeHint);
+            if(sizeHint<=bytes.Length-written){usingScratch=false;return bytes.AsMemory(written);}
+            if(scratch is null||scratch.Length<sizeHint)
+            {if(scratch is not null)RequestScratch.Return(scratch,clearArray:true);scratch=RequestScratch.Rent(sizeHint);}
+            usingScratch=true;return scratch;
+        }
+        public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
+        public void Advance(int count)
+        {
+            if(count<0||count>bytes.Length-written)throw new InvalidOperationException("JSON size mismatch");
+            if(usingScratch)scratch!.AsSpan(0,count).CopyTo(bytes.AsSpan(written));written+=count;
+        }
+        internal byte[] Finish(){if(written!=bytes.Length)throw new InvalidOperationException("JSON size mismatch");return bytes;}
+        public void Dispose(){if(scratch is not null){RequestScratch.Return(scratch,clearArray:true);scratch=null;}}
     }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget,int capacity=0) : Stream
     {

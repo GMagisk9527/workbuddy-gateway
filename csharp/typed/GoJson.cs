@@ -9,6 +9,7 @@ namespace TypedMigration;
 static class GoJson
 {
     static readonly JsonSerializerOptions ScalarJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    internal static IEnumerable<KeyValuePair<string,JsonNode?>> Ordered(JsonObject value)=>value.OrderBy(p=>p.Key,Keys);
     static readonly SearchValues<char> Escapes = SearchValues.Create(new string(Enumerable.Range(0,32).Select(i=>(char)i).ToArray()) + "\"\\<>&\u2028\u2029");
     static readonly SearchValues<byte> RawEscapes=SearchValues.Create(new byte[]{(byte)'<',(byte)'>',(byte)'&',0xe2});
     static readonly SearchValues<byte> HtmlEscapes=SearchValues.Create(new byte[]{(byte)'<',(byte)'>',(byte)'&'});
