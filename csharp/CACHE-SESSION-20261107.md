@@ -20,6 +20,12 @@ pi-ai `1.3.0` also reads Chat cache usage from standard nested `prompt_tokens_de
 
 Package integrity values and inspected source hashes are retained in [the provenance record](benchmarks/dsh-0.2.2-rc.1-session-provenance.json). These source checks do not substitute for a real DSH run.
 
+## Active reverse-proxy prerequisite
+
+A read-only `nginx -T` inspection found the active API virtual hosts include the C# proxy snippet, but define neither `underscores_in_headers on` nor `ignore_invalid_headers off`. Nginx defaults to rejecting headers with underscores and ignoring invalid headers ([core documentation](https://nginx.org/en/docs/http/ngx_http_core_module.html#underscores_in_headers)). Thus switching DSH to Responses alone does not complete identity propagation through the current ingress: its `session_id` field also needs to survive Nginx.
+
+A candidate adding only `underscores_in_headers on;` to the existing gateway-only shared server snippet passed `nginx -t` in a private mount namespace. The active snippet hash was verified unchanged afterward; production was not reloaded. This is a production configuration adjustment to apply with the authorized rollout, scoped to the API virtual hosts, not a gateway JSON setting. CDN preservation of the header and an actual DSH conversation still need end-to-end confirmation. No fixed session ID, official-client identity, alternate backend request or paid model call is needed to correct this ingress behavior.
+
 ## Confirmed migration defects and fix
 
 Go's `conversation.go` prepares `X-Conversation-ID`, `X-Conversation-Request-ID` and `X-Conversation-Message-ID` before protocol conversion and retains them through internal retries. The C# direct upstream path previously applied account authentication and trace headers but did not attach these conversation fields. Its local account affinity used a client-session digest independently. Local account affinity alone does not transmit session identity to the upstream.
@@ -40,6 +46,7 @@ Separately, `SessionAffinity.CachedTokens` previously recognized only nested det
 - 367 new offline checks cover real gateway HTTP paths across all three protocols, both CN/INTL endpoint selections, streaming/aggregate responses and affinity on/off. They verify session continuity after synthetic compaction, user-code preservation, three-protocol tool-call association/order, caller/agent isolation, independent anonymous requests, exact upstream call counts and zero-credit ledger settlement. No real upstream is contacted.
 - The existing affinity HTTP cases additionally verify stable upstream conversations, fresh independent turn/message IDs, caller isolation and unchanged IDs during account fallback. The strengthened suite passes 822 checks.
 - A definitely-unsent connection-refusal retry test verifies that the cloned second upstream request retains all three identifiers. Native gateway smoke tests require valid correlation UUIDs on model requests.
+- All 552 protocol output/error fingerprints remain identical after rebuilding against the final assemblies. The final code revision `3016cb5` passed all five standard checks, including Linux full-gateway Native AOT, native components, JIT/foundation/frontend regressions, Go vet/test/race and TCP faults.
 - Invalid Unicode, oversized/control-character identity values, duplicate headers, body/metadata sources, explicit turn/message replay and conflicting cache-usage aliases have targeted coverage.
 
 No new real `hy4free` requests or DSH-client A/B experiment were performed for this change. A real cache-rate improvement remains unverified. The earlier authorized free `hy3` tests concern the previous performance revision and do not establish HY4 cache behavior. Production has not been deployed or reconfigured by this fix; historical counters and ledger data were not rewritten.
