@@ -125,6 +125,7 @@ def fixture(root, mode):
         ]}})
         console = root / "keys" / "console"
         console.mkdir(parents=True)
+        (console.parent / ".csharp-preview").write_text("C# local key preview v1\n")
         (console / ".csharp-console").write_text("console-v1")
         write_json(console / "config.json", {"admission": {"maxActive": 8, "maxPreparing": 2}})
 
@@ -192,6 +193,9 @@ def measure(mode, binary, case, server, env, directory, repeats, count):
                     "startupMs": startup, "idleRss": idle_rss, "peakRss": max(peak["rss"], after["hwm"]),
                     "minAvailable": peak["available"], "elapsed": elapsed,
                     "cpuSeconds": after["cpu_s"] - before["cpu_s"], "answers": answers}
+        except Exception:
+            print((directory / "gateway.log").read_text(errors="replace")[-5000:], flush=True)
+            raise
         finally:
             stop.set()
             watcher.join(timeout=1)
