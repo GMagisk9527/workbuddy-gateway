@@ -31,9 +31,26 @@ public static class OpenWire
     internal sealed class RequestDocument(JsonDocument document,JsonObject root,ReadOnlyMemory<byte> raw,bool hasDuplicates):IDisposable
     {
         internal JsonObject Root{get;}=root;
+        internal JsonElement Original=>document.RootElement;
         internal ReadOnlyMemory<byte> Raw{get;}=raw;
         internal bool HasDuplicates{get;}=hasDuplicates;
+        internal bool HasCanonicalStrings()=>CanonicalElements(document.RootElement);
         public void Dispose()=>document.Dispose();
+    }
+    static bool CanonicalElements(JsonElement element)
+    {
+        switch(element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach(var p in element.EnumerateObject())
+                    if(!CanonicalString(JsonMarshal.GetRawUtf8PropertyName(p))||!CanonicalElements(p.Value))return false;
+                return true;
+            case JsonValueKind.Array:
+                foreach(var item in element.EnumerateArray())if(!CanonicalElements(item))return false;
+                return true;
+            case JsonValueKind.String:return CanonicalString(JsonMarshal.GetRawUtf8Value(element)[1..^1]);
+            default:return true;
+        }
     }
     // The request adapters consume this tree synchronously. Only encoded bytes
     // and explicitly cloned response metadata may leave this scope.
@@ -53,6 +70,7 @@ public static class OpenWire
     }
     internal static bool IsMinified(ReadOnlySpan<byte> bytes)
     {
+        if(bytes.IsEmpty||bytes[0]!=(byte)'{')return false;
         bool quoted=false,escaped=false;
         foreach(byte b in bytes)
         {

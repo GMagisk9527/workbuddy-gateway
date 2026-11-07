@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using AccountScheduling;
 using KeySecurity;
+using System.Runtime.InteropServices;
 
 namespace HttpMigration;
 
@@ -118,6 +119,27 @@ public sealed class SessionAffinity
             foreach(string name in new[]{"conversation_id","conversationId","session_id","sessionId"})
                 if(source.TryGetValue(name,out var value))return Digest("session",value);
         return null;
+    }
+    internal static string? SessionDigest(IHeaderDictionary headers,JsonElement original)
+    {
+        string? fromHeaders=SessionDigest(headers,"{}"u8);if(fromHeaders is not null)return fromHeaders;
+        var top=new Dictionary<string,string>();var metadata=new Dictionary<string,string>();
+        foreach(var property in original.EnumerateObject())
+        {
+            if(property.Name=="metadata"&&property.Value.ValueKind==JsonValueKind.Object)
+            {metadata.Clear();foreach(var field in property.Value.EnumerateObject())Seed(field.Name,field.Value,metadata);}
+            else Seed(property.Name,property.Value,top);
+        }
+        foreach(var source in new[]{top,metadata})
+            foreach(string name in new[]{"conversation_id","conversationId","session_id","sessionId"})
+                if(source.TryGetValue(name,out var value))return Digest("session",value);
+        return null;
+        static void Seed(string name,JsonElement field,Dictionary<string,string> destination)
+        {
+            if(name is not ("conversation_id" or "conversationId" or "session_id" or "sessionId"))return;
+            destination.Remove(name);
+            if(field.ValueKind==JsonValueKind.String&&JsonMarshal.GetRawUtf8Value(field).Length<=3074&&ValidSeed(field.GetString()) is{} value)destination[name]=value;
+        }
     }
     static void ReadSeed(ref Utf8JsonReader reader,string name,Dictionary<string,string> result)
     {

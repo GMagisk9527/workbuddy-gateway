@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Runtime.InteropServices;
 using OpenAiProtocols;
 
 namespace HttpMigration;
@@ -40,9 +41,10 @@ internal static class OutboundFastPathTests
         root["messages"]!.AsArray().Add(new JsonObject{["role"]="tool",["tool_call_id"]="b",["content"]="second"});Verify(root,true);
         root["messages"]![2]!["tool_call_id"]="b";root["messages"]![3]!["tool_call_id"]="a";Verify(root,true);
         byte[] input=JsonSerializer.SerializeToUtf8Bytes(Base());
-        var chat=ChatRequestAdapter.Prepare(input,r=>OutboundPreparation.IsCompatible(r,settings));
+        var chat=ChatRequestAdapter.Prepare(input,r=>OutboundPreparation.IsCompatible(r,settings),consumeInput:true);
         if(!chat.OutboundCompatible)throw new Exception("Chat compatibility proof was not retained");checks++;
         if(!chat.Body.AsSpan().SequenceEqual(input))throw new Exception("Minified unchanged Chat request was re-encoded");
+        if(!MemoryMarshal.TryGetArray<byte>(chat.Body.AsMemory(),out var shared)||!ReferenceEquals(shared.Array,input))throw new Exception("Chat request copied the input body despite retaining an exact full-array view");checks++;
         var spacedInput=Encoding.UTF8.GetBytes("{ \"model\": \"m\", \"stream\": true, \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}] }");
         var spaced=ChatRequestAdapter.Prepare(spacedInput);
         if(spaced.Body.AsSpan().SequenceEqual(spacedInput))throw new Exception("Whitespace Chat request took raw bypass");checks++;

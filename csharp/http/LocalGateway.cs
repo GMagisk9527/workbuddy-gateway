@@ -210,18 +210,19 @@ public static class LocalGateway
             byte[] reasoningKey = derivedReasoningKey ?? options.ReasoningKey;
             var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
             Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>OutboundPreparation.IsCompatible(root,currentPrompts):null;
+            string? sessionDigest=null;bool usesSession=affinity.UsesSession;
+            Action<JsonElement>? inspect=usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
-                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility),
-                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility),
+                ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility,consumeInput:true,inspectInput:inspect),
+                ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect),
                 _ => null
             };
-            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null) :
+            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null) :
                 new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body){OutboundCompatible=openAi.OutboundCompatible};
             modelName=prepared.Model;
             trace?.Model(prepared.Model);
-            memory.Reserve(prepared.UpstreamBody.Length);
-            string? sessionDigest=affinity.UsesSession?SessionAffinity.SessionDigest(c.Request.Headers,input):null;
+            if(!ReferenceEquals(input,prepared.UpstreamBody))memory.Reserve(prepared.UpstreamBody.Length);
             input=[];
             // Streaming adapters need tool/response metadata, not the old request body.
             if(openAi is not null)openAi=openAi with{Body=[]};

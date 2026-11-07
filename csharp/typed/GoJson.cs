@@ -10,7 +10,8 @@ static class GoJson
 {
     static readonly JsonSerializerOptions ScalarJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     static readonly SearchValues<char> Escapes = SearchValues.Create(new string(Enumerable.Range(0,32).Select(i=>(char)i).ToArray()) + "\"\\<>&\u2028\u2029");
-    static readonly SearchValues<byte> RawEscapes=SearchValues.Create(new byte[]{(byte)'\\',(byte)'<',(byte)'>',(byte)'&',0xe2});
+    static readonly SearchValues<byte> RawEscapes=SearchValues.Create(new byte[]{(byte)'<',(byte)'>',(byte)'&',0xe2});
+    static readonly SearchValues<byte> HtmlEscapes=SearchValues.Create(new byte[]{(byte)'<',(byte)'>',(byte)'&'});
     const string Hex = "0123456789abcdef";
     // Common tool-result strings can remain UTF-8 throughout mapping. Unusual
     // escape spellings fall back to the existing decoder/canonicalizer.
@@ -25,22 +26,19 @@ static class GoJson
         if(element.ValueKind!=JsonValueKind.String)return false;
         var token=JsonMarshal.GetRawUtf8Value(element);
         if(token.Length<4096||!Utf8.IsValid(token))return false;
-        int extra=0;var rest=token[1..^1];
+        var content=token[1..^1];var rest=content;
         while(true)
         {
-            int i=rest.IndexOfAny(RawEscapes);if(i<0)break;
-            byte b=rest[i];int consumed=1;
-            if(b==(byte)'\\')
-            {
-                if(i+1>=rest.Length||rest[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
-                consumed=2;
-            }
-            else if(b==0xe2)
-            {
-                if(i+2<rest.Length&&rest[i+1]==0x80&&rest[i+2] is 0xa8 or 0xa9){extra=checked(extra+3);consumed=3;}
-            }
-            else extra=checked(extra+5);
-            rest=rest[(i+consumed)..];
+            int i=rest.IndexOf((byte)'\\');if(i<0)break;
+            if(i+1>=rest.Length||rest[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
+            rest=rest[(i+2)..];
+        }
+        int extra=checked(5*content.CountAny(HtmlEscapes));rest=content;
+        while(true)
+        {
+            int i=rest.IndexOf((byte)0xe2);if(i<0)break;
+            if(i+2<rest.Length&&rest[i+1]==0x80&&rest[i+2] is 0xa8 or 0xa9)extra=checked(extra+3);
+            rest=rest[(i+1)..];
         }
         raw=token;size=checked(token.Length+extra);return true;
     }

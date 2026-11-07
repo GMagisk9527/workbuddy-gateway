@@ -39,7 +39,7 @@ internal static class AffinityTests
     }
     internal static async Task Run(string scratch)
     {
-        checks=0;var settings=new AffinityOptions(true);var affinity=new SessionAffinity(settings);
+        checks=0;ParsedSessionChecks();var settings=new AffinityOptions(true);var affinity=new SessionAffinity(settings);
         byte[] body=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"tools\":[]}");
         string? Key(string caller="a",string model="m",string? session=null,byte[]? input=null)=>affinity.Key(caller,model,session,input??body);
         var headers=new HeaderDictionary{{"session_id","dsh-conversation"}};
@@ -89,6 +89,30 @@ internal static class AffinityTests
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})
             await HttpChecks(Path.Combine(scratch,path.Split('/').Last()),path);
         Console.WriteLine(JsonSerializer.Serialize(new{affinityChecks=checks,realModelCalls=0,productionChanged=false}));
+    }
+    static void ParsedSessionChecks()
+    {
+        string[] names=["conversation_id","conversationId","session_id","sessionId"];
+        var random=new Random(11128);
+        for(int i=0;i<300;i++)
+        {
+            var properties=new List<string>();
+            for(int n=0,count=random.Next(0,10);n<count;n++)
+            {
+                string name=names[random.Next(names.Length)];
+                string value=random.Next(4) switch{0=>"null",1=>"123",2=>JsonSerializer.Serialize(" "+new string('x',600)+" "),_=>JsonSerializer.Serialize(" session-"+random.Next(5)+" ")};
+                properties.Add(JsonSerializer.Serialize(name)+":"+value);
+                if(random.Next(3)==0)properties.Add("\"metadata\":{"+JsonSerializer.Serialize(names[random.Next(4)])+":"+value+"}");
+                if(random.Next(9)==0)properties.Add("\"metadata\":null");
+            }
+            properties.Add("\"messages\":[{\"role\":\"user\",\"content\":\""+new string('x',8192)+"\"}]");
+            byte[] bytes=Encoding.UTF8.GetBytes("{"+string.Join(',',properties)+"}");
+            using var document=JsonDocument.Parse(bytes);
+            var headers=new HeaderDictionary();
+            if(i%3==0)headers["X-Conversation-ID"]="header-session";
+            if(i%7==0){headers["x-claude-code-session-id"]="claude";headers["x-claude-code-agent-id"]="child";}
+            Check(SessionAffinity.SessionDigest(headers,bytes)==SessionAffinity.SessionDigest(headers,document.RootElement),"Parsed session extraction preserves priority, duplicates and bounded seeds");
+        }
     }
     static async Task SchedulingChecks(AccountId a,AccountId b)
     {

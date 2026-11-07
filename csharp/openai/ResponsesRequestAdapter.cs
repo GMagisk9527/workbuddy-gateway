@@ -10,9 +10,10 @@ namespace OpenAiProtocols;
 public static class ResponsesRequestAdapter
 {
     public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey)=>Prepare(bytes,reasoningKey,null);
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey,Func<JsonObject,bool>? compatibility,Action<JsonElement>? inspectInput=null)
     {
         using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
+        inspectInput?.Invoke(document.Original);
         bool encrypted = Items(root["include"]).Any(x => Text(x) == "reasoning.encrypted_content");
         foreach (var item in Items(root["input"]).OfType<JsonObject>())
         {

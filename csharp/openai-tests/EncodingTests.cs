@@ -45,6 +45,15 @@ internal static class EncodingTests
         using(var owned=JsonDocument.Parse(chatRequest.Body))
             if(owned.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=new string('y',8192))throw new Exception("Encoded chat request borrowed input memory");
         checks++;
+        foreach(string escape in new[]{"\\/","\\u0041","\\u000b","\\u2028"})
+        {
+            byte[] special=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\""+new string('z',4096)+escape+"\"}]}");
+            var original=OpenWire.Parse(special);original["model"]="m";original["stream"]=true;
+            var normalized=OpenWire.Encode(original,1<<20);
+            var converted=ChatRequestAdapter.Prepare(special);
+            if(!normalized.AsSpan().SequenceEqual(converted.Body))throw new Exception("Chat fast path changed canonical string escaping");
+            checks++;
+        }
         return checks;
 
         void Compare(JsonNode? node)

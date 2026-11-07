@@ -19,7 +19,7 @@ public static class MessagesRequestAdapter
     static readonly JsonSerializerOptions EncodingOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
     static readonly GatewayJson NodeJson = new(EncodingOptions);
     static string Type(JsonElement root) => JsonFields.Text(JsonFields.Get(root, "thinking"), "type").Trim().ToLowerInvariant();
-    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null)
+    public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null,Action<JsonElement>? inspectInput=null)
     {
         if (bytes.Length > limit) throw new RequestFailure("请求体超过大小限制", 413, "request_too_large");
         try
@@ -28,6 +28,7 @@ public static class MessagesRequestAdapter
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.Null) throw new RequestFailure("请求体必须是 JSON 对象");
             if (root.ValueKind != JsonValueKind.Object) throw new JsonException();
+            inspectInput?.Invoke(root);
             // Go decodes known generation scalars to float64 before validation.
             foreach (var scalar in new[] { JsonFields.Get(root, "max_tokens"), JsonFields.Get(root, "temperature"), JsonFields.Get(root, "top_p"), JsonFields.Get(root, "top_k"), JsonFields.Get(JsonFields.Get(root, "thinking"), "budget_tokens") })
                 if (scalar.ValueKind == JsonValueKind.Number && (!scalar.TryGetDouble(out double number) || !double.IsFinite(number))) throw new JsonException();
