@@ -14,10 +14,10 @@ out=pathlib.Path('out/verification');d=json.loads((out/'aot-reference.json').rea
 PY
 
 if [[ "${1:-}" == "--reference-only" ]]; then exit 0; fi
-for test in identity calendar scheduled-tasks body-lifetime console runtime-cache model-runtime background agent-tools count-tokens affinity account-management accounts standalone failover resource catalog live-catalog catalog-cache outbound self-test allocation operations-parity; do
+for test in identity conversation calendar scheduled-tasks body-lifetime console runtime-cache model-runtime background agent-tools count-tokens affinity account-management accounts standalone failover resource catalog live-catalog catalog-cache outbound self-test allocation operations-parity; do
   args=("--$test-check")
   case "$test" in accounts) args=(--accounts-self-test);; self-test) args=(--self-test);; esac
-  case "$test" in calendar|body-lifetime|console|runtime-cache|model-runtime|background|agent-tools|count-tokens|affinity|account-management|accounts|standalone|failover|live-catalog|catalog-cache|operations-parity) args+=("$scratch/$test");; esac
+  case "$test" in conversation|calendar|body-lifetime|console|runtime-cache|model-runtime|background|agent-tools|count-tokens|affinity|account-management|accounts|standalone|failover|live-catalog|catalog-cache|operations-parity) args+=("$scratch/$test");; esac
   echo "Checking $test"
   timeout -s TERM -k 10 180 dotnet "$dll" "${args[@]}" > "out/verification/$test.json"
 done

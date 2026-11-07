@@ -28,10 +28,15 @@ internal static class AffinityTests
     sealed class Fake:HttpMessageHandler
     {
         internal readonly List<string> Accounts=[];
+        internal readonly List<(string Conversation,string Turn,string Message)> Conversations=[];
         internal string? Reject;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
         {
             string id=request.Headers.Authorization!.Parameter!;Accounts.Add(id);
+            string Header(string name)=>request.Headers.TryGetValues(name,out var values)?values.Single():"";
+            var tuple=(Header("X-Conversation-ID"),Header("X-Conversation-Request-ID"),Header("X-Conversation-Message-ID"));
+            Conversations.Add(tuple);
+            Check(Guid.TryParse(tuple.Item1,out var conversation)&&conversation!=Guid.Empty&&Guid.TryParse(tuple.Item2,out var turn)&&turn!=Guid.Empty&&Guid.TryParse(tuple.Item3,out var message)&&message!=Guid.Empty,"Direct upstream receives normal session/turn/message identifiers");
             Check(!request.Headers.Contains("thread-id")&&!request.Headers.Contains("session_id")&&!request.Headers.Contains("X-Client-ID"),"No raw session/official identity forwarded");
             if(id==Reject)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"code\":11140,\"msg\":\"synthetic\"}",Encoding.UTF8,"application/json")});
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":1}}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")});
@@ -85,6 +90,7 @@ internal static class AffinityTests
         evidenceCache.ObserveCache("evidence",a,"identity",40000,true);evidenceCache.ObserveCache("evidence",a,"identity",40000,true);clock.Advance(300);
         Check(evidenceCache.CacheGrace("evidence",a,"identity",256<<10,extra) is null,"Cache evidence expires after five minutes");
         Check(SessionAffinity.CachedTokens("{\"prompt_tokens_details\":{\"cached_tokens\":32768}}") ==32768&&SessionAffinity.CachedTokens("{}") is null,"Only explicit upstream cache usage counts");
+        Check(SessionAffinity.CachedTokens("{\"prompt_cache_hit_tokens\":32768}")==32768&&SessionAffinity.CachedTokens("{\"cached_tokens\":32768}")==32768,"Cache grace recognizes upstream cache aliases");
         await SchedulingChecks(a,b);
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})
             await HttpChecks(Path.Combine(scratch,path.Split('/').Last()),path);
@@ -190,11 +196,14 @@ internal static class AffinityTests
             req.Content=JsonContent.Create(path=="/v1/responses"?(object)new{model="m",input="question",stream}:new{model="m",messages=new[]{new{role="user",content="question"}},stream});
             using var response=await client.SendAsync(req);var text=await response.Content.ReadAsStringAsync();Check(response.IsSuccessStatusCode&&text.Contains("ok"),"HTTP protocol completes: "+path);
         }
-        await Send(token,"session-one");var chosen=fake.Accounts.Last();await Send(token,"session-one",true);Check(fake.Accounts.Last()==chosen,"HTTP stable session across stream modes");
+        await Send(token,"session-one");var chosen=fake.Accounts.Last();var firstIds=fake.Conversations.Last();await Send(token,"session-one",true);Check(fake.Accounts.Last()==chosen,"HTTP stable session across stream modes");
+        var nextIds=fake.Conversations.Last();Check(firstIds.Conversation==nextIds.Conversation&&firstIds.Turn!=nextIds.Turn&&firstIds.Message!=nextIds.Message,"Stable upstream session with fresh independent turn/message IDs");
         await Send(otherToken,"session-one");Check(fake.Accounts.Last()!=chosen,"HTTP same session different key isolation");
+        Check(fake.Conversations.Last().Conversation!=firstIds.Conversation,"Upstream session identity isolated by authenticated caller");
         await Send(token,"session-one");Check(fake.Accounts.Last()==chosen,"Other caller did not overwrite binding");
         fake.Reject=chosen;int before=fake.Accounts.Count;await Send(token,"session-one");
         Check(fake.Accounts.Count==before+2&&fake.Accounts.Last()!=chosen,"Restricted preference falls back once to eligible account");
+        Check(fake.Conversations[^1]==fake.Conversations[^2],"Internal account fallback preserves logical request identifiers");
         fake.Reject=null;await Send(token,"session-one",true);Check(fake.Accounts.Last()!=chosen,"Successful fallback rebinds session");
         Check(manager.Status.Single(x=>x.Id==(chosen=="account-a"?a:b)).Disabled,"Restricted account remains disabled");
         Check(ledger.Health.PendingAttempts==0&&ledger.GetUsage(issued.Item.Id).Total==5&&ledger.GetUsage(other.Item.Id).Total==1,"Affinity leaves per-attempt billing correct");

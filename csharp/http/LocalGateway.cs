@@ -210,6 +210,7 @@ public static class LocalGateway
             byte[] reasoningKey = derivedReasoningKey ?? options.ReasoningKey;
             var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
             string? sessionDigest=null;bool usesSession=affinity.UsesSession;
+            ConversationHeaders? conversation=null;
             string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;bool preparedReserved=false;
             Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>
             {
@@ -223,14 +224,18 @@ public static class LocalGateway
             Func<System.Text.Json.Nodes.JsonObject,byte[]?>? prepareMessages=options.DirectUpstream?root=>
                 OutboundPreparation.PrepareParsed(root,currentPrompts,size=>{memory.Reserve(size);preparedReserved=true;},options.MaxRequestBytes,
                     (normalized,changed)=>prefixDigest=affinity.PrefixDigest(normalized,!changed,sessionDigest),canonicalInput:true):null;
-            Action<JsonElement>? inspect=usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
+            Action<JsonElement>? inspect=options.DirectUpstream?root=>
+            {
+                conversation=ConversationHeaders.Prepare(c.Request.Headers,root,keyLease?.Identity?.Id??"");
+                if(usesSession)sessionDigest=conversation.SessionDigest;
+            }:usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
                 ClientProtocol.Chat => ChatRequestAdapter.Prepare(input,compatibility,consumeInput:true,inspectInput:inspect,prepareBody:prepareOpenAi),
                 ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect,prepareOpenAi),
                 _ => null
             };
-            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null,compatibility,prepareMessages) :
+            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,inspect,compatibility,prepareMessages) :
                 new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body){OutboundCompatible=openAi.OutboundCompatible};
             modelName=prepared.Model;
             trace?.Model(prepared.Model);
@@ -281,6 +286,7 @@ public static class LocalGateway
             using var message = new HttpRequestMessage(HttpMethod.Post, accountLease?.Account.Upstream ?? options.Upstream);
             if (options.DirectUpstream && (accountLease is null || accountLease.Account.Upstream != SiteEndpoints.Model(accountLease.Account.Site))) throw new RequestFailure("账号出站端点不匹配",503);
             credentialLease?.ApplyTo(message);
+            conversation?.Apply(message);
             if (options.DirectUpstream) message.Headers.UserAgent.ParseAdd("WorkBuddy-Gateway-CSharp/0.1");
             if (options.GoBridge) message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bridgeToken);
             if (options.GoBridge)

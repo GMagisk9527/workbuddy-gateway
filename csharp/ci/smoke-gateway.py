@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 
 ADMIN = "synthetic-native-admin"
@@ -37,6 +38,8 @@ class SyntheticUpstream(http.server.BaseHTTPRequestHandler):
         match self.path:
             case "/v2/chat/completions":
                 assert body["model"] == "test-model" and body["stream"]
+                for header in ("X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"):
+                    assert uuid.UUID(self.headers[header]).int != 0
                 output, content_type = STREAM, "text/event-stream"
             case "/agenttool/v1/search":
                 assert body["query"] == "synthetic query"

@@ -1,5 +1,7 @@
 # Native C# request performance, 2026-11-07
 
+The later [conversation-metadata repair](CACHE-SESSION-20261107.md) is a separate compatibility change. Measurements below refer to the identified `6cb3be1` source/artifacts and have not been repeated for that repair.
+
 The optimized Native AOT gateway is faster than Go in the measured large-request and long-SSE cases. All 15 cases have higher throughput in both CI and the production-machine isolation test. The production-machine small-request TTFT is 1.432 ms higher than Go. **Memory remains above Go; these measurements do not establish universal performance parity.** Production remains on `b28ac2a`; these changes were not merged or deployed.
 
 ## Implementation

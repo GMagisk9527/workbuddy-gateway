@@ -130,8 +130,17 @@ public sealed class SessionAffinity
     {
         if(usage is null)return null;
         try{using var doc=JsonDocument.Parse(usage);var root=doc.RootElement;
-            foreach(string key in new[]{"prompt_tokens_details","input_tokens_details"})if(root.TryGetProperty(key,out var detail)&&detail.ValueKind==JsonValueKind.Object&&detail.TryGetProperty("cached_tokens",out var value)&&value.TryGetInt64(out long n)&&n>=0)return n;
-            return root.TryGetProperty("cache_read_input_tokens",out var cached)&&cached.TryGetInt64(out long count)&&count>=0?count:null;
+            long? cached=null;
+            static long? Token(JsonElement value)
+            {
+                string? text=value.ValueKind==JsonValueKind.String?value.GetString():value.ValueKind==JsonValueKind.Number?value.GetRawText():null;
+                return double.TryParse(text,System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out double n)&&double.IsFinite(n)&&n>=0&&n<long.MaxValue?(long)n:null;
+            }
+            foreach(string key in new[]{"prompt_cache_hit_tokens","cache_read_input_tokens","cached_tokens"})
+                if(root.TryGetProperty(key,out var value)&&Token(value) is{} n){cached=n;if(n>0)return n;}
+            foreach(string key in new[]{"prompt_tokens_details","input_tokens_details"})
+                if(root.TryGetProperty(key,out var detail)&&detail.ValueKind==JsonValueKind.Object&&detail.TryGetProperty("cached_tokens",out var value)&&Token(value) is{} n){cached=n;if(n>0)return n;}
+            return cached;
         }catch(JsonException){return null;}catch(InvalidOperationException){return null;}
     }
     // Conditional invalidation prevents an older failed request from deleting a
@@ -194,14 +203,16 @@ public sealed class SessionAffinity
         {
             if(name is not ("conversation_id" or "conversationId" or "session_id" or "sessionId"))return;
             destination.Remove(name);
-            if(field.ValueKind==JsonValueKind.String&&JsonMarshal.GetRawUtf8Value(field).Length<=3074&&ValidSeed(field.GetString()) is{} value)destination[name]=value;
+            if(field.ValueKind==JsonValueKind.String&&JsonMarshal.GetRawUtf8Value(field).Length<=3074)
+                try{if(ValidSeed(field.GetString()) is{} value)destination[name]=value;}catch(InvalidOperationException){/* Unusable Unicode is not a session seed. */}
         }
     }
     static void ReadSeed(ref Utf8JsonReader reader,string name,Dictionary<string,string> result)
     {
         if(name is not ("conversation_id" or "conversationId" or "session_id" or "sessionId"))return;
         result.Remove(name);
-        if(reader.TokenType==JsonTokenType.String&&reader.ValueSpan.Length<=3072&&ValidSeed(reader.GetString()) is {} value)result[name]=value;
+        if(reader.TokenType==JsonTokenType.String&&reader.ValueSpan.Length<=3072)
+            try{if(ValidSeed(reader.GetString()) is{} value)result[name]=value;}catch(InvalidOperationException){/* Unusable Unicode is not a session seed. */}
     }
     static string? ValidSeed(string? value)
     {
