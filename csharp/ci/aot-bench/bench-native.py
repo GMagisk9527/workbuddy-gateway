@@ -131,7 +131,7 @@ def fixture(root, mode):
         write_json(console / "config.json", {"admission": {"maxActive": 8, "maxPreparing": 2}})
 
 
-def measure(mode, binary, case, server, env, directory, repeats, count, variant="tool"):
+def measure(mode, binary, case, server, env, directory, repeats, count, variant="tool", allow_baseline_memory_pressure=False):
     env = dict(env)
     if mode.startswith("conserve"):
         env["DOTNET_GCConserveMemory"] = mode.removeprefix("conserve")
@@ -207,6 +207,11 @@ def measure(mode, binary, case, server, env, directory, repeats, count, variant=
             with server.guard:
                 actual_calls = server.calls - calls
             failures = [sample for sample in answers if not sample["ok"]]
+            def pressure_rejection(sample):
+                try: return sample["status"]==503 and json.loads(sample.get("error", "")).get("error",{}).get("type")=="memory_pressure"
+                except (ValueError,TypeError): return False
+            reference_failure=(allow_baseline_memory_pressure and mode=="aot" and not guard.is_set() and bool(failures)
+                               and actual_calls==sum(sample["ok"] for sample in answers) and all(pressure_rejection(sample) for sample in failures))
             if actual_calls != count or guard.is_set() or failures:
                 diagnostic={"mode":mode,"case":case,"round":repeats,"expectedUpstreamCalls":count,
                             "actualUpstreamCalls":actual_calls,"memoryGuard":guard.is_set(),
@@ -214,13 +219,13 @@ def measure(mode, binary, case, server, env, directory, repeats, count, variant=
                             "failures":failures[:8]}
                 write_json(directory.parent/("failure-"+directory.name+".json"),diagnostic)
                 print(json.dumps(diagnostic),flush=True)
-            assert actual_calls == count, (mode,case,"unexpected upstream count",actual_calls,count)
-            assert not guard.is_set() and not failures, (mode, case, "failed", failures[:2])
+            assert actual_calls == count or reference_failure, (mode,case,"unexpected upstream count",actual_calls,count)
+            assert not guard.is_set() and (not failures or reference_failure), (mode, case, "failed", failures[:2])
             return {"mode": mode, "protocol": protocol, "targetBytes": size, "wireBytes": len(body),
                     "concurrency": concurrency, "frames": frames, "round": repeats, "requests": count,
                     "startupMs": startup, "idleRss": idle_rss, "peakRss": max(peak["rss"], after["hwm"]),
                     "minAvailable": peak["available"], "elapsed": elapsed,
-                    "cpuSeconds": after["cpu_s"] - before["cpu_s"], "answers": answers}
+                    "cpuSeconds": after["cpu_s"] - before["cpu_s"], "answers": answers,"referenceFailure":reference_failure}
         except Exception:
             print((directory / "gateway.log").read_text(errors="replace")[-5000:], flush=True)
             raise
@@ -241,6 +246,8 @@ def main():
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16, 64))
     parser.add_argument("--memory-tuning", action="store_true")
     parser.add_argument("--verify-conserve-memory", type=int, choices=range(10))
+    parser.add_argument("--allow-baseline-memory-pressure", action="store_true")
+    parser.add_argument("--only-go-candidate", action="store_true")
     parser.add_argument("--case-index", type=int, action="append", choices=range(len(CASES)))
     args = parser.parse_args()
     cases = [CASES[index] for index in args.case_index] if args.case_index else CASES
@@ -250,6 +257,9 @@ def main():
     modes = {"go": args.go.resolve(), "aot": args.aot.resolve()}
     if args.candidate is not None:
         modes["candidate"] = args.candidate.resolve()
+    if args.only_go_candidate:
+        assert args.candidate is not None and not args.memory_tuning
+        modes.pop("aot")
     if args.memory_tuning:
         assert args.candidate is not None
         modes = {"go": args.go.resolve(), "candidate": args.candidate.resolve(),
@@ -265,7 +275,8 @@ def main():
         name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
         for name, path in modes.items()}, "cpuAffinity": sorted(os.sched_getaffinity(0)),
         "rounds": args.rounds, "requestsPerRound": args.requests, "fixture": "loopback HTTPS/HTTP1.1, TCP_NODELAY, fixed SSE",
-        "realModelCalls": 0,"variant":args.variant,"memoryTuning":args.memory_tuning})
+        "realModelCalls": 0,"variant":args.variant,"memoryTuning":args.memory_tuning,
+        "allowBaselineMemoryPressure":args.allow_baseline_memory_pressure})
     if args.memory_tuning:
         configs = {}
         for mode, binary in modes.items():
@@ -293,17 +304,22 @@ def main():
                     for mode in order:
                         directory = args.out / f"{index}-{repetition}-{mode}"
                         directory.mkdir()
-                        result = measure(mode, modes[mode], case, server, env, directory.resolve(), repetition, args.requests,args.variant)
+                        result = measure(mode, modes[mode], case, server, env, directory.resolve(), repetition, args.requests,args.variant,args.allow_baseline_memory_pressure)
                         rows.append(result)
                         output.write(json.dumps(result) + "\n")
                         output.flush()
-                        print(f"{mode} {case}: {len(result['answers'])} complete", flush=True)
+                        print(f"{mode} {case}: {sum(sample['ok'] for sample in result['answers'])}/{len(result['answers'])} complete", flush=True)
     summary = []
     for protocol, size, concurrency, frames in cases:
         row = {"protocol": protocol, "targetKiB": size // 1024, "concurrency": concurrency, "frames": frames}
         for mode in modes:
             selected = [r for r in rows if (r["mode"], r["protocol"], r["targetBytes"], r["concurrency"], r["frames"]) == (mode, protocol, size, concurrency, frames)]
             samples = [sample for r in selected for sample in r["answers"]]
+            if any(r.get("referenceFailure") for r in selected):
+                row[mode]={"status":"reference_memory_pressure","failedRounds":sum(bool(r.get("referenceFailure")) for r in selected),
+                           "failedRequests":sum(not sample["ok"] for sample in samples),"successfulRequests":sum(sample["ok"] for sample in samples),
+                           "peakMiB":round(max(r["peakRss"] for r in selected)/(1<<20),2)}
+                continue
             row[mode] = {"firstMs": helpers.percentile([s["ttft_ms"] for s in samples], .5),
                          "firstP95Ms": helpers.percentile([s["ttft_ms"] for s in samples], .95),
                          "completeMs": helpers.percentile([s["total_ms"] for s in samples], .5),
@@ -313,7 +329,9 @@ def main():
                          "peakMiB": round(max(r["peakRss"] for r in selected) / (1 << 20), 2),
                          "cpuMsPerRequest": round(1000 * sum(r["cpuSeconds"] for r in selected) / len(samples), 2)}
         summary.append(row)
-    write_json(args.out / "summary.json", {"results": summary, "completed": sum(r["requests"] for r in rows)})
+    write_json(args.out / "summary.json", {"results": summary,"completed":sum(sum(sample["ok"] for sample in r["answers"]) for r in rows),
+                                           "planned":sum(r["requests"] for r in rows),
+                                           "strictCompleted":sum(r["requests"] for r in rows if r["mode"] in ("go","candidate"))})
 
 
 if __name__ == "__main__":

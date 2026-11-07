@@ -22,6 +22,9 @@ public sealed class OpenAiFailure(string code, string message, int status = 400)
 public static class OpenWire
 {
     public const int RequestLimit = 32 << 20;
+    // Keep small writer scratch reusable without retaining multi-megabyte
+    // pessimistic encoder buffers in per-thread shared-pool caches.
+    static readonly ArrayPool<byte> RequestScratch=ArrayPool<byte>.Create(65536,4);
     static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
     public static JsonNode? Copy(JsonNode? node) => node?.DeepClone();
     public static string Text(JsonNode? node) => node is JsonValue v && v.TryGetValue<string>(out var s) ? s : "";
@@ -312,7 +315,7 @@ public static class OpenWire
         {
             sizeHint=Math.Max(sizeHint,256);
             if(scratch is null||scratch.Length<sizeHint)
-            {if(scratch is not null)ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=ArrayPool<byte>.Shared.Rent(sizeHint);}
+            {if(scratch is not null)RequestScratch.Return(scratch,clearArray:true);scratch=RequestScratch.Rent(sizeHint);}
             return scratch;
         }
         public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
@@ -321,7 +324,7 @@ public static class OpenWire
             if(count<0||scratch is null||count>scratch.Length)throw new ArgumentOutOfRangeException(nameof(count));
             if(count>limit-Written)throw new OpenAiFailure("output_budget_exceeded","输出超过大小限制",502);Written+=count;
         }
-        public void Dispose(){if(scratch is not null){ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=null;}}
+        public void Dispose(){if(scratch is not null){RequestScratch.Return(scratch,clearArray:true);scratch=null;}}
     }
     // Utf8JsonWriter's Stream constructor buffers the complete document itself.
     // An IBufferWriter lets it write directly into the reserved result array.
@@ -335,7 +338,7 @@ public static class OpenWire
             sizeHint=Math.Max(1,sizeHint);
             if(sizeHint<=bytes.Length-written){usingScratch=false;return bytes.AsMemory(written);}
             if(scratch is null||scratch.Length<sizeHint)
-            {if(scratch is not null)ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=ArrayPool<byte>.Shared.Rent(sizeHint);}
+            {if(scratch is not null)RequestScratch.Return(scratch,clearArray:true);scratch=RequestScratch.Rent(sizeHint);}
             usingScratch=true;return scratch;
         }
         public Span<byte> GetSpan(int sizeHint=0)=>GetMemory(sizeHint).Span;
@@ -345,7 +348,7 @@ public static class OpenWire
             if(usingScratch)scratch!.AsSpan(0,count).CopyTo(bytes.AsSpan(written));written+=count;
         }
         internal byte[] Finish(){if(written!=bytes.Length)throw new InvalidOperationException("JSON size mismatch");return bytes;}
-        public void Dispose(){if(scratch is not null){ArrayPool<byte>.Shared.Return(scratch,clearArray:true);scratch=null;}}
+        public void Dispose(){if(scratch is not null){RequestScratch.Return(scratch,clearArray:true);scratch=null;}}
     }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget,int capacity=0) : Stream
     {
