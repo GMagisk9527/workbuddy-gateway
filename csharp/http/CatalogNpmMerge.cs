@@ -9,7 +9,7 @@ public sealed partial class ModelCatalog
         if(bytes.Length>4<<20)throw new ArgumentException("Npm catalog budget");
         using var doc=JsonDocument.Parse(bytes,new JsonDocumentOptions{MaxDepth=32});
         if(doc.RootElement.ValueKind!=JsonValueKind.Object||!doc.RootElement.TryGetProperty("models",out var models)||models.ValueKind!=JsonValueKind.Array||models.GetArrayLength() is <1 or >500)throw new ArgumentException("Invalid npm catalog");
-        var staged=new ModelCatalog();staged.LoadLive(site,JsonSerializer.SerializeToUtf8Bytes(new{code=0,data=doc.RootElement}));
+        var staged=new ModelCatalog();staged.LoadLive(site,GatewayJson.Encode(new Dictionary<string, object?> { ["code"] = 0, ["data"] = doc.RootElement }));
         var fallback=(site==AccountSite.Cn?staged.state.Cn:staged.state.Intl);foreach(var row in fallback)row.FromLive=false;
         lock(publish)
         {

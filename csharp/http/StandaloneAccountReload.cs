@@ -61,7 +61,7 @@ public sealed partial class StandaloneAccounts
             var entry=current.SingleOrDefault(e=>e.Id.Value==id)??throw new KeyNotFoundException();
             var remaining=current.Where(e=>e.Id!=entry.Id).ToArray();
             string root=Path.GetDirectoryName(manifest)!;
-            var bytes=JsonSerializer.SerializeToUtf8Bytes(new{version=1,accounts=remaining.Select(e=>new{id=e.Id.Value,directory=Path.GetRelativePath(root,e.Directory).Replace('\\','/'),disabled=e.Disabled})});
+            var bytes=EncodeManifest(root, remaining);
             var before=ConsoleSettings.Read(manifest,1<<20);
             await Credentials.ReconcileAsync(Registrations(remaining),()=>
             {

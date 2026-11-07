@@ -74,8 +74,8 @@ public static class ResponsesOutput
     public static JsonObject Message(string id, string status, string text, string refusal, bool includeEmpty = true)
     {
         var parts = new JsonArray();
-        if (text != "" || refusal == "" && includeEmpty) parts.Add(new JsonObject { ["type"] = "output_text", ["text"] = text, ["annotations"] = new JsonArray() });
-        if (refusal != "") parts.Add(new JsonObject { ["type"] = "refusal", ["refusal"] = refusal });
+        if (text != "" || refusal == "" && includeEmpty) parts.Add((JsonNode?)new JsonObject { ["type"] = "output_text", ["text"] = text, ["annotations"] = new JsonArray() });
+        if (refusal != "") parts.Add((JsonNode?)new JsonObject { ["type"] = "refusal", ["refusal"] = refusal });
         return new() { ["id"] = id, ["type"] = "message", ["status"] = status, ["role"] = "assistant", ["content"] = parts };
     }
     public static JsonObject Complete(ChatState state, OpenAiRequest request, byte[] key)
@@ -83,9 +83,9 @@ public static class ResponsesOutput
         state.Validate(); string status = Status(state.FinishReason); long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var response = Envelope(state.Id == "" ? "resp_" + Guid.NewGuid().ToString("N") : "resp_" + state.Id.Replace("chatcmpl-", "", StringComparison.Ordinal), request.Model, state.Created > 0 && state.Created <= now ? state.Created : now, request.Metadata);
         var output = new JsonArray(); var codec = request.EncryptedReasoning ? new ReasoningCodec(key, request.Model, "responses") : null;
-        if (state.Reasoning.Length > 0) output.Add(Reasoning("rs_" + Guid.NewGuid().ToString("N"), status, state.Reasoning.ToString(), codec));
-        if (state.Content.Length > 0 || state.Refusal.Length > 0 || state.Calls.Count == 0) output.Add(Message("msg_" + Guid.NewGuid().ToString("N"), status, state.Content.ToString(), state.Refusal.ToString()));
-        foreach (var tool in state.Calls) { var call = ResponsesTools.Call(tool.Id, tool.Name, tool.Arguments.ToString(), request.Tools); call["status"] = status; output.Add(call); }
+        if (state.Reasoning.Length > 0) output.Add((JsonNode?)Reasoning("rs_" + Guid.NewGuid().ToString("N"), status, state.Reasoning.ToString(), codec));
+        if (state.Content.Length > 0 || state.Refusal.Length > 0 || state.Calls.Count == 0) output.Add((JsonNode?)Message("msg_" + Guid.NewGuid().ToString("N"), status, state.Content.ToString(), state.Refusal.ToString()));
+        foreach (var tool in state.Calls) { var call = ResponsesTools.Call(tool.Id, tool.Name, tool.Arguments.ToString(), request.Tools); call["status"] = status; output.Add((JsonNode?)call); }
         response["status"] = status; response["output"] = output; if (status == "completed") response["completed_at"] = now;
         else response["incomplete_details"] = new JsonObject { ["reason"] = state.FinishReason == "length" ? "max_output_tokens" : "content_filter" };
         if (state.Usage is not null) response["usage"] = Usage(state.Usage); return response;

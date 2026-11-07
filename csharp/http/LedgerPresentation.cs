@@ -19,43 +19,44 @@ internal static class LedgerPresentation
         double? monthly = policy.QuotaMonthly > 0 ? Math.Max(0, policy.QuotaMonthly - u.Monthly) : null;
         string status = !policy.Enabled ? "disabled" : policy.ExpiresAt > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= policy.ExpiresAt ? "expired" :
             !ledger.Health.Healthy ? "unavailable" : remaining <= 0 || daily <= 0 || monthly <= 0 || policy.Limited && u.Unknown >= 10 ? "exhausted" : "active";
-        return new
-        {
-            policy.Name,
-            status,
-            legacy,
-            used = u.Total,
-            u.Lifetime,
-            limit,
-            remaining,
-            dailyUsed = u.Daily,
-            dailyRemaining = daily,
-            monthlyUsed = u.Monthly,
-            monthlyRemaining = monthly,
-            u.Requests,
-            inputTokens = u.Input,
-            outputTokens = u.Output,
-            cachedTokens = u.Cached,
-            unknownSettlements = u.Unknown,
-            zeroCostSettlements = u.ZeroCost,
-            u.LastUsedAt,
-            policy.ExpiresAt,
-            u.DayKey,
-            u.MonthKey,
-            ledger = ledger.Health
-        };
+        return new Dictionary<string, object?>
+{
+    ["name"] = policy.Name,
+    ["status"] = status,
+    ["legacy"] = legacy,
+    ["used"] = u.Total,
+    ["lifetime"] = u.Lifetime,
+    ["limit"] = limit,
+    ["remaining"] = remaining,
+    ["dailyUsed"] = u.Daily,
+    ["dailyRemaining"] = daily,
+    ["monthlyUsed"] = u.Monthly,
+    ["monthlyRemaining"] = monthly,
+    ["requests"] = u.Requests,
+    ["inputTokens"] = u.Input,
+    ["outputTokens"] = u.Output,
+    ["cachedTokens"] = u.Cached,
+    ["unknownSettlements"] = u.Unknown,
+    ["zeroCostSettlements"] = u.ZeroCost,
+    ["lastUsedAt"] = u.LastUsedAt,
+    ["expiresAt"] = policy.ExpiresAt,
+    ["dayKey"] = u.DayKey,
+    ["monthKey"] = u.MonthKey,
+    ["ledger"] = ledger.Health
+};
     }
     internal static object Summary(KeyStore store, CreditLedger ledger)
     {
         var keys=store.List();var active = keys.Select(k => k.Id).ToHashSet(StringComparer.Ordinal);if(store.HasLegacy)active.Add("legacy");var all = ledger.AllUsage();
-        return new
-        {
-            total=keys.Length+(store.HasLegacy?1:0),enabled=keys.Count(k=>k.Enabled)+(store.HasLegacy?1:0),
-            allTimeCredits = all.Values.Sum(u => u.Lifetime),
-            todayCredits = all.Values.Sum(u => u.SpentToday),
-            archivedCredits = all.Where(p => !active.Contains(p.Key)).Sum(p => p.Value.Lifetime),
-            ledger = ledger.Health
-        };
+        return new Dictionary<string, object?>
+{
+    ["total"] = keys.Length + (store.HasLegacy ? 1 : 0),
+    ["enabled"] = keys.Count(k => k.Enabled) + (store.HasLegacy ? 1 : 0),
+    ["allTimeCredits"] = all.Values.Sum(u => u.Lifetime),
+    ["todayCredits"] = all.Values.Sum(u => u.SpentToday),
+    ["archivedCredits"] = all.Where(p => !active.Contains(p.Key)).Sum(p => p.Value.Lifetime),
+    ["ledger"] = ledger.Health
+};
     }
     internal static async Task HandleUsage(HttpContext c, LocalKeySecurity security)
     {
@@ -65,9 +66,9 @@ internal static class LedgerPresentation
             var id = security.Store.Authenticate(KeyRules.Token(c.Request.Headers.Authorization.ToString(), c.Request.Headers["x-api-key"].ToString()));
             if (id is null) throw new KeyFailure(401, "invalid_api_key", "未提供有效 API 密钥");
             var policy = id.Legacy ? new KeyView("legacy", id.Name, id.Prefix, true, 0, 0, [], 0, 0, 0, 0, "") : security.Store.GetView(id.Id);
-            await c.Response.WriteAsJsonAsync(Usage(policy, security.Ledger!, id.Legacy), c.RequestAborted);
+            await GatewayJson.WriteAsync(c, Usage(policy, security.Ledger!, id.Legacy));
         }
         catch (KeyFailure e)
-        { c.Response.StatusCode = e.Status; await c.Response.WriteAsJsonAsync(new { error = new { type = e.Code, message = e.Message } }, c.RequestAborted); }
+        { c.Response.StatusCode = e.Status; await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["error"] = new Dictionary<string, object?> { ["type"] = e.Code, ["message"] = e.Message } }); }
     }
 }

@@ -97,7 +97,7 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
                 var fields = new JsonObject { ["item_id"] = messageId, ["output_index"] = message, ["content_index"] = i, [refusal ? "refusal" : "text"] = text };
                 events.Add(Event(refusal ? "response.refusal.done" : "response.output_text.done", fields));
                 var part = refusal ? new JsonObject { ["type"] = "refusal", ["refusal"] = text } : new JsonObject { ["type"] = "output_text", ["text"] = text, ["annotations"] = new JsonArray() };
-                events.Add(Event("response.content_part.done", new() { ["item_id"] = messageId, ["output_index"] = message, ["content_index"] = i, ["part"] = part.DeepClone() })); content.Add(part);
+                events.Add(Event("response.content_part.done", new() { ["item_id"] = messageId, ["output_index"] = message, ["content_index"] = i, ["part"] = part.DeepClone() })); content.Add((JsonNode?)part);
             }
             Done(message, new() { ["id"] = messageId, ["type"] = "message", ["status"] = status, ["role"] = "assistant", ["content"] = content });
         }

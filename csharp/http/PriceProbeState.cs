@@ -8,7 +8,7 @@ internal static class PriceProbeState
     internal static List<ModelPriceProbeWorker.Probe> Read(string path,DateTimeOffset now)
     {
         if(!File.Exists(path))return [];
-        var probes=JsonSerializer.Deserialize<List<ModelPriceProbeWorker.Probe>>(ConsoleSettings.Read(path,1<<20))??throw new InvalidDataException();
+        var probes=JsonSerializer.Deserialize(ConsoleSettings.Read(path,1<<20), StorageJson.Default.ListProbe)??throw new InvalidDataException();
         if(probes.Count>1000||probes.Any(p=>p is null||p.Model is null||p.Site is not("cn" or "intl")||p.Model.Length is 0 or >256||p.Model!=KeySecurity.KeyRules.Model(p.Model)||p.Model.Any(char.IsControl)||p.LastAt<0||p.LastAt>now.AddMinutes(5).ToUnixTimeSeconds()||!Enum.IsDefined(p.Cost))||probes.Select(p=>(p.Site,p.Model)).Distinct().Count()!=probes.Count)throw new InvalidDataException();
         return probes;
     }

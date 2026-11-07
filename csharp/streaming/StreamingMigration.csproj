@@ -7,6 +7,9 @@
     <GenerateDependencyFile Condition="'$(GatewayLibraryBuild)' == 'true'">false</GenerateDependencyFile>
     <GenerateRuntimeConfigurationFiles Condition="'$(GatewayLibraryBuild)' == 'true'">false</GenerateRuntimeConfigurationFiles>
   </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayLibraryBuild)' == 'true'">
+    <Compile Remove="Program.cs;SelfTests.cs" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../typed/TypedMigration.csproj" />
     <Compile Include="../typed/GoJson.cs" Link="GoJson.cs" />

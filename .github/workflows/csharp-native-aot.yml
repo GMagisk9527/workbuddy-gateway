@@ -78,11 +78,16 @@ jobs:
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
             bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
             export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
-            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:NuGetAudit=false -o out/full-gateway/native
+            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o out/full-gateway/native
           ' 2>&1 | tee csharp/out/full-gateway/publish.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: full-gateway-aot-diagnostics
           path: csharp/out/full-gateway/publish.log
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-musl-native-gateway-candidate
+          path: csharp/out/full-gateway/native/HttpMigration
           if-no-files-found: error

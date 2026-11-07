@@ -50,7 +50,7 @@ public sealed partial class StandaloneAccounts
             stagedDirectory=directory;
             using(var created=CredentialFiles.Create(directory,credential)){}
             var next=current.Append(new Entry(new(label),directory,false)).ToArray();
-            var bytes=JsonSerializer.SerializeToUtf8Bytes(new{version=1,accounts=next.Select(e=>new{id=e.Id.Value,directory=Path.GetRelativePath(root,e.Directory).Replace('\\','/'),disabled=e.Disabled})});
+            var bytes=EncodeManifest(root, next);
             var before=ConsoleSettings.Read(manifest!,1<<20);
             await Credentials.ReconcileAsync(Registrations(next),()=>
             {

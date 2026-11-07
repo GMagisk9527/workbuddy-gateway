@@ -16,12 +16,12 @@ internal static class ModelsApi
             admitted=true;
             var models=lease.Identity is {Legacy:false} id?security.Store.GetView(id.Id).Models:[];
             c.Response.Headers["X-Model-Source"]=catalog.Source;
-            await c.Response.WriteAsJsonAsync(catalog.List(m=>KeyRules.Allows(models,m)),c.RequestAborted);
+            await GatewayJson.WriteAsync(c, catalog.List(m=>KeyRules.Allows(models,m)));
         }
         catch(KeyFailure e)
         {
             c.Response.StatusCode=e.Status;
-            await c.Response.WriteAsJsonAsync(new{error=new{type=e.Code,message=e.Message}},c.RequestAborted);
+            await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["error"] = new Dictionary<string, object?> { ["type"] = e.Code, ["message"] = e.Message } });
         }
         finally { if(admitted)gate.Release(); }
     }

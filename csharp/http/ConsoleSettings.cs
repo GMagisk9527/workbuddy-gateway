@@ -9,6 +9,8 @@ namespace HttpMigration;
 // Console rules never contain authentication secrets or own the credit ledger.
 public sealed partial class ConsoleSettings:IDisposable
 {
+    static readonly GatewayJson IndentedJson = new(new JsonSerializerOptions { WriteIndented = true });
+
     readonly object sync=new();readonly string? directory;readonly FileStream? owner;readonly ModelCatalog catalog;
     byte[] document;string revision;int retention=7;FrozenSet<string> blocked=FrozenSet<string>.Empty;
     public int RetentionDays{get{lock(sync)return retention;}}
@@ -40,7 +42,7 @@ public sealed partial class ConsoleSettings:IDisposable
         var root=source is null?new JsonObject():JsonNode.Parse(source)!.AsObject();
         var models=root["models"] as JsonObject??new();if(root["models"] is null)root["models"]=models;
         models["blocklist"]=new JsonArray(block.Order(StringComparer.Ordinal).Select(s=>(JsonNode)JsonValue.Create(s)!).ToArray());
-        var logs=root["logs"] as JsonObject??new();if(root["logs"] is null)root["logs"]=logs;logs["retentionDays"]=days;return JsonSerializer.SerializeToUtf8Bytes(root,new JsonSerializerOptions{WriteIndented=true});
+        var logs=root["logs"] as JsonObject??new();if(root["logs"] is null)root["logs"]=logs;logs["retentionDays"]=days;return JsonSerializer.SerializeToUtf8Bytes(root, IndentedJson.JsonObject);
     }
     static void Fields(JsonElement r,params string[] allowed)
     {if(r.ValueKind!=JsonValueKind.Object||r.EnumerateObject().Any(p=>!allowed.Contains(p.Name,StringComparer.Ordinal))||r.EnumerateObject().Select(p=>p.Name).Distinct(StringComparer.Ordinal).Count()!=r.EnumerateObject().Count())throw new ArgumentException("配置包含未知或重复字段");}
@@ -78,7 +80,7 @@ public sealed partial class ConsoleSettings:IDisposable
         lock(sync){if(expected!=revision)throw new ConsoleConflict();if(directory is not null)Atomic(Path.Combine(directory,"config.json"),next);Publish(next,parsed.Block,parsed.Days);}
     }
     public void Toggle(string model,bool enabled)
-    {lock(sync){var ids=blocked.ToHashSet(StringComparer.Ordinal);var root=JsonNode.Parse(document)!.AsObject();var models=root["models"]!.AsObject();if(models["allowlist"] is JsonArray allow&&allow.Count>0)foreach(var item in catalog.List(includeDisabled:true)["data"]!.AsArray()){string id=item!["id"]!.GetValue<string>();if(!catalog.Allows(id))ids.Add(id);}models.Remove("allowlist");if(enabled)ids.Remove(model);else ids.Add(model);var raw=Encode(ids,retention,JsonSerializer.SerializeToUtf8Bytes(root));var parsed=Parse(raw);if(directory is not null)Atomic(Path.Combine(directory,"config.json"),raw);Publish(raw,parsed.Block,parsed.Days);}}
+    {lock(sync){var ids=blocked.ToHashSet(StringComparer.Ordinal);var root=JsonNode.Parse(document)!.AsObject();var models=root["models"]!.AsObject();if(models["allowlist"] is JsonArray allow&&allow.Count>0)foreach(var item in catalog.List(includeDisabled:true)["data"]!.AsArray()){string id=item!["id"]!.GetValue<string>();if(!catalog.Allows(id))ids.Add(id);}models.Remove("allowlist");if(enabled)ids.Remove(model);else ids.Add(model);var raw=Encode(ids,retention,JsonSerializer.SerializeToUtf8Bytes(root, GatewayJson.Default.JsonObject));var parsed=Parse(raw);if(directory is not null)Atomic(Path.Combine(directory,"config.json"),raw);Publish(raw,parsed.Block,parsed.Days);}}
     public void SetRetention(int days){lock(sync){var raw=Encode(blocked,days,document);var parsed=Parse(raw);if(directory is not null)Atomic(Path.Combine(directory,"config.json"),raw);Publish(raw,parsed.Block,parsed.Days);}}
     public void Dispose()=>owner?.Dispose();
 }

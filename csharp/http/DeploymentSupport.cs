@@ -22,6 +22,6 @@ internal static class DeploymentSupport
         using var resources=ResourceSnapshotCache.Open(Path.Combine(keyDirectory,"account-resources"));resources.TryLoad(runtime.Credentials);
         using var cache=RuntimeSnapshotCache.Open(Path.Combine(keyDirectory,"model-runtime"));cache.TryLoad(runtime.Pool,runtime.Credentials);
         var usage=keys.List().Select(k=>k.Id).Append("legacy").Order(StringComparer.Ordinal).ToDictionary(id=>id,id=>ledger.GetUsage(id));
-        Console.WriteLine(JsonSerializer.Serialize(new{ok=true,accounts=runtime.Pool.Count,disabled=runtime.Credentials.Status.Count(s=>s.Disabled),keys=keys.List().Length,ledger=ledger.Health,usageDigest=Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(usage))),runtime=cache.Status,resources=resources.Status}));
+        Console.WriteLine(JsonSerializer.Serialize(new DeploymentState(true, runtime.Pool.Count, runtime.Credentials.Status.Count(s=>s.Disabled), keys.List().Length, ledger.Health, Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(usage, StorageJson.Default.DictionaryStringCreditUsage))), cache.Status, resources.Status), StorageJson.Default.DeploymentState));
     }
 }

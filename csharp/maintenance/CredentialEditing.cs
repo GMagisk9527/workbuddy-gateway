@@ -19,7 +19,7 @@ public sealed partial class CredentialManager
     public object[] CredentialViews=>cells.Select(pair=>
     {
         var c=Volatile.Read(ref pair.Value.Current).Credential;
-        return (object)new{path=pair.Key.Value,exists=true,edition=c.Identity.Site==AccountSite.Cn?"cn":"intl",nickname=c.Identity.Nickname,uid=c.Identity.Uid,enterpriseId=c.Identity.EnterpriseId,domain=c.Domain,expiresAt=c.ExpiresAt,refreshExpiresAt=c.RefreshExpiresAt,lastRefreshTime=c.LastRefreshTime,accessTokenMasked=c.Access.Length==0?"":"****",refreshTokenMasked=c.Refresh.Length==0?"":"****"};
+        return (object)new Dictionary<string, object?> { ["path"] = pair.Key.Value, ["exists"] = true, ["edition"] = c.Identity.Site==AccountSite.Cn?"cn":"intl", ["nickname"] = c.Identity.Nickname, ["uid"] = c.Identity.Uid, ["enterpriseId"] = c.Identity.EnterpriseId, ["domain"] = c.Domain, ["expiresAt"] = c.ExpiresAt, ["refreshExpiresAt"] = c.RefreshExpiresAt, ["lastRefreshTime"] = c.LastRefreshTime, ["accessTokenMasked"] = c.Access.Length==0?"":"****", ["refreshTokenMasked"] = c.Refresh.Length==0?"":"****" };
     }).ToArray();
     public async Task<CredentialDocument> ReadDocumentAsync(AccountId id,CancellationToken cancellation=default)
     {

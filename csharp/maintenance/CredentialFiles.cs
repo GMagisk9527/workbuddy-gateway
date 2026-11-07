@@ -96,7 +96,7 @@ public sealed class CredentialFiles : ICredentialDocumentPersistence
         try
         {
             Atomic(".pending", "1"u8); Atomic("credential.json", document);
-            Atomic("state.json", JsonSerializer.SerializeToUtf8Bytes(new { version = 1, disabled = state.Disabled }));
+            Atomic("state.json", state.Disabled ? "{\"version\":1,\"disabled\":true}"u8.ToArray() : "{\"version\":1,\"disabled\":false}"u8.ToArray());
             File.Delete(Path.Combine(root, ".pending"));
         }
         catch { failed = true; throw new CredentialFailure("credential_persist_failed"); }

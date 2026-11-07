@@ -120,7 +120,7 @@ public static class LocalGateway
         var app = builder.Build();
         if(direct)ConsoleMaintenanceSetup.Configure(app.Services,options);
         if(direct)app.Use((HttpContext c,RequestDelegate next)=>app.Services.GetRequiredService<GracefulRequests>().Handle(c,next));
-        app.MapGet("/readyz", (HttpClient client) => options.GoBridge ? GoBridgeRoutes.Ready(client, options) : Task.FromResult(options.Security?.Ledger is { } l && !l.Health.Healthy ? Results.StatusCode(503) : Results.Json(new { status = "ready", implementation = options.DirectUpstream ? "csharp-standalone-experimental" : "csharp-local-preview" })));
+        app.MapGet("/readyz", (HttpClient client) => options.GoBridge ? GoBridgeRoutes.Ready(client, options) : Task.FromResult(options.Security?.Ledger is { } l && !l.Health.Healthy ? Results.StatusCode(503) : GatewayJson.Result(new Dictionary<string, object?> { ["status"] = "ready", ["implementation"] = options.DirectUpstream ? "csharp-standalone-experimental" : "csharp-local-preview" })));
         app.Map("/v1/messages", (HttpContext c, HttpClient client, SemaphoreSlim gate, PreparationAdmission resources) => Handle(c, client, gate, resources, options));
         app.Map("/v1/chat/completions", (HttpContext c, HttpClient client, SemaphoreSlim gate, PreparationAdmission resources) => Handle(c, client, gate, resources, options, ClientProtocol.Chat));
         app.Map("/v1/responses", (HttpContext c, HttpClient client, SemaphoreSlim gate, PreparationAdmission resources) => Handle(c, client, gate, resources, options, ClientProtocol.Responses));
@@ -134,7 +134,7 @@ public static class LocalGateway
             app.MapGet("/ui/app.js",(HttpContext c)=>AdminPage.Asset(c,"app.js"));
             app.MapGet("/ui/qrcodegen.js",(HttpContext c)=>AdminPage.Asset(c,"qrcodegen.js"));
             app.MapGet("/ui/style.css",(HttpContext c)=>AdminPage.Asset(c,"style.css"));
-            foreach(string path in new[]{"/health","/ping"})app.MapGet(path,()=>options.Security!.Ledger!.Health.Healthy?Results.Json(new{status="ok",implementation="csharp-standalone"}):Results.StatusCode(503));
+            foreach(string path in new[]{"/health","/ping"})app.MapGet(path,()=>options.Security!.Ledger!.Health.Healthy?GatewayJson.Result(new Dictionary<string, object?> { ["status"] = "ok", ["implementation"] = "csharp-standalone" }):Results.StatusCode(503));
             app.Map("/chat/completions",(HttpContext c,HttpClient client,SemaphoreSlim gate,PreparationAdmission resources)=>Handle(c,client,gate,resources,options,ClientProtocol.Chat));
             app.Map("/responses",(HttpContext c,HttpClient client,SemaphoreSlim gate,PreparationAdmission resources)=>Handle(c,client,gate,resources,options,ClientProtocol.Responses));
             app.Map("/models",(HttpContext c,SemaphoreSlim gate)=>ModelsApi.Handle(c,gate,options.Security!,options.Catalog!));
@@ -414,8 +414,8 @@ public static class LocalGateway
         c.Response.StatusCode = status;
         if(status is 429 or 503)c.Response.Headers.RetryAfter="1";
         var error = new Dictionary<string, object> { ["type"] = type, ["message"] = message }; if (code is not null) error["code"] = code;
-        if (c.Request.Path == "/v1/messages") await c.Response.WriteAsJsonAsync(new { type = "error", error }, c.RequestAborted);
-        else await c.Response.WriteAsJsonAsync(new { error }, c.RequestAborted);
+        if (c.Request.Path == "/v1/messages") await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["type"] = "error", ["error"] = error });
+        else await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["error"] = error });
     }
     sealed class IdleReadStream(Stream inner, TimeSpan timeout) : Stream
     {

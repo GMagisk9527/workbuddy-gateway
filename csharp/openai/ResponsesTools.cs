@@ -28,7 +28,7 @@ internal static class ResponsesTools
             if (description != "") fn["description"] = description;
             if (parameters is not null) fn["parameters"] = Copy(parameters);
             if (strict is not null) fn["strict"] = Copy(strict);
-            tools.Add(new JsonObject { ["type"] = "function", ["function"] = fn });
+            tools.Add((JsonNode?)new JsonObject { ["type"] = "function", ["function"] = fn });
         }
         foreach (var tool in Items(source).OfType<JsonObject>())
         {

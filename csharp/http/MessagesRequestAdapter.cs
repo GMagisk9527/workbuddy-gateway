@@ -16,6 +16,7 @@ public static class MessagesRequestAdapter
     public const int DefaultLimit = 32 << 20;
     static readonly JsonDocumentOptions Document = new() { MaxDepth = 256 };
     static readonly JsonSerializerOptions EncodingOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 };
+    static readonly GatewayJson NodeJson = new(EncodingOptions);
     static string Type(JsonElement root) => JsonFields.Text(JsonFields.Get(root, "thinking"), "type").Trim().ToLowerInvariant();
     public static PreparedMessages Prepare(ReadOnlyMemory<byte> bytes, byte[] reasoningKey, int limit = DefaultLimit, SystemPromptOptions? prompts = null)
     {
@@ -53,13 +54,13 @@ public static class MessagesRequestAdapter
             {
                 body = CopyObject(root);
                 RestoreReasoning(body, reasoningKey, model);
-                root = JsonSerializer.SerializeToElement(body, EncodingOptions);
+                root = JsonSerializer.SerializeToElement(body, NodeJson.JsonObject);
             }
             RequestValidation.Capabilities(root);
             if (references)
             {
                 NormalizeReferences(body!, limit);
-                root = JsonSerializer.SerializeToElement(body, EncodingOptions);
+                root = JsonSerializer.SerializeToElement(body, NodeJson.JsonObject);
             }
             RequestValidation.Input(root); RequestValidation.Output(root);
 

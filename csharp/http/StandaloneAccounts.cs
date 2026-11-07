@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AccountMaintenance;
 using AccountScheduling;
 
@@ -8,6 +9,19 @@ namespace HttpMigration;
 public sealed partial class StandaloneAccounts : IDisposable
 {
     sealed record Entry(AccountId Id,string Directory,bool Disabled);
+    sealed record ManifestEntry(string Id, string Directory, bool Disabled);
+    sealed record ManifestDocument(int Version, ManifestEntry[] Accounts);
+
+    [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+    [JsonSerializable(typeof(ManifestDocument))]
+    partial class ManifestJson : JsonSerializerContext { }
+
+    static byte[] EncodeManifest(string root, IEnumerable<Entry> entries)
+    {
+        var accounts = entries.Select(entry => new ManifestEntry(
+            entry.Id.Value, Path.GetRelativePath(root, entry.Directory).Replace('\\', '/'), entry.Disabled)).ToArray();
+        return JsonSerializer.SerializeToUtf8Bytes(new ManifestDocument(1, accounts), ManifestJson.Default.ManifestDocument);
+    }
     readonly List<IDisposable> owned;
     readonly Dictionary<string,CredentialFiles> stores=new(OperatingSystem.IsWindows()?StringComparer.OrdinalIgnoreCase:StringComparer.Ordinal);
     readonly Dictionary<AccountSite,IAccountControlPlane> controls=new();

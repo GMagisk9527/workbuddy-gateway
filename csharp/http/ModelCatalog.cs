@@ -58,7 +58,7 @@ public sealed partial class ModelCatalog
         var s=Volatile.Read(ref state);var sites=new Dictionary<string,Row[]>();
         if(s.Cn.Length>0)sites["cn"]=s.Cn;
         if(s.Intl.Length>0)sites["intl"]=s.Intl;
-        return JsonSerializer.SerializeToUtf8Bytes(new{schema=5,catalogs=sites},Json);
+        return JsonSerializer.SerializeToUtf8Bytes(new CatalogDocument(5, sites), CatalogJson.Default.CatalogDocument);
     }
     public string Source
     {
@@ -69,7 +69,13 @@ public sealed partial class ModelCatalog
     sealed record ConsolePolicy(FrozenSet<string> Block,FrozenSet<string>? Allow);
     ConsolePolicy consolePolicy=new(FrozenSet<string>.Empty,null);
     internal void SetConsolePolicy(FrozenSet<string> blocked,FrozenSet<string>? allowed)=>Volatile.Write(ref consolePolicy,new(blocked,allowed));
-    static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web);
+    sealed record CatalogDocument(int Schema, Dictionary<string, Row[]> Catalogs);
+
+    [System.Text.Json.Serialization.JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
+    [System.Text.Json.Serialization.JsonSerializable(typeof(CatalogDocument))]
+    [System.Text.Json.Serialization.JsonSerializable(typeof(Row[]))]
+    [System.Text.Json.Serialization.JsonSerializable(typeof(LiveRow))]
+    partial class CatalogJson : System.Text.Json.Serialization.JsonSerializerContext { }
     public ModelCatalog(IEnumerable<string>? allow=null,IEnumerable<string>? block=null)
     {
         var allowed=(allow??[]).Select(KeyRules.Model).Where(m=>m.Length>0).ToFrozenSet();
@@ -94,7 +100,7 @@ public sealed partial class ModelCatalog
         {
             if(!root.GetProperty("catalogs").TryGetProperty(site,out var list))return [];
             if(list.ValueKind!=JsonValueKind.Array || list.GetArrayLength() is <1 or >500)throw new ArgumentException("Catalog count exceeds bounds");
-            var rows=JsonSerializer.Deserialize<Row[]>(list,Json)!;
+            var rows=JsonSerializer.Deserialize(list, CatalogJson.Default.RowArray)!;
             foreach(var r in rows)Normalize(r);
             return rows;
         }
@@ -120,7 +126,7 @@ public sealed partial class ModelCatalog
         {
             if(model.ValueKind!=JsonValueKind.Object)throw new ArgumentException("Invalid live catalog entry");
             if(model.TryGetProperty("contextWindow",out var window)&&window.ValueKind==JsonValueKind.Object && window.TryGetProperty("supportedLengths",out var lengths)&&lengths.ValueKind==JsonValueKind.Array && lengths.GetArrayLength()>128)throw new ArgumentException("Too many context options");
-            var live=JsonSerializer.Deserialize<LiveRow>(model,Json)??throw new ArgumentException("Invalid live catalog entry");
+            var live=JsonSerializer.Deserialize(model, CatalogJson.Default.LiveRow)??throw new ArgumentException("Invalid live catalog entry");
             // Live contextWindow is authoritative; cache-shaped extras are ignored.
             var row=new Row{Id=KeyRules.Model(live.Id??""),MaxInputTokens=live.MaxInputTokens,MaxOutputTokens=live.MaxOutputTokens,MaxAllowedSize=live.MaxAllowedSize,ContextLengths=live.ContextWindow?.SupportedLengths,ContextDefaultLength=live.ContextWindow?.DefaultLength??0};
             row.FromLive=true;row.PriceUpdatedAt=DateTimeOffset.UtcNow.ToUnixTimeSeconds();ReadPrice(row,model,data,DateTimeOffset.UtcNow);
@@ -153,7 +159,7 @@ public sealed partial class ModelCatalog
                 if(sites.Count>1&&sites.Values.Any(c=>c.Ceiling!=cap.Ceiling||c.Output!=cap.Output||c.Default!=cap.Default||!c.Options.SequenceEqual(cap.Options)))
                 {var bySite=new JsonObject();foreach(var p in sites)bySite[p.Key]=p.Value.Json();item["capabilities_by_site"]=bySite;}
             }
-            items.Add(item);
+            items.Add((JsonNode)item);
         }
         return new(){["object"]="list",["data"]=items};
     }

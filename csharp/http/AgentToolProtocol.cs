@@ -22,7 +22,7 @@ internal static class AgentToolProtocol
                 string url=Field("url").Trim();if(url.Length==0)throw new RequestFailure("url 不能为空");
                 if(!Uri.TryCreate(url,UriKind.Absolute,out var parsed)||parsed.Scheme is not ("http" or "https")||parsed.Host.Length==0)
                     throw new RequestFailure("url 必须是 http/https 绝对地址");
-                return JsonSerializer.SerializeToUtf8Bytes(new{url,format="markdown",prompt="Extract the main content of this page as clean Markdown. Keep headings, lists, code blocks and key facts. Remove navigation, ads and boilerplate.",timeout=30,max_length=100000});
+                return GatewayJson.Encode(new Dictionary<string, object?> { ["url"] = url, ["format"] = "markdown", ["prompt"] = "Extract the main content of this page as clean Markdown. Keep headings, lists, code blocks and key facts. Remove navigation, ads and boilerplate.", ["timeout"] = 30, ["max_length"] = 100000 });
             }
             string query=Field("query").Trim();_ = Field("ori_question");
             var need=Get(root,"need_content");if(need.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.True or JsonValueKind.False))throw new JsonException();
@@ -33,7 +33,7 @@ internal static class AgentToolProtocol
             if(length==0)throw new RequestFailure("query 不能为空");
             if(length<2)throw new RequestFailure("query 至少需要 2 个字符");
             if(length>2000)throw new RequestFailure("query 过长（最多 2000 个字符）");
-            return JsonSerializer.SerializeToUtf8Bytes(new{query,type="text2text",max_results=count});
+            return GatewayJson.Encode(new Dictionary<string, object?> { ["query"] = query, ["type"] = "text2text", ["max_results"] = count });
         }
         catch(Exception e) when(e is JsonException or InvalidOperationException){throw new RequestFailure("无效的 JSON 请求体",400,"invalid_json");}
     }
@@ -46,7 +46,7 @@ internal static class AgentToolProtocol
         {
             string content=JsonFields.Text(root,"content");
             if(content.Length==0)throw new RequestFailure("上游未返回可用的页面正文",502,"upstream_error");
-            return new{content};
+            return new Dictionary<string, object?> { ["content"] = content };
         }
         var list=JsonFields.Get(root,"results");if(list.ValueKind!=JsonValueKind.Array)throw new RequestFailure("上游搜索响应缺少有效 results 数组",502,"upstream_error");
         var results=new List<object>();
@@ -59,9 +59,9 @@ internal static class AgentToolProtocol
                 string site=JsonFields.Text(item,"site").Trim();
                 if(site.Length>0&&!site.Contains(' ')&&!site.Contains('\t')&&site.Contains('.'))url="https://"+site.Trim('.');
             }
-            if(url.Length>0)results.Add(new{title=JsonFields.Text(item,"title"),url,snippet=JsonFields.Text(item,"snippet"),date=(string?)null});
+            if(url.Length>0)results.Add(new Dictionary<string, object?> { ["title"] = JsonFields.Text(item,"title"), ["url"] = url, ["snippet"] = JsonFields.Text(item,"snippet"), ["date"] = (string?)null });
         }
-        return new{results};
+        return new Dictionary<string, object?> { ["results"] = results };
     }
     internal static string? Code(JsonElement root)
     {

@@ -19,7 +19,7 @@ internal static class GoBridgeRoutes
         try
         {
             using var response = await client.GetAsync(new Uri(options.Upstream, "/readyz"), timeout.Token);
-            return response.IsSuccessStatusCode ? Results.Json(new { status = "ready", implementation = "csharp-protocols-go-accounts" }) : Results.StatusCode(503);
+            return response.IsSuccessStatusCode ? GatewayJson.Result(new Dictionary<string, object?> { ["status"] = "ready", ["implementation"] = "csharp-protocols-go-accounts" }) : Results.StatusCode(503);
         }
         catch (Exception e) when (e is HttpRequestException or OperationCanceledException) { return Results.StatusCode(503); }
     }

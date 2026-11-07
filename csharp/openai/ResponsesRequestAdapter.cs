@@ -21,16 +21,16 @@ public static class ResponsesRequestAdapter
         }
         Validate(root);
         var messages = new JsonArray();
-        if (!string.IsNullOrWhiteSpace(Text(root["instructions"]))) messages.Add(new JsonObject { ["role"] = "system", ["content"] = Text(root["instructions"]) });
+        if (!string.IsNullOrWhiteSpace(Text(root["instructions"]))) messages.Add((JsonNode?)new JsonObject { ["role"] = "system", ["content"] = Text(root["instructions"]) });
         if (root["input"] is JsonValue input && input.TryGetValue<string>(out var text))
-        { if (!string.IsNullOrWhiteSpace(text)) messages.Add(new JsonObject { ["role"] = "user", ["content"] = text }); }
+        { if (!string.IsNullOrWhiteSpace(text)) messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = text }); }
         else
         {
             JsonObject? assistant = null; string reasoning = "";
-            void Flush() { if (assistant is not null) messages.Add(assistant); assistant = null; reasoning = ""; }
+            void Flush() { if (assistant is not null) messages.Add((JsonNode?)assistant); assistant = null; reasoning = ""; }
             foreach (var raw in Items(root["input"]))
             {
-                if (raw is JsonValue value && value.TryGetValue<string>(out var str)) { Flush(); messages.Add(new JsonObject { ["role"] = "user", ["content"] = str }); continue; }
+                if (raw is JsonValue value && value.TryGetValue<string>(out var str)) { Flush(); messages.Add((JsonNode?)new JsonObject { ["role"] = "user", ["content"] = str }); continue; }
                 if (raw is not JsonObject item) continue;
                 string type = Text(item["type"]);
                 if (type == "reasoning")
@@ -67,7 +67,7 @@ public static class ResponsesRequestAdapter
                             }
                         }
                     }
-                    else { Flush(); messages.Add(message); }
+                    else { Flush(); messages.Add((JsonNode?)message); }
                 }
             }
             Flush();
@@ -115,18 +115,18 @@ public static class ResponsesRequestAdapter
         var parts = new JsonArray();
         foreach (var part in Items(raw))
         {
-            if (part is JsonValue value && value.TryGetValue<string>(out var s)) { parts.Add(new JsonObject { ["type"] = "text", ["text"] = s }); continue; }
+            if (part is JsonValue value && value.TryGetValue<string>(out var s)) { parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = s }); continue; }
             if (part is not JsonObject p) continue;
             string type = Text(p["type"]);
             if (type is "input_text" or "output_text" or "text" or "refusal")
             {
                 string field = type == "refusal" ? "refusal" : "text";
-                if (p[field] is JsonValue text && text.TryGetValue<string>(out var t)) parts.Add(new JsonObject { ["type"] = "text", ["text"] = t });
+                if (p[field] is JsonValue text && text.TryGetValue<string>(out var t)) parts.Add((JsonNode?)new JsonObject { ["type"] = "text", ["text"] = t });
             }
             else if (type == "input_image" && Text(p["image_url"]) != "")
             {
                 var image = new JsonObject { ["url"] = Text(p["image_url"]) }; if (p.ContainsKey("detail")) image["detail"] = Copy(p["detail"]);
-                parts.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = image });
+                parts.Add((JsonNode?)new JsonObject { ["type"] = "image_url", ["image_url"] = image });
             }
         }
         return parts.Count == 0 ? JsonValue.Create("")! : parts;
@@ -156,7 +156,7 @@ public static class ResponsesRequestAdapter
                     {
                         string url = p["image_url"] is JsonObject nested ? Text(nested["url"]) : Text(p["image_url"]);
                         string detail = p["image_url"] is JsonObject n ? Text(n["detail"]) : Text(p["detail"]);
-                        if (url != "") { var image = new JsonObject { ["url"] = url }; if (detail != "") image["detail"] = detail; images.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = image }); continue; }
+                        if (url != "") { var image = new JsonObject { ["url"] = url }; if (detail != "") image["detail"] = detail; images.Add((JsonNode?)new JsonObject { ["type"] = "image_url", ["image_url"] = image }); continue; }
                     }
                 }
                 texts.Add(Stringify(part));

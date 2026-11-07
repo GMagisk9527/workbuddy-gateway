@@ -10,7 +10,7 @@ public sealed record ConsoleRow(string Account,string Model,long At,int Status,b
 public sealed record ConsoleAttempt(int Attempt,string Kind,int StatusCode,string BusinessCode,string Outcome,string FailureClass,double StartedMs,double? HeadersMs,double DurationMs);
 public sealed record ConsoleAccount(string Id,string File,string Edition);
 
-public sealed class ConsoleTelemetry
+public sealed partial class ConsoleTelemetry
 {
     const int Limit=20000,FileLimit=16<<20;
     readonly object sync=new(),disk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
@@ -22,7 +22,14 @@ public sealed class ConsoleTelemetry
     readonly bool logInitializationFailed;
     public bool LogWriteFailed=>logInitializationFailed||(requestLogs?.WriteFailed??false);
     public bool WriteFailed{get;private set;}public string Storage{get;private set;}="memory";
-    static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web){DefaultIgnoreCondition=JsonIgnoreCondition.WhenWritingNull};
+    sealed record HistoryDocument(int Schema, long StartedAt, ConsoleAccount[] Accounts, ConsoleRow[] Requests);
+
+    [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonSerializable(typeof(HistoryDocument))]
+    [JsonSerializable(typeof(ConsoleAccount[]))]
+    [JsonSerializable(typeof(ConsoleRow[]))]
+    [JsonSerializable(typeof(ConsoleRow))]
+    partial class HistoryJson : JsonSerializerContext { }
     public ConsoleTelemetry(ConsoleSettings settings,IEnumerable<ConsoleAccount> accounts,IReadOnlyDictionary<string,string>? legacyIdentities=null)
     {
         this.settings=settings;foreach(var a in accounts){ValidateAccount(a);this.accounts[a.Id]=a;}
@@ -35,8 +42,8 @@ public sealed class ConsoleTelemetry
             if(File.Exists(path))
             {
                 using var doc=JsonDocument.Parse(ConsoleSettings.Read(path,FileLimit));if(doc.RootElement.GetProperty("schema").GetInt32()!=1)throw new InvalidDataException();
-                var source=JsonSerializer.Deserialize<ConsoleRow[]>(doc.RootElement.GetProperty("requests"),Json)??[];if(source.Length>Limit)throw new InvalidDataException();foreach(var r in source)Validate(r);
-                var historical=doc.RootElement.TryGetProperty("accounts",out var savedAccounts)?JsonSerializer.Deserialize<ConsoleAccount[]>(savedAccounts,Json)??[]:[];
+                var source=JsonSerializer.Deserialize(doc.RootElement.GetProperty("requests"), HistoryJson.Default.ConsoleRowArray)??[];if(source.Length>Limit)throw new InvalidDataException();foreach(var r in source)Validate(r);
+                var historical=doc.RootElement.TryGetProperty("accounts",out var savedAccounts)?JsonSerializer.Deserialize(savedAccounts, HistoryJson.Default.ConsoleAccountArray)??[]:[];
                 if(historical.Length>Limit)throw new InvalidDataException();var ids=new HashSet<string>(StringComparer.Ordinal);
                 foreach(var a in historical){ValidateAccount(a);if(!ids.Add(a.Id))throw new InvalidDataException();}
                 foreach(var a in historical)this.accounts.TryAdd(a.Id,a);foreach(var r in source)rows.Enqueue(r);Storage="file";
@@ -58,7 +65,7 @@ public sealed class ConsoleTelemetry
         using var doc=JsonDocument.Parse(raw);var root=doc.RootElement;if(root.GetProperty("schema").GetInt32()!=1)throw new InvalidDataException();var entries=root.GetProperty("requests");if(entries.ValueKind!=JsonValueKind.Array||entries.GetArrayLength()>Limit)throw new InvalidDataException();var staged=new List<ConsoleRow>();
         foreach(var item in entries.EnumerateArray())
         {
-            var r=JsonSerializer.Deserialize<ConsoleRow>(item,Json)??throw new InvalidDataException();Validate(r);string account=mapping.GetValueOrDefault(r.Account)??"archived:"+r.Account[..Math.Min(48,r.Account.Length)];r=r with{Account=account};staged.Add(r);
+            var r=JsonSerializer.Deserialize(item, HistoryJson.Default.ConsoleRow)??throw new InvalidDataException();Validate(r);string account=mapping.GetValueOrDefault(r.Account)??"archived:"+r.Account[..Math.Min(48,r.Account.Length)];r=r with{Account=account};staged.Add(r);
         }
         foreach(var r in staged)rows.Enqueue(r);revision++;Storage="imported";
     }
@@ -70,7 +77,7 @@ public sealed class ConsoleTelemetry
             while(rows.Count>=Limit)rows.Dequeue();rows.Enqueue(row);revision++;
             string line=$"{DateTimeOffset.FromUnixTimeMilliseconds(row.At):O} trace={row.Trace} protocol={row.Protocol} model={row.Model} status={row.Status} result={(row.Complete?"complete":"failed")} code={row.Code} durationMs={row.LatencyMs:F1}";
             AddLog(row.At,line);requestLogs?.Append(line,DateTimeOffset.FromUnixTimeMilliseconds(row.At));
-            while(traces.Count>=128)traces.Dequeue();traces.Enqueue((row.At,row.Trace,new{trace=row.Trace,status=row.Status,attemptTrail=attempts,counters=new{failed=row.Complete?0:1,canceled=row.Code=="cancelled"?1:0,incompleteStreams=row.Complete?0:1},attemptsDropped=0}));
+            while(traces.Count>=128)traces.Dequeue();traces.Enqueue((row.At,row.Trace,new Dictionary<string, object?> { ["trace"] = row.Trace, ["status"] = row.Status, ["attemptTrail"] = attempts, ["counters"] = new Dictionary<string, object?> { ["failed"] = row.Complete?0:1, ["canceled"] = row.Code=="cancelled"?1:0, ["incompleteStreams"] = row.Complete?0:1 }, ["attemptsDropped"] = 0 }));
         }
     }
     void RemoveLog(){logBytes-=System.Text.Encoding.UTF8.GetByteCount(logs.Dequeue().Line);}
@@ -98,7 +105,7 @@ public sealed class ConsoleTelemetry
         lock(disk)
         {
             long version;ConsoleRow[] snapshot;ConsoleAccount[] summaries;lock(sync){if(saved==revision)return true;version=revision;snapshot=rows.ToArray();var referenced=snapshot.Select(r=>r.Account).ToHashSet(StringComparer.Ordinal);summaries=accounts.Values.OrderByDescending(a=>referenced.Contains(a.Id)).ThenBy(a=>a.Id,StringComparer.Ordinal).Take(Limit).ToArray();}
-            try{byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(new{schema=1,startedAt=StartedAt,accounts=summaries,requests=snapshot},Json);if(bytes.Length>FileLimit)throw new InvalidDataException();ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),bytes);lock(sync){saved=version;WriteFailed=false;Storage="file";}return true;}
+            try{byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(new HistoryDocument(1, StartedAt, summaries, snapshot), HistoryJson.Default.HistoryDocument);if(bytes.Length>FileLimit)throw new InvalidDataException();ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),bytes);lock(sync){saved=version;WriteFailed=false;Storage="file";}return true;}
             catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException){WriteFailed=true;return false;}
         }
     }
@@ -116,8 +123,8 @@ public sealed class ConsoleTelemetry
         for(var t=Bucket(start);t<end.AddDays(1);t=period switch{"hour"=>t.AddHours(1),"week"=>t.AddDays(7),"month"=>t.AddMonths(1),_=>t.AddDays(1)})
         {if(buckets.Count>=2000)throw new ArgumentException("统计桶超过2000，请缩短小时区间");var value=grouped.GetValueOrDefault(t)??[];var aggregate=Aggregate(value);aggregate["start"]=new DateTimeOffset(t,zone).ToUnixTimeMilliseconds();aggregate["label"]=t.ToString(period=="hour"?"MM-dd HH:mm":"yyyy-MM-dd",CultureInfo.InvariantCulture);buckets.Add(aggregate);points.Add(value);}
         var models=selected.GroupBy(r=>r.Model).Select(g=>{var item=Aggregate(g.ToArray());item["model"]=g.Key;return item;}).OrderByDescending(r=>(long)r["tokens"]!).ThenByDescending(r=>(int)r["requests"]!).Take(1024).ToArray();
-        var latency=selected.GroupBy(r=>r.Model).OrderByDescending(g=>g.Count()).Take(8).Select(g=>new{model=g.Key,avgLatencyMs=points.Select(p=>Average(p.Where(r=>r.Model==g.Key).Select(r=>(double?)r.LatencyMs))).ToArray(),avgTtftMs=points.Select(p=>Average(p.Where(r=>r.Model==g.Key&&r.TtftMetric=="v2").Select(r=>r.TtftMs))).ToArray()}).ToArray();
-        return new{period,start=start.ToString("yyyy-MM-dd"),end=end.ToString("yyyy-MM-dd"),serverTime=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),account,accounts=choices.Select(a=>new{id=a.Id,file=a.File,edition=a.Edition}),summary=Aggregate(selected),buckets,models,modelLatency=latency,ttftMetric="first_token_v2",storage=new{mode=Storage,problem=WriteFailed?"统计保存失败，现有数据保留":"",maxRequests=Limit},startedAt=StartedAt};
+        var latency=selected.GroupBy(r=>r.Model).OrderByDescending(g=>g.Count()).Take(8).Select(g=>new Dictionary<string, object?> { ["model"] = g.Key, ["avgLatencyMs"] = points.Select(p=>Average(p.Where(r=>r.Model==g.Key).Select(r=>(double?)r.LatencyMs))).ToArray(), ["avgTtftMs"] = points.Select(p=>Average(p.Where(r=>r.Model==g.Key&&r.TtftMetric=="v2").Select(r=>r.TtftMs))).ToArray() }).ToArray();
+        return new Dictionary<string, object?> { ["period"] = period, ["start"] = start.ToString("yyyy-MM-dd"), ["end"] = end.ToString("yyyy-MM-dd"), ["serverTime"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), ["account"] = account, ["accounts"] = choices.Select(a=>new Dictionary<string, object?> { ["id"] = a.Id, ["file"] = a.File, ["edition"] = a.Edition }).ToArray(), ["summary"] = Aggregate(selected), ["buckets"] = buckets, ["models"] = models, ["modelLatency"] = latency, ["ttftMetric"] = "first_token_v2", ["storage"] = new Dictionary<string, object?> { ["mode"] = Storage, ["problem"] = WriteFailed?"统计保存失败，现有数据保留":"", ["maxRequests"] = Limit }, ["startedAt"] = StartedAt };
     }
     static double? Average(IEnumerable<double?> values){var a=values.Where(v=>v.HasValue).Select(v=>v!.Value).ToArray();return a.Length==0?null:a.Average();}
     internal static Dictionary<string,object?> Aggregate(ConsoleRow[] rows)=>new()
@@ -127,9 +134,9 @@ public sealed class ConsoleTelemetry
     public object Performance(string? trace)
     {
         if(!string.IsNullOrEmpty(trace))return Trace(trace)??throw new KeyNotFoundException();var recent=Rows().Where(r=>r.At>=DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds()).ToArray();
-        object Phase(string name,string label,double[] values)=>new{name,label,samples=values.Length,failed=0,averageMs=values.Length==0?(double?)null:values.Average(),p95Ms=Percentile(values,.95),p99Ms=Percentile(values,.99)};
-        var protocols=new[]{"all","messages","chat_completions","responses"}.Select(protocol=>{var data=recent.Where(r=>protocol=="all"||r.Protocol==protocol).ToArray();return new{protocol,requests=data.Length,failed=data.Count(r=>!r.Complete),canceled=data.Count(r=>r.Code=="cancelled"),incompleteStreams=data.Count(r=>!r.Complete),phases=new[]{Phase("total","总耗时",data.Select(r=>r.LatencyMs).ToArray()),Phase("first_token","有效首Token",data.Where(r=>r.TtftMs.HasValue).Select(r=>r.TtftMs!.Value).ToArray())}};});
-        return new{asOf=DateTimeOffset.UtcNow.ToUnixTimeSeconds(),startedAt=StartedAt/1000,protocols};
+        object Phase(string name,string label,double[] values)=>new Dictionary<string, object?> { ["name"] = name, ["label"] = label, ["samples"] = values.Length, ["failed"] = 0, ["averageMs"] = values.Length==0?(double?)null:values.Average(), ["p95Ms"] = Percentile(values,.95), ["p99Ms"] = Percentile(values,.99) };
+        var protocols=new[]{"all","messages","chat_completions","responses"}.Select(protocol=>{var data=recent.Where(r=>protocol=="all"||r.Protocol==protocol).ToArray();return new Dictionary<string, object?> { ["protocol"] = protocol, ["requests"] = data.Length, ["failed"] = data.Count(r=>!r.Complete), ["canceled"] = data.Count(r=>r.Code=="cancelled"), ["incompleteStreams"] = data.Count(r=>!r.Complete), ["phases"] = new[]{Phase("total","总耗时",data.Select(r=>r.LatencyMs).ToArray()),Phase("first_token","有效首Token",data.Where(r=>r.TtftMs.HasValue).Select(r=>r.TtftMs!.Value).ToArray())} };});
+        return new Dictionary<string, object?> { ["asOf"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["startedAt"] = StartedAt/1000, ["protocols"] = protocols.ToArray() };
     }
     static double? Percentile(double[] data,double fraction){if(data.Length==0)return null;Array.Sort(data);return data[Math.Min(data.Length-1,(int)Math.Ceiling(data.Length*fraction)-1)];}
 }

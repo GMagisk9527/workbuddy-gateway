@@ -26,7 +26,7 @@ public sealed class LoopbackControlPlane : IAccountControlPlane, IDisposable
         this.refresh = refresh; this.verify = verify;
         client = new(handler ?? new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false, AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate }) { Timeout = Timeout.InfiniteTimeSpan };
     }
-    sealed class Envelope
+    internal sealed class Envelope
     {
         public int Code { get; set; }
         public string? Msg { get; set; }
@@ -57,7 +57,7 @@ public sealed class LoopbackControlPlane : IAccountControlPlane, IDisposable
         {
             var result = await Send(refresh, current, true, cancellation);
             if ((int)result.Status is < 200 or >= 300) throw new CredentialFailure("refresh_rejected", CredentialRules.Classify(System.Text.Encoding.UTF8.GetString(result.Body)));
-            var envelope = JsonSerializer.Deserialize<Envelope>(result.Body, CredentialCodec.Json) ?? throw new CredentialFailure("invalid_refresh_response");
+            var envelope = JsonSerializer.Deserialize(result.Body, CredentialJson.Default.Envelope) ?? throw new CredentialFailure("invalid_refresh_response");
             if (envelope.Code != 0) throw new CredentialFailure("refresh_rejected", CredentialRules.Classify(System.Text.Encoding.UTF8.GetString(result.Body)));
             return CredentialRules.Merge(current, System.Text.Encoding.UTF8.GetBytes(envelope.Data.GetRawText()), time.GetUtcNow().ToUnixTimeSeconds());
         }
@@ -101,16 +101,16 @@ public sealed class LoopbackControlPlane : IAccountControlPlane, IDisposable
             var result = await Send(verify, candidate, false, cancellation);
             if ((int)result.Status is < 200 or >= 300)
                 return CredentialRules.AuthenticationRejected((int)result.Status, System.Text.Encoding.UTF8.GetString(result.Body)) ? CredentialVerification.Rejected : CredentialVerification.Unknown;
-            var envelope = JsonSerializer.Deserialize<Envelope>(result.Body, CredentialCodec.Json);
+            var envelope = JsonSerializer.Deserialize(result.Body, CredentialJson.Default.Envelope);
             if (envelope is null) return CredentialVerification.Unknown;
             return envelope.Code == 0 ? CredentialVerification.Usable : CredentialRules.AuthenticationRejected(0, envelope.Msg ?? "") ? CredentialVerification.Rejected : CredentialVerification.Unknown;
         }
         catch (Exception e) when (e is OperationCanceledException or HttpRequestException or IOException or JsonException or CredentialFailure) { return CredentialVerification.Unknown; }
     }
-    internal async Task<JsonElement> ResourceDataAsync(Uri endpoint,AccountCredential credential,object payload,bool tenant,CancellationToken cancellation)
+    internal async Task<JsonElement> ResourceDataAsync(Uri endpoint,AccountCredential credential,byte[] payload,bool tenant,CancellationToken cancellation)
     {
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellation);deadline.CancelAfter(timeout);
-        using var request=new HttpRequestMessage(HttpMethod.Post,endpoint){Content=new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(payload))};request.Content.Headers.ContentType=new("application/json");
+        using var request=new HttpRequestMessage(HttpMethod.Post,endpoint){Content=new ByteArrayContent(payload)};request.Content.Headers.ContentType=new("application/json");
         request.Headers.Authorization=new("Bearer",credential.Access);request.Headers.UserAgent.ParseAdd("WorkBuddy-Gateway-CSharp/0.1");
         if(credential.Identity.Uid.Length>0)request.Headers.Add("X-User-Id",credential.Identity.Uid);
         if(credential.Identity.EnterpriseId.Length>0){request.Headers.Add("X-Enterprise-Id",credential.Identity.EnterpriseId);if(tenant)request.Headers.Add("X-Tenant-Id",credential.Identity.EnterpriseId);}

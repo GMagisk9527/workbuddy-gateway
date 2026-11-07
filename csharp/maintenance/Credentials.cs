@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AccountScheduling;
 
 namespace AccountMaintenance;
@@ -80,7 +81,7 @@ public static class CredentialRules
     // Matches refreshTokenPayload field preservation; claims are metadata, never proof of authentication.
     public static AccountCredential Merge(AccountCredential old, ReadOnlySpan<byte> data, long now)
     {
-        var wire = JsonSerializer.Deserialize<TokenWire>(data, CredentialCodec.Json) ?? throw new CredentialFailure("invalid_refresh_response");
+        var wire = JsonSerializer.Deserialize(data, CredentialJson.Default.TokenWire) ?? throw new CredentialFailure("invalid_refresh_response");
         if (string.IsNullOrEmpty(wire.AccessToken)) throw new CredentialFailure("invalid_refresh_response");
         long Add(long seconds) { try { return checked(now + seconds); } catch (OverflowException) { throw new CredentialFailure("invalid_refresh_expiry"); } }
         string refresh = string.IsNullOrEmpty(wire.RefreshToken) ? old.Refresh : wire.RefreshToken;
@@ -88,7 +89,7 @@ public static class CredentialRules
             string.IsNullOrEmpty(wire.Domain) ? old.Domain : wire.Domain,
             wire.RefreshExpiresIn > 0 ? Add(wire.RefreshExpiresIn) : JwtExpiry(refresh) is > 0 and var exp ? exp : old.RefreshExpiresAt, now);
     }
-    sealed class TokenWire
+    internal sealed class TokenWire
     {
         public string? AccessToken { get; set; }
         public string? RefreshToken { get; set; }
@@ -100,14 +101,13 @@ public static class CredentialRules
 
 public static class CredentialCodec
 {
-    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
-    sealed class Wire
+    internal sealed class Wire
     {
         public Tokens? Auth { get; set; }
         public User? Account { get; set; }
         public string? Edition { get; set; }
     }
-    sealed class Tokens
+    internal sealed class Tokens
     {
         public string AccessToken { get; set; } = "";
         public string RefreshToken { get; set; } = "";
@@ -116,7 +116,7 @@ public static class CredentialCodec
         public long RefreshExpiresAt { get; set; }
         public long LastRefreshTime { get; set; }
     }
-    sealed class User
+    internal sealed class User
     {
         public string Uid { get; set; } = "";
         public string EnterpriseId { get; set; } = "";
@@ -127,7 +127,7 @@ public static class CredentialCodec
         if (bytes.Length > 1 << 20) throw new CredentialFailure("credential_document_too_large");
         try
         {
-            var wire = JsonSerializer.Deserialize<Wire>(bytes, Json);
+            var wire = JsonSerializer.Deserialize(bytes, CredentialJson.Default.Wire);
             if (wire?.Auth is not { } a || wire.Account is not { } u) throw new CredentialFailure("invalid_credential_document");
             return new(new(u.Uid, u.EnterpriseId, u.Nickname, CredentialRules.Site(wire.Edition ?? "")), a.AccessToken, a.RefreshToken, a.ExpiresAt, a.Domain, a.RefreshExpiresAt, a.LastRefreshTime);
         }
@@ -138,5 +138,11 @@ public static class CredentialCodec
         Auth = new() { AccessToken = credential.Access, RefreshToken = credential.Refresh, ExpiresAt = credential.ExpiresAt, Domain = credential.Domain, RefreshExpiresAt = credential.RefreshExpiresAt, LastRefreshTime = credential.LastRefreshTime },
         Account = new() { Uid = credential.Identity.Uid, EnterpriseId = credential.Identity.EnterpriseId, Nickname = credential.Identity.Nickname },
         Edition = credential.Identity.Site == AccountSite.Intl ? "intl" : "cn"
-    }, Json);
+    }, CredentialJson.Default.Wire);
 }
+
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
+[JsonSerializable(typeof(CredentialCodec.Wire))]
+[JsonSerializable(typeof(CredentialRules.TokenWire))]
+[JsonSerializable(typeof(LoopbackControlPlane.Envelope))]
+internal partial class CredentialJson : JsonSerializerContext { }

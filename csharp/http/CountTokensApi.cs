@@ -15,7 +15,7 @@ internal static class CountTokensApi
             if(status is 429 or 503)c.Response.Headers.RetryAfter="1";
             // An oversized unread HTTP/1 body cannot be safely drained by Kestrel.
             if(status==413&&c.Request.Protocol.StartsWith("HTTP/1",StringComparison.Ordinal))c.Response.Headers.Connection="close";
-            await c.Response.WriteAsJsonAsync(new{type="error",error=new{type,message}},c.RequestAborted);
+            await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["type"] = "error", ["error"] = new Dictionary<string, object?> { ["type"] = type, ["message"] = message } });
         }
         try
         {
@@ -33,7 +33,7 @@ internal static class CountTokensApi
             string model=TokenEstimation.Validate(doc.RootElement);key.CheckModel(model);
             int count=TokenEstimation.Estimate(doc.RootElement);
             if(options.DirectUpstream)count=(int)Math.Min(int.MaxValue,Math.Ceiling(count*c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.TokenMultiplier(model)));
-            await c.Response.WriteAsJsonAsync(new{input_tokens=count},c.RequestAborted);
+            await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["input_tokens"] = count });
         }
         catch(RequestFailure e){await Error(e.Status,e.ErrorType,e.Message);}
         catch(KeyFailure e){await Error(e.Status,e.Status switch{401=>"authentication_error",403=>"permission_error",429=>"rate_limit_error",_=>"overloaded_error"},e.Message);}

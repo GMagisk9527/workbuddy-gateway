@@ -32,11 +32,19 @@ public sealed partial class ModelCatalog
                 var cost=probeCosts.GetValueOrDefault((site,row.Id));bool probed=cost!=ModelCost.Unknown;
                 bool known=probed||row.HasMultiplier;
                 string label=PriceLabel(site,row.Id)??"未知";
-                rates[(site==AccountSite.Cn?"cn":"intl")+"|"+row.Id]=new{hasLog=known,source=probed?"已保存的模型探测用量":"上游模型目录",updatedAt=probed?probeTimes.GetValueOrDefault((site,row.Id)):row.PriceUpdatedAt,
-                    explain=probed?$"探测用量结论：{(cost==ModelCost.Free?"免费":"收费")}；显示值：{label}。不通过余额变化推算倍率。":row.PromoExpired?$"目录促销已失效；当前显示值：{label}。":$"目录声明倍率：{label}。",
-                    unknown=!known,refreshHint="目录定时刷新；价格探测需显式开启且可能消耗积分。",records=Array.Empty<object>(),others=Array.Empty<object>()};
+                rates[(site==AccountSite.Cn?"cn":"intl")+"|"+row.Id]=new Dictionary<string, object?>
+{
+    ["hasLog"] = known,
+    ["source"] = probed ? "已保存的模型探测用量" : "上游模型目录",
+    ["updatedAt"] = probed ? probeTimes.GetValueOrDefault((site, row.Id)) : row.PriceUpdatedAt,
+    ["explain"] = probed ? $"探测用量结论：{(cost == ModelCost.Free ? "免费" : "收费")}；显示值：{label}。不通过余额变化推算倍率。" : row.PromoExpired ? $"目录促销已失效；当前显示值：{label}。" : $"目录声明倍率：{label}。",
+    ["unknown"] = !known,
+    ["refreshHint"] = "目录定时刷新；价格探测需显式开启且可能消耗积分。",
+    ["records"] = Array.Empty<object>(),
+    ["others"] = Array.Empty<object>()
+};
             }
-            return new{rates,noLogHint="尚无目录价格或保存的探测用量记录，不推测倍率。"};
+            return new Dictionary<string, object?> { ["rates"] = rates, ["noLogHint"] = "尚无目录价格或保存的探测用量记录，不推测倍率。" };
         }
     }
     void PublishPricing()

@@ -2,6 +2,7 @@ using System.Collections.Frozen;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Security.Cryptography;
 using AccountScheduling;
 
@@ -165,20 +166,25 @@ public sealed partial class CredentialManager
     public void MarkResourceFailure(AccountId id)
     {var cell=Find(id);lock(cell.Barrier){var old=Volatile.Read(ref cell.Resources);Volatile.Write(ref cell.Resources,old with{Stale=true,Error="resource_unavailable",CreditExpiresAt=0,ExpiringCredit=0});pool.ClearCreditPriority(id);}}
     sealed record StoredResource(string Identity,AccountResourceStatus Observation);
-    static readonly JsonSerializerOptions ResourceJson=new(JsonSerializerDefaults.Web);
+    sealed record ResourceDocument(int Version, StoredResource[] Accounts);
+
+    [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
+    [JsonSerializable(typeof(ResourceDocument))]
+    [JsonSerializable(typeof(StoredResource[]))]
+    partial class ResourceJson : JsonSerializerContext { }
     static string ResourceIdentity(Cell cell)
     {var c=Volatile.Read(ref cell.Current).Credential.Identity;return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(((int)c.Site)+"\0"+c.Uid+"\0"+c.EnterpriseId)));}
     public IReadOnlyList<RuntimeIdentity> RuntimeIdentities=>cells.Values.Select(c=>new RuntimeIdentity(c.Registration.Id,Volatile.Read(ref c.Current).Credential.Identity.Site,ResourceIdentity(c))).ToArray();
     public string HistoricalIdentity(AccountId id,string file)
     {var c=Volatile.Read(ref Find(id).Current).Credential.Identity;return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(file+"\0"+(c.Site==AccountSite.Cn?"cn":"intl")+"\0"+c.Uid+"\0"+c.EnterpriseId.Trim())));}
-    public byte[] ExportResources()=>JsonSerializer.SerializeToUtf8Bytes(new{version=1,accounts=cells.Values.Where(c=>Volatile.Read(ref c.Resources).Known).Select(c=>new StoredResource(ResourceIdentity(c),Volatile.Read(ref c.Resources))).ToArray()},ResourceJson);
+    public byte[] ExportResources()=>JsonSerializer.SerializeToUtf8Bytes(new ResourceDocument(1, cells.Values.Where(c=>Volatile.Read(ref c.Resources).Known).Select(c=>new StoredResource(ResourceIdentity(c),Volatile.Read(ref c.Resources))).ToArray()), ResourceJson.Default.ResourceDocument);
     public void ValidateResourceSnapshot(ReadOnlyMemory<byte> bytes)=>ParseResources(bytes);
     StoredResource[] ParseResources(ReadOnlyMemory<byte> bytes)
     {
         if(bytes.Length>4<<20)throw new ArgumentException("Resource snapshot exceeds bounds");
         using var doc=JsonDocument.Parse(bytes,new JsonDocumentOptions{MaxDepth=8});var root=doc.RootElement;
         if(root.GetProperty("version").GetInt32()!=1||root.GetProperty("accounts").ValueKind!=JsonValueKind.Array||root.GetProperty("accounts").GetArrayLength()>1024)throw new ArgumentException("Invalid resource snapshot");
-        var records=JsonSerializer.Deserialize<StoredResource[]>(root.GetProperty("accounts"),ResourceJson)!;var seen=new HashSet<string>(StringComparer.Ordinal);long now=time.GetUtcNow().ToUnixTimeSeconds();
+        var records=JsonSerializer.Deserialize(root.GetProperty("accounts"), ResourceJson.Default.StoredResourceArray)!;var seen=new HashSet<string>(StringComparer.Ordinal);long now=time.GetUtcNow().ToUnixTimeSeconds();
         foreach(var row in records)
         {
             var s=row?.Observation;

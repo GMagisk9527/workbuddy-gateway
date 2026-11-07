@@ -32,7 +32,7 @@ internal static class AgentToolApi
             c.Response.StatusCode=status;
             if(status is 429 or 503)c.Response.Headers.RetryAfter="1";
             if(status==413&&c.Request.Protocol.StartsWith("HTTP/1",StringComparison.Ordinal))c.Response.Headers.Connection="close";
-            await c.Response.WriteAsJsonAsync(new{error=new{type="upstream_error",code,message}},c.RequestAborted);
+            await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["error"] = new Dictionary<string, object?> { ["type"] = "upstream_error", ["code"] = code, ["message"] = message } });
         }
         try
         {
@@ -79,7 +79,7 @@ internal static class AgentToolApi
                     await Error(status,code is not (null or "0")?code:"upstream_error","上游工具接口拒绝请求");return;
                 }
                 object result=AgentToolProtocol.Project(root,fetch);
-                Settle();await c.Response.WriteAsJsonAsync(result,c.RequestAborted);
+                Settle();await GatewayJson.WriteAsync(c, result);
             }
         }
         catch(RequestFailure e){await Error(e.Status,e.ErrorType,e.Message);}

@@ -14,7 +14,7 @@ public sealed class ScheduledTaskJournal
         try
         {
             if(!File.Exists(path))return;
-            var rows=JsonSerializer.Deserialize<Entry[]>(ConsoleSettings.Read(path,512<<10))??throw new InvalidDataException();
+            var rows=JsonSerializer.Deserialize(ConsoleSettings.Read(path,512<<10), StorageJson.Default.EntryArray)??throw new InvalidDataException();
             if(rows.Length>256||rows.Any(e=>e is null||e.Id is null||e.Run is null||e.Id.Length>40||e.Id.Any(c=>!char.IsAsciiLetter(c)&&c!='_')||e.Run.TraceId is null||e.Run.TraceId.Length>64||e.Run.TraceId.Any(c=>!char.IsAsciiHexDigit(c))||e.Run.Status is not("success" or "failed" or "partial" or "skipped" or "cancelled")))throw new InvalidDataException();
             foreach(var entry in rows)entries.Enqueue(entry);
         }
@@ -32,7 +32,7 @@ public sealed class ScheduledTaskJournal
         }
     }
     public string[] Lines(int count,int retentionDays)
-    {lock(sync){long cutoff=retentionDays==0?0:new DateTimeOffset(DateTime.Now.Date.AddDays(-(retentionDays-1))).ToUnixTimeSeconds();return entries.Where(e=>e.Run.LastFinishedAt>=cutoff).TakeLast(Math.Clamp(count,1,256)).Select(e=>JsonSerializer.Serialize(e)).ToArray();}}
+    {lock(sync){long cutoff=retentionDays==0?0:new DateTimeOffset(DateTime.Now.Date.AddDays(-(retentionDays-1))).ToUnixTimeSeconds();return entries.Where(e=>e.Run.LastFinishedAt>=cutoff).TakeLast(Math.Clamp(count,1,256)).Select(e=>JsonSerializer.Serialize(e, StorageJson.Default.Entry)).ToArray();}}
     public int Cleanup(int retentionDays,DateTimeOffset now)
     {
         if(retentionDays==0)return 0;lock(sync)
@@ -48,7 +48,7 @@ public sealed class ScheduledTaskJournal
         lock(disk)
         {
             Entry[] rows;long version;lock(sync){if(revision==saved)return true;rows=entries.ToArray();version=revision;}
-            try{ConsoleSettings.Atomic(path,JsonSerializer.SerializeToUtf8Bytes(rows));lock(sync){saved=version;WriteFailed=false;}return true;}
+            try{ConsoleSettings.Atomic(path,JsonSerializer.SerializeToUtf8Bytes(rows, StorageJson.Default.EntryArray));lock(sync){saved=version;WriteFailed=false;}return true;}
             catch(Exception e)when(e is IOException or UnauthorizedAccessException){WriteFailed=true;return false;}
         }
     }

@@ -16,7 +16,7 @@ public sealed class DailyCheckinScheduler:IDisposable
     readonly object sync=new();readonly string directory;readonly FileStream owner;readonly TimeProvider time;readonly Func<int,int> random;readonly Action<byte[]> save;
     CheckinDocument doc=new(1,"",[]);HashSet<string> active=[];
     public bool Blocked{get;private set;}
-    static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web);
+
     static readonly TimeSpan Zone=TimeSpan.FromHours(8);
     public DailyCheckinScheduler(string directory,TimeProvider? time=null,Func<int,int>? random=null,Action<byte[]>? save=null)
     {
@@ -26,7 +26,7 @@ public sealed class DailyCheckinScheduler:IDisposable
         if(File.ReadAllText(marker)!="calendar-v1")throw new InvalidDataException("Invalid calendar ownership");
         string file=Path.Combine(this.directory,"checkin-state.json"),lockFile=Path.Combine(this.directory,".calendar.lock");ConsoleSettings.CheckLink(lockFile);owner=new(lockFile,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
         this.save=save??(bytes=>ConsoleSettings.Atomic(file,bytes));
-        try{if(File.Exists(file)){var loaded=JsonSerializer.Deserialize<CheckinDocument>(ConsoleSettings.Read(file,8<<20),Json)??throw new InvalidDataException();Validate(loaded);doc=loaded;}}
+        try{if(File.Exists(file)){var loaded=JsonSerializer.Deserialize(ConsoleSettings.Read(file,8<<20), GatewayJson.Default.CheckinDocument)??throw new InvalidDataException();Validate(loaded);doc=loaded;}}
         catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException or JsonException or ArgumentException or InvalidOperationException){Blocked=true;}
     }
     static (long Start,long Retry,long End,long DayEnd) Windows(DateTimeOffset at)
@@ -42,7 +42,7 @@ public sealed class DailyCheckinScheduler:IDisposable
     bool Save()
     {
         if(Blocked)return false;
-        try{byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(doc,Json);if(bytes.Length>8<<20)throw new InvalidDataException();save(bytes);return true;}
+        try{byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(doc, GatewayJson.Default.CheckinDocument);if(bytes.Length>8<<20)throw new InvalidDataException();save(bytes);return true;}
         catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException){Blocked=true;return false;}
     }
     long Due(CheckinPlan p)=>Math.Max(p.StartupAt,doc.LastStartupAt+60000);

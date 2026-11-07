@@ -32,7 +32,7 @@ internal static class ConsoleMaintenanceSetup
             {
                 try
                 {
-                    var status=JsonSerializer.SerializeToUtf8Bytes(ConsoleApi.Status(options,console),new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                    var status=GatewayJson.Encode(ConsoleApi.Status(options, console));
                     if(status.Length>4<<20)return false;
                     ConsoleSettings.Atomic(Path.Combine(directory,"status.json"),status);return console.TaskJournal.Save();
                 }

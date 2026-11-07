@@ -42,7 +42,7 @@ public sealed class ModelPriceProbeWorker:BackgroundService
             if(account is not null)yield return(site,model,account.Id);
         }
     }
-    void Save(){ConsoleSettings.Atomic(path,JsonSerializer.SerializeToUtf8Bytes(probes));Volatile.Write(ref published,probes.ToArray());}
+    void Save(){ConsoleSettings.Atomic(path,JsonSerializer.SerializeToUtf8Bytes(probes, StorageJson.Default.ListProbe));Volatile.Write(ref published,probes.ToArray());}
     public async Task RunOnceAsync(CancellationToken token=default)
     {
         if(!await gate.WaitAsync(0,token))return;string trace=TaskState.Begin();int attempted=0,ok=0,failed=0;
@@ -64,7 +64,7 @@ public sealed class ModelPriceProbeWorker:BackgroundService
                 {
                     using var credential=await credentials.AcquireForHeadersAsync(item.Account,SiteEndpoints.Model(item.Site),deadline.Token);
                     if(!catalog.Allows(item.Model)||!credentials.AllowsModel(item.Account,item.Model)){failed++;continue;}
-                    using var request=new HttpRequestMessage(HttpMethod.Post,SiteEndpoints.Model(item.Site)){Content=JsonContent.Create(new{model=item.Model,stream=true,max_tokens=300,messages=new[]{new{role="system",content="You are a helpful assistant."},new{role="user",content="Please write a factual paragraph of about 150 words about the water cycle, without markdown."}}})};
+                    using var request=new HttpRequestMessage(HttpMethod.Post,SiteEndpoints.Model(item.Site)){Content=JsonContent.Create<object>(new Dictionary<string, object?> { ["model"] = item.Model, ["stream"] = true, ["max_tokens"] = 300, ["messages"] = new[]{new Dictionary<string, object?> { ["role"] = "system", ["content"] = "You are a helpful assistant." },new Dictionary<string, object?> { ["role"] = "user", ["content"] = "Please write a factual paragraph of about 150 words about the water cycle, without markdown." }} }, GatewayJson.Default.Object)};
                     credential.ApplyTo(request);
                     using var response=await client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,deadline.Token);
                     if(!response.IsSuccessStatusCode)

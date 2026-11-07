@@ -50,13 +50,13 @@ internal sealed class RestrictedReplay(HttpContext context,string model,bool str
         if(!context.Items.TryGetValue(Key,out var value)||value is not RestrictedReplay replay)return false;
         await replay.StopAsync();if(!context.Response.HasStarted)return false;
         if(context.RequestAborted.IsCancellationRequested){context.Abort();return true;}
-        string? eventName=null;object error=new{type,code=code??type,message};object payload=new{error};
+        string? eventName=null;object error=new Dictionary<string, object?> { ["type"] = type, ["code"] = code??type, ["message"] = message };object payload=new Dictionary<string, object?> { ["error"] = error };
         if(context.Request.Path.Value?.EndsWith("/responses",StringComparison.Ordinal)==true)
         {
-            eventName="response.failed";payload=new{type=eventName,sequence_number=0,response=new{id="resp_"+Guid.NewGuid().ToString("N"),@object="response",created_at=DateTimeOffset.UtcNow.ToUnixTimeSeconds(),status="failed",model=replay.modelName,output=Array.Empty<object>(),error=new{code=code??type,message}}};
+            eventName="response.failed";payload=new Dictionary<string, object?> { ["type"] = eventName, ["sequence_number"] = 0, ["response"] = new Dictionary<string, object?> { ["id"] = "resp_"+Guid.NewGuid().ToString("N"), ["object"] = "response", ["created_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["status"] = "failed", ["model"] = replay.modelName, ["output"] = Array.Empty<object>(), ["error"] = new Dictionary<string, object?> { ["code"] = code??type, ["message"] = message } } };
         }
-        else if(context.Request.Path.Value?.EndsWith("/messages",StringComparison.Ordinal)==true){eventName="error";payload=new{type="error",error};}
-        string frame=(eventName is null?"":"event: "+eventName+"\n")+"data: "+JsonSerializer.Serialize(payload)+"\n\n";
+        else if(context.Request.Path.Value?.EndsWith("/messages",StringComparison.Ordinal)==true){eventName="error";payload=new Dictionary<string, object?> { ["type"] = "error", ["error"] = error };}
+        string frame=(eventName is null?"":"event: "+eventName+"\n")+"data: "+JsonSerializer.Serialize(payload, GatewayJson.Default.Object)+"\n\n";
         await context.Response.Body.WriteAsync(Encoding.UTF8.GetBytes(frame),context.RequestAborted);await context.Response.Body.FlushAsync(context.RequestAborted);return true;
     }
     public async ValueTask DisposeAsync(){await StopAsync();context.Items.Remove(Key);}
