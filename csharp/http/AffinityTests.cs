@@ -39,7 +39,7 @@ internal static class AffinityTests
     }
     internal static async Task Run(string scratch)
     {
-        checks=0;ParsedSessionChecks();var settings=new AffinityOptions(true);var affinity=new SessionAffinity(settings);
+        checks=0;ParsedSessionChecks();ParsedPrefixChecks();var settings=new AffinityOptions(true);var affinity=new SessionAffinity(settings);
         byte[] body=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"u\"}],\"tools\":[]}");
         string? Key(string caller="a",string model="m",string? session=null,byte[]? input=null)=>affinity.Key(caller,model,session,input??body);
         var headers=new HeaderDictionary{{"session_id","dsh-conversation"}};
@@ -113,6 +113,28 @@ internal static class AffinityTests
             if(i%7==0){headers["x-claude-code-session-id"]="claude";headers["x-claude-code-agent-id"]="child";}
             Check(SessionAffinity.SessionDigest(headers,bytes)==SessionAffinity.SessionDigest(headers,document.RootElement),"Parsed session extraction preserves priority, duplicates and bounded seeds");
         }
+    }
+    static void ParsedPrefixChecks()
+    {
+        var affinity=new SessionAffinity(new(true,Mode:AffinityMode.Prefix));
+        for(int i=0;i<100;i++)foreach(bool canonical in new[]{false,true})
+        {
+            var root=new System.Text.Json.Nodes.JsonObject
+            {
+                ["model"]="m",["messages"]=new System.Text.Json.Nodes.JsonArray(
+                    new System.Text.Json.Nodes.JsonObject{["role"]="system",["content"]="instruction 中文 <>& "+i},
+                    new System.Text.Json.Nodes.JsonObject{["role"]="user",["content"]="hello \" \\ \n "+i},
+                    new System.Text.Json.Nodes.JsonObject{["role"]="tool",["content"]=new string('x',1<<20)}),
+                ["stream"]=true
+            };
+            if(i%3==0)root["tools"]=new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject{["name"]="read",["parameters"]=new System.Text.Json.Nodes.JsonObject{["type"]="object"}});
+            else if(i%3==1)root["tools"]=null;
+            byte[] bytes=canonical?Encoding.UTF8.GetBytes(TypedMigration.GoJson.Format(root)):OpenAiProtocols.OpenWire.Encode(root,2<<20);
+            string? digest=affinity.PrefixDigest(root,canonical,null);
+            Check(digest is not null&&affinity.KeyFromPrefix("caller","m",digest,65536)==affinity.Key("caller","m",null,bytes),"Parsed prefix digest exactly matches serialized prefix affinity");
+        }
+        var huge=System.Text.Json.Nodes.JsonNode.Parse("{\"messages\":[{\"role\":\"user\",\"content\":\""+new string('x',1<<20)+"\"}]}")!.AsObject();
+        Check(affinity.PrefixDigest(huge,true,null) is null,"Large first-message prefix retains bounded byte-scanner fallback");
     }
     static async Task SchedulingChecks(AccountId a,AccountId b)
     {

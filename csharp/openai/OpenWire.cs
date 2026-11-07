@@ -116,18 +116,20 @@ public static class OpenWire
     }
     public static byte[] Encode(JsonNode? node, long limit,IRetainedOutputBudget? budget=null,bool optimizeLarge=false)
     {
-        int capacity=optimizeLarge&&budget is null&&TryEncodedSize(node,limit,out int size)?size:0;
+        Dictionary<JsonValue,JsonElement>? rawStrings=null;
+        int capacity=optimizeLarge&&budget is null&&TryEncodedSize(node,limit,out int size,out rawStrings)?size:0;
         using var stream = new BudgetStream(limit,budget,capacity);
         using (var writer = new Utf8JsonWriter(stream, new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 }))
-        { WriteNode(writer,node); }
+        { WriteNode(writer,node,capacity>0?rawStrings:null); }
         return stream.ToArray();
     }
     // Only take this path for large, already canonical UTF-8 request values.
     // It avoids MemoryStream growth and its final full-body copy. Streaming
     // output retains the existing incremental shared-budget behavior.
-    static bool TryEncodedSize(JsonNode? node,long limit,out int size)
+    static bool TryEncodedSize(JsonNode? node,long limit,out int size,out Dictionary<JsonValue,JsonElement>? strings)
     {
         long total=0;bool large=false;
+        Dictionary<JsonValue,JsonElement>? validated=null;
         bool Add(long bytes){total+=bytes;return total<=limit&&total<=int.MaxValue;}
         bool Text(string text)
         {
@@ -152,25 +154,31 @@ public static class OpenWire
                 case JsonValue value when value.TryGetValue<JsonElement>(out var element):
                     var raw=JsonMarshal.GetRawUtf8Value(element);
                     if(element.ValueKind!=JsonValueKind.String)return Add(raw.Length);
-                    if(CanonicalString(raw[1..^1])){large|=raw.Length>=4096;return Add(raw.Length);}
+                    if(CanonicalString(raw[1..^1]))
+                    {
+                        large|=raw.Length>=4096;
+                        if(raw.Length>=256)(validated??=[])[value]=element;
+                        return Add(raw.Length);
+                    }
                     return raw.Length<=4096&&Text(element.GetString()!);
                 case JsonValue value when value.TryGetValue<string>(out var text):return Text(text);
                 default:return Add(item.ToJsonString(Json).Length);
             }
         }
-        bool success=Walk(node,0)&&large;size=success?(int)total:0;return success;
+        bool success=Walk(node,0)&&large;size=success?(int)total:0;strings=success?validated:null;return success;
     }
-    static void WriteNode(Utf8JsonWriter writer,JsonNode? node)
+    static void WriteNode(Utf8JsonWriter writer,JsonNode? node,Dictionary<JsonValue,JsonElement>? rawStrings=null)
     {
         switch(node)
         {
             case null:writer.WriteNullValue();return;
             case JsonObject obj:
-                writer.WriteStartObject();foreach(var p in obj){writer.WritePropertyName(p.Key);WriteNode(writer,p.Value);}writer.WriteEndObject();return;
+                writer.WriteStartObject();foreach(var p in obj){writer.WritePropertyName(p.Key);WriteNode(writer,p.Value,rawStrings);}writer.WriteEndObject();return;
             case JsonArray array:
-                writer.WriteStartArray();foreach(var item in array)WriteNode(writer,item);writer.WriteEndArray();return;
+                writer.WriteStartArray();foreach(var item in array)WriteNode(writer,item,rawStrings);writer.WriteEndArray();return;
             case JsonValue value when value.TryGetValue<JsonElement>(out var element)&&element.ValueKind==JsonValueKind.String:
                 var raw=JsonMarshal.GetRawUtf8Value(element);
+                if(rawStrings?.ContainsKey(value)==true){writer.WriteRawValue(raw,skipInputValidation:true);return;}
                 if(raw.Length>=256&&CanonicalString(raw[1..^1])){writer.WriteRawValue(raw,skipInputValidation:true);return;}
                 break;
         }
@@ -183,11 +191,9 @@ public static class OpenWire
         if(!Utf8.IsValid(raw))return false;
         while(!raw.IsEmpty)
         {
-            int i=raw.IndexOf((byte)'\\');
-            var plain=i<0?raw:raw[..i];
-            if(JavaScriptEncoder.UnsafeRelaxedJsonEscaping.FindFirstCharacterToEncodeUtf8(plain)>=0)return false;
+            int i=JavaScriptEncoder.UnsafeRelaxedJsonEscaping.FindFirstCharacterToEncodeUtf8(raw);
             if(i<0)return true;
-            if(i+1>=raw.Length||raw[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
+            if(raw[i]!=(byte)'\\'||i+1>=raw.Length||raw[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
             raw=raw[(i+2)..];
         }
         return true;

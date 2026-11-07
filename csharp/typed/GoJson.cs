@@ -95,11 +95,11 @@ static class GoJson
         output.Advance(position);
     }
     // The caller checks the exact escaped size before allocating the output.
-    internal static byte[] FormatUtf8(JsonNode? node,int size)
+    internal static byte[] FormatUtf8(JsonNode? node,int size,IReadOnlyDictionary<JsonValue,int>? rawSizes=null)
     {
-        var output=new Utf8Output(size);output.Walk(node);return output.Finish();
+        var output=new Utf8Output(size,rawSizes);output.Walk(node);return output.Finish();
     }
-    sealed class Utf8Output(int size)
+    sealed class Utf8Output(int size,IReadOnlyDictionary<JsonValue,int>? rawSizes)
     {
         readonly byte[] bytes=new byte[size];int position;
         void Text(ReadOnlySpan<char> text)=>position+=Encoding.UTF8.GetBytes(text,bytes.AsSpan(position));
@@ -129,7 +129,9 @@ static class GoJson
                 case JsonArray array:
                     One((byte)'[');for(int i=0;i<array.Count;i++){if(i>0)One((byte)',');Walk(array[i]);}One((byte)']');break;
                 case JsonValue value:
-                    if(TryRawString(value,out var raw,out int size)){WriteRawString(raw,bytes.AsSpan(position,size));position+=size;}
+                    if(rawSizes is not null&&rawSizes.TryGetValue(value,out int cached))
+                    {WriteRawString(JsonMarshal.GetRawUtf8Value(value.GetValue<JsonElement>()),bytes.AsSpan(position,cached));position+=cached;}
+                    else if(TryRawString(value,out var raw,out int size)){WriteRawString(raw,bytes.AsSpan(position,size));position+=size;}
                     else if(value.TryGetValue<string>(out var text))Quote(text);else Text(value.ToJsonString(ScalarJson));break;
             }
         }

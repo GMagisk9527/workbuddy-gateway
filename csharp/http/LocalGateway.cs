@@ -209,8 +209,14 @@ public static class LocalGateway
             if (keyLease?.Identity is not null) derivedReasoningKey = keyLease.ReasoningKey.ToArray();
             byte[] reasoningKey = derivedReasoningKey ?? options.ReasoningKey;
             var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
-            Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>OutboundPreparation.IsCompatible(root,currentPrompts):null;
             string? sessionDigest=null;bool usesSession=affinity.UsesSession;
+            string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;
+            Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>
+            {
+                bool unchanged=OutboundPreparation.IsCompatible(root,currentPrompts);
+                if(unchanged)prefixDigest=affinity.PrefixDigest(root,protocol is null,sessionDigest);
+                return unchanged;
+            }:null;
             Action<JsonElement>? inspect=usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
@@ -218,7 +224,7 @@ public static class LocalGateway
                 ClientProtocol.Responses => ResponsesRequestAdapter.Prepare(input, reasoningKey,compatibility,inspect),
                 _ => null
             };
-            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null) :
+            var prepared = openAi is null ? MessagesRequestAdapter.Prepare(input, reasoningKey, options.MaxRequestBytes, options.DirectUpstream?currentPrompts:null,usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null,compatibility) :
                 new PreparedMessages(openAi.Model, openAi.Stream, false, false, openAi.Body){OutboundCompatible=openAi.OutboundCompatible};
             modelName=prepared.Model;
             trace?.Model(prepared.Model);
@@ -234,7 +240,8 @@ public static class LocalGateway
                 else prepared=prepared with{UpstreamBody=OutboundPreparation.Prepare(prepared.UpstreamBody,currentPrompts,memory.Reserve,options.MaxRequestBytes)};
             }
             memory.Retain(prepared.UpstreamBody.Length);
-            affinityKey=affinity.Key(keyLease?.Identity?.Id,prepared.Model,sessionDigest,prepared.UpstreamBody);
+            affinityKey=prefixDigest is not null?affinity.KeyFromPrefix(keyLease?.Identity?.Id,prepared.Model,prefixDigest,prefixBytes):null;
+            affinityKey??=affinity.Key(keyLease?.Identity?.Id,prepared.Model,sessionDigest,prepared.UpstreamBody);
             admission?.FinishPreparing();if(preparing){resources.Preparing.Release(); preparing = false;}
             if(options.Catalog is { } directory && !directory.Allows(prepared.Model))throw new RequestFailure("模型被网关禁用",403,"permission_error");
             if(options.DirectUpstream&&prepared.Stream){replay=new(c,prepared.Model,true,timeouts.Keepalive);replay.StartWaiting();}
