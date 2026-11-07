@@ -24,6 +24,7 @@ public static class MessageMapper
         foreach (var message in request.Messages) {
             switch (message.Content) {
                 case StringContent text: messages.Add(new TextMessage(message.Role, text.Text)); break;
+                case BorrowedTextContent text:messages.Add(new BorrowedTextMessage(message.Role,text.Text));break;
                 case EmptyContent: messages.Add(new TextMessage(message.Role, "")); break;
                 case BlocksContent content:
                     switch (message.Role.Kind) {

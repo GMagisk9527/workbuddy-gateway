@@ -47,5 +47,19 @@ internal static class Utf8ToolResultTests
             checks++;
         }
         Console.WriteLine(JsonSerializer.Serialize(new{utf8ToolResultChecks=checks}));
+        foreach(string sample in samples)
+        {
+            byte[] input=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":"+JsonSerializer.Serialize(sample,encoder)+"}]}");
+            using var document=JsonDocument.Parse(input);
+            var owned=MessageMapper.Map(WireReader.Read(document.RootElement));
+            var borrowed=MessageMapper.Map(WireReader.ReadBorrowed(document.RootElement));
+            byte[] expected=Encoding.UTF8.GetBytes(GoJson.Format(WireWriter.ToNode(owned)));
+            if(!expected.AsSpan().SequenceEqual(GoJson.FormatUtf8(WireWriter.ToNode(borrowed),expected.Length)))throw new Exception("Borrowed user text changed wire bytes");
+            using var result=JsonDocument.Parse(MessagesRequestAdapter.Prepare(input,Program.TestKey,prompts:new(Identity:new(Target:"Changed"))).UpstreamBody);
+            using var source=JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(sample,encoder));
+            if(result.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=source.RootElement.GetString())throw new Exception("Borrowed user text was rewritten");
+            checks++;
+        }
+        Console.WriteLine(JsonSerializer.Serialize(new{utf8UserTextChecks=samples.Count}));
     }
 }

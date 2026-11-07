@@ -68,6 +68,7 @@ public sealed record ChatImage(string Url) : ChatPart;
 public sealed record ChatToolCall(ToolCallId Id, ToolName Name, string Arguments);
 public abstract record ChatMessage;
 public sealed record TextMessage(MessageRole Role, string Text) : ChatMessage;
+internal sealed record BorrowedTextMessage(MessageRole Role,JsonElement Text) : ChatMessage;
 public sealed record UserPartsMessage(ImmutableArray<ChatPart> Parts) : ChatMessage;
 public sealed record ToolMessage(ToolCallId Id, string Text) : ChatMessage;
 internal sealed record BorrowedToolMessage(ToolCallId Id, JsonElement Text) : ChatMessage;

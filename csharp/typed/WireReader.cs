@@ -25,7 +25,8 @@ public static class WireReader
             default: return null;
         }
     }
-    static Content ReadContent(JsonElement e,bool borrowToolResults=false) => e.ValueKind switch {
+    static Content ReadContent(JsonElement e,bool borrowToolResults=false,bool borrowUserText=false) => e.ValueKind switch {
+        JsonValueKind.String when borrowUserText&&GoJson.TryRawString(e,out _,out _) => new BorrowedTextContent(e),
         JsonValueKind.String => new StringContent(Text(e)),
         JsonValueKind.Array => new BlocksContent(Items(e).Select(b=>ReadBlock(b,borrowToolResults)).ToImmutableArray()),
         JsonValueKind.Null or JsonValueKind.Undefined => new EmptyContent(),
@@ -61,7 +62,7 @@ public static class WireReader
         var system = Property(root, "system");
         var systemText = system.ValueKind == JsonValueKind.String ? Text(system) : string.Join("\n", Items(system).Where(b => Text(b, "type") == "text" && Text(b, "text") != "").Select(b => Text(b, "text")));
         var messages = Items(Property(root, "messages")).Where(m => m.ValueKind == JsonValueKind.Object)
-            .Select(m => new InputMessage(MessageRole.Parse(Text(m, "role")), ReadContent(Property(m, "content"),borrowToolResults))).ToImmutableArray();
+            .Select(m => new InputMessage(MessageRole.Parse(Text(m, "role")), ReadContent(Property(m, "content"),borrowToolResults,borrowToolResults&&Text(m,"role")=="user"))).ToImmutableArray();
         var tools = ImmutableArray.CreateBuilder<InputTool>();
         foreach (var tool in Items(Property(root, "tools"))) {
             if (tool.ValueKind != JsonValueKind.Object) continue;

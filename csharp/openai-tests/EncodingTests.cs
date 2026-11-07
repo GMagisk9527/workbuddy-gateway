@@ -54,6 +54,15 @@ internal static class EncodingTests
             if(!normalized.AsSpan().SequenceEqual(converted.Body))throw new Exception("Chat fast path changed canonical string escaping");
             checks++;
         }
+        foreach(string text in new[]{" ","\\u0020","\\u00a0","\\n\\t","\\b","abc","中文"})
+        {
+            byte[] request=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"instructions\":\"system\",\"input\":\""+text+"\"}");
+            using var source=JsonDocument.Parse("\""+text+"\"");
+            using var result=JsonDocument.Parse(ResponsesRequestAdapter.Prepare(request,Program.Key).Body);
+            int expected=string.IsNullOrWhiteSpace(source.RootElement.GetString())?1:2;
+            if(result.RootElement.GetProperty("messages").GetArrayLength()!=expected)throw new Exception("UTF-8 user input changed whitespace semantics");
+            checks++;
+        }
         return checks;
 
         void Compare(JsonNode? node)

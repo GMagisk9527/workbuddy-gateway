@@ -89,6 +89,22 @@ public static class OpenWire
         }
         return value.TryGetValue<string>(out _);
     }
+    internal static JsonNode BorrowScalar(JsonValue value)=>value.TryGetValue<JsonElement>(out var element)?JsonValue.Create(element)!:value.DeepClone();
+    internal static bool HasText(JsonValue value)
+    {
+        if(value.TryGetValue<JsonElement>(out var element)&&element.ValueKind==JsonValueKind.String)
+        {
+            var raw=JsonMarshal.GetRawUtf8Value(element);
+            for(int i=1;i<Math.Min(raw.Length-1,129);i++)
+            {
+                byte b=raw[i];if(b>=128)break;
+                if(b==(byte)'\\'&&i+1<raw.Length&&raw[i+1]==(byte)'u')break;
+                if(b==(byte)'\\'&&i+1<raw.Length&&raw[i+1] is (byte)'n' or (byte)'r' or (byte)'t' or (byte)'f'){i++;continue;}
+                if(b>32)return true;
+            }
+        }
+        return value.TryGetValue<string>(out var text)&&!string.IsNullOrWhiteSpace(text);
+    }
     public static JsonObject Parse(ReadOnlyMemory<byte> input)
     {
         if (input.Length > RequestLimit) throw new OpenAiFailure("request_too_large", "请求体超过大小限制", 413);

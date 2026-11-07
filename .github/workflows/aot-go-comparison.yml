@@ -70,6 +70,8 @@ jobs:
             -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci:/ci:ro" workbuddy-comparison sh -ec '
               python3 -B /ci/smoke-gateway.py /binary/optimized/HttpMigration
               python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence \
+                --candidate /binary/optimized/HttpMigration --rounds 3
+              python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/user-evidence \
                 --candidate /binary/optimized/HttpMigration --rounds 3 --variant user --case-index 2 --case-index 3 --case-index 4 --case-index 5
             '
           python3 -m json.tool "$dir/evidence/summary.json"
@@ -81,3 +83,12 @@ jobs:
             ${{ runner.temp }}/gateway-pair/evidence/*.json
             ${{ runner.temp }}/gateway-pair/evidence/*.jsonl
             ${{ runner.temp }}/gateway-pair/evidence/*/gateway.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpine-native-aot-vs-go-user-benchmark
+          path: |
+            ${{ runner.temp }}/gateway-pair/user-evidence/*.json
+            ${{ runner.temp }}/gateway-pair/user-evidence/*.jsonl
+            ${{ runner.temp }}/gateway-pair/user-evidence/*/gateway.log

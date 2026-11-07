@@ -17,7 +17,7 @@ public static class StreamPump
             StreamResult Result(StreamOutcome outcome, string code) => new(outcome, code, state.Usage, failureUsage??state.RawUsageJson, receivedOutput);
             StreamResult Notify(StreamOutcome outcome, string code)
             { var result = Result(outcome, code); if (!notified) { notified = true; beforeTerminal?.Invoke(result); } return result; }
-            bool downstreamFailed = false;
+            bool downstreamFailed = false, firstFrameYielded=false;
             async Task Send(IReadOnlyList<ProtocolEvent> events)
             {
                 foreach (var e in events)
@@ -27,6 +27,10 @@ public static class StreamPump
                     catch (OperationCanceledException) { throw; }
                     catch (IOException) { downstreamFailed = true; throw; }
                     catch (ObjectDisposedException) { downstreamFailed = true; throw; }
+                    // A cached upstream may complete every await synchronously.
+                    // Give Kestrel's transport a turn after the first visible frame.
+                    if(!firstFrameYielded&&e is TextDelta or ThinkingDelta or ToolStart or ToolDelta)
+                    {firstFrameYielded=true;await Task.Yield();}
                 }
             }
             try
