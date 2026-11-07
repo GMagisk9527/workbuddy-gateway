@@ -85,7 +85,10 @@ public static class OpenWire
         if(value.TryGetValue<JsonElement>(out var element)&&element.ValueKind==JsonValueKind.String)
         {
             var raw=JsonMarshal.GetRawUtf8Value(element);
-            if(raw.Length>=256&&CanonicalString(raw[1..^1]))return true;
+            // Type validation needs valid Unicode, not canonical wire escaping.
+            // JSON parsing has checked ordinary escapes; Unicode escapes retain
+            // the decoder path so malformed surrogate pairs still fail there.
+            if(raw.Length>=256&&Utf8.IsValid(raw)&&raw.IndexOf("\\u"u8)<0)return true;
         }
         return value.TryGetValue<string>(out _);
     }
@@ -267,9 +270,10 @@ public static class OpenWire
                     var raw=JsonMarshal.GetRawUtf8Value(element);
                     if(element.ValueKind==JsonValueKind.String)
                     {
-                        // Inspect a little beyond the cut so a split escape cannot
-                        // masquerade as canonical. Split UTF-8 conservatively falls back.
+                        // Inspect beyond the cut so a split escape cannot look
+                        // canonical, and finish at most one partial UTF-8 rune.
                         int count=Math.Min(raw.Length-2,bytes.Length-Written+8);
+                        for(int extra=0;extra<3&&count<raw.Length-2&&(raw[count+1]&0xc0)==0x80;extra++)count++;
                         if(!CanonicalString(raw.Slice(1,count)))return false;
                     }
                     Put(raw);return true;

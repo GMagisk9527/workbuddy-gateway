@@ -73,6 +73,8 @@ jobs:
                 --candidate /binary/optimized/HttpMigration --rounds 7 --requests 64 --verify-conserve-memory 5
               python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/user-evidence \
                 --candidate /binary/optimized/HttpMigration --rounds 7 --requests 64 --verify-conserve-memory 5 --variant user --case-index 2 --case-index 3 --case-index 4 --case-index 5
+              python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/bare-evidence \
+                --candidate /binary/optimized/HttpMigration --rounds 7 --requests 64 --verify-conserve-memory 5 --variant bare --case-index 2 --case-index 3 --case-index 4 --case-index 5
             '
           python3 -m json.tool "$dir/evidence/summary.json"
       - uses: actions/upload-artifact@v4
@@ -97,3 +99,11 @@ jobs:
             ${{ runner.temp }}/gateway-pair/user-evidence/*.json
             ${{ runner.temp }}/gateway-pair/user-evidence/*.jsonl
             ${{ runner.temp }}/gateway-pair/user-evidence/*/gateway.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alpine-native-aot-vs-go-bare-benchmark
+          path: |
+            ${{ runner.temp }}/gateway-pair/bare-evidence/*.json
+            ${{ runner.temp }}/gateway-pair/bare-evidence/*.jsonl
+            ${{ runner.temp }}/gateway-pair/bare-evidence/*/gateway.log

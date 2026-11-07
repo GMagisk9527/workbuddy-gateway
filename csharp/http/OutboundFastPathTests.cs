@@ -15,12 +15,16 @@ internal static class OutboundFastPathTests
         void Verify(JsonObject root,bool expected,SystemPromptOptions? options=null)
         {
             options??=settings;
-            string original=root.ToJsonString();int reserved=0;
+            string original=root.ToJsonString();int reserved=0;string? digest=null;
+            var affinity=new SessionAffinity(new(true,Mode:AffinityMode.Prefix));
             byte[] input=OpenWire.Encode(root,OpenWire.RequestLimit,optimizeLarge:true);
             byte[] reference=OutboundPreparation.Prepare(input,options,_=>{},OpenWire.RequestLimit);
-            byte[]? parsed=OutboundPreparation.PrepareParsed(root,options,n=>reserved=n,OpenWire.RequestLimit);
+            byte[]? parsed=OutboundPreparation.PrepareParsed(root,options,n=>reserved=n,OpenWire.RequestLimit,
+                normalized=>digest=affinity.PrefixDigest(normalized,false,null));
             if(!reference.AsSpan().SequenceEqual(parsed??input)||root.ToJsonString()!=original||parsed is not null&&reserved!=parsed.Length)
                 throw new Exception("Parsed preparation changed normalization, ownership or reservation");
+            if(digest is not null&&affinity.KeyFromPrefix("caller","m",digest,65536)!=affinity.Key("caller","m",null,reference))
+                throw new Exception("Normalized tree prefix changed the original request affinity");
             if(OutboundPreparation.IsCompatible(root,options)!=expected)throw new Exception("Compatibility proof disagreed with expected eligibility");
             if(expected)
             {
@@ -84,8 +88,8 @@ internal static class OutboundFastPathTests
                 list.Add(message);
             }
             var candidate=new JsonObject{["model"]="m",["messages"]=list};
-            if(!OutboundPreparation.IsCompatible(candidate,settings))continue;
-            Verify(candidate,true);proven++;
+            bool compatible=OutboundPreparation.IsCompatible(candidate,settings);
+            Verify(candidate,compatible);if(compatible)proven++;
         }
         if(proven<10)throw new Exception("Compatibility fuzzing did not exercise enough accepted histories");
         Console.WriteLine(JsonSerializer.Serialize(new{outboundFastPathChecks=checks}));

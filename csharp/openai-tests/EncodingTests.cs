@@ -83,6 +83,21 @@ internal static class EncodingTests
         if(!OpenWire.TryEncodePrefix(large,new byte[65536],out int prefixLength)||prefixLength!=65536)
             throw new Exception("Large canonical user prefix did not take the bounded path");
         checks++;
+        foreach(string sample in new[]{string.Concat(Enumerable.Repeat("中文 😀 line\nquote\"slash\\ ",2048)),new string('x',8192)+"\u2028\u2029"})
+        {
+            var tree=OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(new{role="user",content=sample},options));
+            var encoded=OpenWire.Encode(tree,OpenWire.RequestLimit);
+            foreach(int limit in Enumerable.Range(32,64))
+            {
+                var prefix=new byte[limit];
+                if(OpenWire.TryEncodePrefix(tree,prefix,out int written)&&!prefix.AsSpan(0,written).SequenceEqual(encoded.AsSpan(0,written)))
+                    throw new Exception("Partial UTF-8 lookahead changed the prefix");
+                checks++;
+            }
+            var request=ResponsesRequestAdapter.Prepare(JsonSerializer.SerializeToUtf8Bytes(new{model="m",input=new[]{new{role="user",content=sample}}},options),Program.Key);
+            using var document=JsonDocument.Parse(request.Body);
+            if(document.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()!=sample)throw new Exception("String validation changed Unicode or escaping");checks++;
+        }
         return checks;
 
         void Compare(JsonNode? node)

@@ -176,7 +176,7 @@ def measure(mode, binary, case, server, env, directory, repeats, count, variant=
             with server.guard:
                 server.output = DELTA * frames + TAIL
             body = helpers.make_body(protocol, size)
-            if variant == "user":
+            if variant in ("user", "bare"):
                 request = json.loads(body)
                 history = request["input"] if protocol == "responses" else request["messages"]
                 content = history[-1]["output"] if protocol == "responses" else history[-1]["content"]
@@ -185,6 +185,11 @@ def measure(mode, binary, case, server, env, directory, repeats, count, variant=
                 else:
                     before = [m for m in history if m.get("role") == "system"]
                     request["messages"] = before + [{"role":"user","content":content}]
+                if variant == "bare":
+                    request.pop("instructions",None)
+                    request.pop("system",None)
+                    if "messages" in request:
+                        request["messages"] = [m for m in request["messages"] if m.get("role") != "system"]
                 body = json.dumps(request,ensure_ascii=False,separators=(",",":")).encode()
 
             for _ in range(4):
@@ -223,7 +228,7 @@ def main():
     parser.add_argument("aot", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--candidate", type=Path)
-    parser.add_argument("--variant",choices=("tool","user"),default="tool")
+    parser.add_argument("--variant",choices=("tool","user","bare"),default="tool")
     parser.add_argument("--rounds", type=int, default=3, choices=(1, 3, 7))
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16, 64))
     parser.add_argument("--memory-tuning", action="store_true")
