@@ -52,10 +52,14 @@ internal static class RestrictedReplayTests
                 request.Headers.Authorization=new("Bearer",issued.TakeSecret());
                 request.Content=JsonContent.Create(path.EndsWith("responses",StringComparison.Ordinal)?(object)new{model="m",input="hello",stream}:new{model="m",messages=new[]{new{role="user",content="hello"}},stream});
                 var pending=client.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,cancel.Token);await backend.First.Task.WaitAsync(TimeSpan.FromSeconds(3));
-                for(int i=0;i<100&&(pool.Status.Active!=0||!credentials.Status.Single(s=>s.Id==ids[0]).Disabled);i++)await Task.Delay(2);
-                Check(pool.Status.Active==0&&files[0].Load().Disabled&&ledger.Health.PendingAttempts==0&&backend.Calls==1,"Cooldown persists restriction and releases account/WAL attempt before waiting");
                 if(mode=="cancel")
                 {
+                    // Observe the real two-minute wait, not a 300 ms replay
+                    // window which a busy CI scheduler may already have missed.
+                    bool Released()=>pool.Status.Active==0&&files[0].Load().Disabled&&ledger.Health.PendingAttempts==0;
+                    long observation=Stopwatch.GetTimestamp();
+                    while(!Released()&&Stopwatch.GetElapsedTime(observation)<TimeSpan.FromSeconds(3))await Task.Delay(10);
+                    Check(Released()&&backend.Calls==1,$"Cooldown persists restriction and releases account/WAL attempt before waiting: {path}, stream={stream}");
                     HttpResponseMessage? response=null;
                     if(stream){response=await pending;Check(response.StatusCode==HttpStatusCode.OK&&response.Content.Headers.ContentType?.MediaType=="text/event-stream","Cooldown starts streaming transport before any model output");}
                     cancel.Cancel();response?.Dispose();try{using var ignored=await pending;}catch(OperationCanceledException){}
@@ -77,6 +81,7 @@ internal static class RestrictedReplayTests
                     else Check(content.Contains("ok")&&ledger.GetUsage(issued.Item.Id).Total==1,"Successful fallback accounts for exactly its actual usage");
                     Check(!files[2].Load().Disabled&&ledger.Health.PendingAttempts==0&&pool.Status.Active==0,"Third account and ledger remain untouched");
                 }
+                if(mode!="cancel")Check(files[0].Load().Disabled&&ledger.Health.PendingAttempts==0&&pool.Status.Active==0,"Completed replay leaves the original restriction persisted and account/WAL attempts released");
             }
             finally{foreach(var file in files)file.Dispose();}
         }
