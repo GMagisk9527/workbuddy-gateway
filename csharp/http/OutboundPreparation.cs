@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using OpenAiProtocols;
 
 namespace HttpMigration;
 
@@ -24,6 +25,17 @@ public static class OutboundPreparation
     internal static bool IsCompatible(JsonObject root,SystemPromptOptions settings)
     {
         settings.Validate();return !Normalize(V.From(root),settings);
+    }
+    // The adapter keeps its document alive until this call has encoded all
+    // borrowed scalars. Null means the original tree was already normalized.
+    internal static byte[]? PrepareParsed(JsonObject root,SystemPromptOptions settings,Action<int> reserve,int limit,Action<JsonObject>? inspect=null)
+    {
+        settings.Validate();var shadow=V.From(root);bool changed=Normalize(shadow,settings);
+        var normalized=changed?shadow.ToNode()!.AsObject():root;inspect?.Invoke(normalized);
+        if(!changed)return null;
+        try{return OpenWire.Encode(normalized,limit,optimizeLarge:true,reserve:reserve);}
+        catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded")
+        {throw new RequestFailure("转换后的请求超过大小限制",413,"request_too_large");}
     }
     // Lazily materialize just the objects/arrays being edited. Large content and
     // tool schemas remain borrowed JsonElements for the lifetime of this call.
@@ -50,6 +62,20 @@ public static class OutboundPreparation
         internal bool Remove(string key)=>Obj.Remove(key);
         internal string S(string key)=>Get(key)?.Str()??"";
         internal string Role=>S("role").Trim().ToLowerInvariant();
+        internal JsonNode? ToNode()
+        {
+            if(kind==JsonValueKind.Object)return new JsonObject(Obj.Select(p=>new KeyValuePair<string,JsonNode?>(p.Key,p.Value.ToNode())));
+            if(kind==JsonValueKind.Array)return new JsonArray(Arr.Select(v=>v.ToNode()).ToArray());
+            if(text is not null)return JsonValue.Create(text);
+            if(kind==JsonValueKind.Null)return null;
+            if(dom is JsonValue value)
+            {
+                if(value.TryGetValue<JsonElement>(out var element))return JsonValue.Create(element);
+                if(value.TryGetValue<string>(out var decoded))return JsonValue.Create(decoded);
+                return value.DeepClone();
+            }
+            return JsonValue.Create(raw);
+        }
         internal void Write(Utf8JsonWriter w)
         {
             if(obj is not null){w.WriteStartObject();foreach(var p in obj){w.WritePropertyName(p.Key);p.Value.Write(w);}w.WriteEndObject();}

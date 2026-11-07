@@ -130,10 +130,20 @@ public static class OpenWire
             throw new OpenAiFailure("invalid_request", "model 必须是 1～256 字节的有效 UTF-8 字符串，不能包含空白或控制字符");
         return model;
     }
-    public static byte[] Encode(JsonNode? node, long limit,IRetainedOutputBudget? budget=null,bool optimizeLarge=false)
+    public static byte[] Encode(JsonNode? node, long limit,IRetainedOutputBudget? budget=null,bool optimizeLarge=false,Action<int>? reserve=null)
     {
         Dictionary<JsonValue,JsonElement>? rawStrings=null;
         int capacity=optimizeLarge&&budget is null&&TryEncodedSize(node,limit,out int size,out rawStrings)?size:0;
+        if(reserve is not null)
+        {
+            if(capacity==0)
+            {
+                using var count=new CountingStream(limit);
+                using var counter=new Utf8JsonWriter(count,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256});
+                WriteNode(counter,node);counter.Flush();capacity=checked((int)count.Length);
+            }
+            reserve(capacity);
+        }
         using var stream = new BudgetStream(limit,budget,capacity);
         using (var writer = new Utf8JsonWriter(stream, new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, MaxDepth = 256 }))
         { WriteNode(writer,node,capacity>0?rawStrings:null); }
@@ -269,6 +279,16 @@ public static class OpenWire
                 default:return false;
             }
         }
+    }
+    sealed class CountingStream(long limit):Stream
+    {
+        long count;
+        public override void Write(ReadOnlySpan<byte> value){if(value.Length>limit-count)throw new OpenAiFailure("output_budget_exceeded","输出超过大小限制",502);count+=value.Length;}
+        public override void Write(byte[] value,int offset,int length)=>Write(value.AsSpan(offset,length));
+        public override long Length=>count;public override bool CanRead=>false;public override bool CanSeek=>false;public override bool CanWrite=>true;
+        public override long Position{get=>count;set=>throw new NotSupportedException();}
+        public override void Flush(){}public override int Read(byte[] value,int offset,int length)=>throw new NotSupportedException();
+        public override long Seek(long offset,SeekOrigin origin)=>throw new NotSupportedException();public override void SetLength(long length)=>throw new NotSupportedException();
     }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget,int capacity=0) : Stream
     {

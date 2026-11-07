@@ -8,7 +8,7 @@ public static class ChatRequestAdapter
 {
     public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes)=>Prepare(bytes,null,false);
     // consumeInput transfers ownership of a full input array to the prepared request.
-    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes,Func<JsonObject,bool>? compatibility,bool consumeInput=false,Action<System.Text.Json.JsonElement>? inspectInput=null)
+    public static OpenAiRequest Prepare(ReadOnlyMemory<byte> bytes,Func<JsonObject,bool>? compatibility,bool consumeInput=false,Action<System.Text.Json.JsonElement>? inspectInput=null,Func<JsonObject,byte[]?>? prepareBody=null)
     {
         using var document=ParseRequest(bytes);var root = document.Root; string model = Model(root);
         inspectInput?.Invoke(document.Original);
@@ -24,7 +24,9 @@ public static class ChatRequestAdapter
         bool explicitStream=root["stream"] is JsonValue streamValue&&streamValue.TryGetValue<bool>(out var rawStream)&&rawStream;
         bool explicitModel=root["model"] is JsonValue modelValue&&modelValue.TryGetValue<string>(out var rawModel)&&rawModel==model;
         root["model"] = model; root["stream"] = true;
-        bool compatible=compatibility?.Invoke(root)??false;
+        byte[]? prepared=prepareBody?.Invoke(root);
+        bool compatible=prepareBody is not null||(compatibility?.Invoke(root)??false);
+        if(prepared is not null)return new(model,stream,prepared,ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
         if(stream&&explicitStream&&explicitModel&&!document.HasDuplicates&&document.HasCanonicalStrings()&&OpenWire.IsMinified(document.Raw.Span))
         {
             if(consumeInput&&MemoryMarshal.TryGetArray(document.Raw,out ArraySegment<byte> raw)&&raw.Offset==0&&raw.Count==raw.Array!.Length)

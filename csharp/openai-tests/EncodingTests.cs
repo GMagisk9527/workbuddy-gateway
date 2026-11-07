@@ -101,6 +101,8 @@ internal static class EncodingTests
             }
             byte[] expected=bytes.ToArray(),actual=OpenWire.Encode(node,expected.Length,optimizeLarge:true);
             if(!expected.AsSpan().SequenceEqual(actual))throw new Exception("UTF-8 writer changed the encoded JSON");
+            int reserved=0;byte[] admitted=OpenWire.Encode(node,expected.Length,optimizeLarge:true,reserve:n=>reserved=n);
+            if(reserved!=expected.Length||!expected.AsSpan().SequenceEqual(admitted))throw new Exception("Preallocation reservation changed the exact encoded size");
             try{OpenWire.Encode(node,expected.Length-1,optimizeLarge:true);throw new Exception("Output budget was bypassed");}
             catch(OpenAiFailure failure)when(failure.Code=="output_budget_exceeded"){}
             checks++;
