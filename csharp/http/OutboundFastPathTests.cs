@@ -49,6 +49,8 @@ internal static class OutboundFastPathTests
         var defaultModel=Encoding.UTF8.GetBytes("{\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
         var defaulted=ChatRequestAdapter.Prepare(defaultModel);
         if(JsonDocument.Parse(defaulted.Body).RootElement.GetProperty("model").GetString()!="hy4-preview")throw new Exception("Missing Chat model bypassed default insertion");checks++;
+        var unstreamed=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        if(ChatRequestAdapter.Prepare(unstreamed).Body.AsSpan().SequenceEqual(unstreamed))throw new Exception("Non-streaming Chat request skipped mandatory upstream streaming");checks++;
         input=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"instructions\":\"Keep these rules.\",\"input\":[{\"type\":\"function_call\",\"call_id\":\"a\",\"name\":\"read\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"a\",\"output\":\"result\"}]}");
         var responses=ResponsesRequestAdapter.Prepare(input,Program.TestKey,r=>OutboundPreparation.IsCompatible(r,settings));
         if(!responses.OutboundCompatible||!responses.Body.AsSpan().SequenceEqual(OutboundPreparation.Prepare(responses.Body,settings,_=>{},32<<20)))throw new Exception("Responses compatibility proof changed its body");checks++;

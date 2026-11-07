@@ -17,10 +17,12 @@ public static class ChatRequestAdapter
             Require(role is "user" or "assistant" or "system" or "developer" or "tool" or "function", "messages.role 无效");
             Require(message["content"] is null or JsonArray || message["content"] is JsonValue v && IsString(v), "messages.content 必须是字符串或内容块数组");
         }
-        bool stream = Bool(root["stream"]); root["model"] = model; root["stream"] = true;
-        bool compatible=compatibility?.Invoke(root)??false;
+        bool stream = Bool(root["stream"]);
+        bool explicitStream=root["stream"] is JsonValue streamValue&&streamValue.TryGetValue<bool>(out var rawStream)&&rawStream;
         bool explicitModel=root["model"] is JsonValue modelValue&&modelValue.TryGetValue<string>(out var rawModel)&&rawModel==model;
-        if(stream&&explicitModel&&!document.HasDuplicates&&OpenWire.IsMinified(document.Raw.Span))
+        root["model"] = model; root["stream"] = true;
+        bool compatible=compatibility?.Invoke(root)??false;
+        if(stream&&explicitStream&&explicitModel&&!document.HasDuplicates&&OpenWire.IsMinified(document.Raw.Span))
             return new(model,true,document.Raw.ToArray(),ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
         return new(model, stream, Encode(root, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Chat, new Dictionary<string, ResponseTool>(), new()){OutboundCompatible=compatible};
     }
