@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors><EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <RestoreSources></RestoreSources>
+    <OutputType Condition="'$(GatewayLibraryBuild)' == 'true'">Library</OutputType>
+    <GenerateDependencyFile Condition="'$(GatewayLibraryBuild)' == 'true'">false</GenerateDependencyFile>
+    <GenerateRuntimeConfigurationFiles Condition="'$(GatewayLibraryBuild)' == 'true'">false</GenerateRuntimeConfigurationFiles>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayLibraryBuild)' == 'true'"><Compile Remove="Program.cs" /></ItemGroup>
+</Project>

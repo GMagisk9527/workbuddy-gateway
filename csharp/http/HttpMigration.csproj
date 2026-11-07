@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><EnableNETAnalyzers>true</EnableNETAnalyzers>
+  </PropertyGroup>
+  <!-- Opt-in only. The current application still has AOT diagnostics to resolve;
+       never suppress them or use this candidate for production before native tests. -->
+  <PropertyGroup Condition="'$(GatewayNativeAot)' == 'true'">
+    <PublishAot>true</PublishAot>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <ILLinkTreatWarningsAsErrors>true</ILLinkTreatWarningsAsErrors>
+    <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="web/*" LogicalName="AdminAssets.%(Filename)%(Extension)" />
+    <ProjectReference Include="../streaming/StreamingMigration.csproj" />
+    <ProjectReference Include="../security/KeySecurity.csproj" />
+    <ProjectReference Include="../ledger/LedgerMigration.csproj" />
+    <ProjectReference Include="../scheduling/AccountScheduling.csproj" />
+    <ProjectReference Include="../maintenance/AccountMaintenance.csproj" />
+    <ProjectReference Include="../login/AccountLogin.csproj" />
+    <ProjectReference Include="../openai/OpenAiProtocols.csproj" />
+    <Compile Include="../typed/GoJson.cs" Link="GoJson.cs" />
+  </ItemGroup>
+</Project>
