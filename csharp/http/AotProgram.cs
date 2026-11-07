@@ -9,6 +9,11 @@ internal static class AotProgram
     static Task Main(string[] args)
     {
         Console.InputEncoding=new UTF8Encoding(false);Console.OutputEncoding=new UTF8Encoding(false);
+        if(args is ["--benchmark-gc-config"])
+        {
+            foreach(var item in GC.GetConfigurationVariables())Console.WriteLine($"{item.Key}={item.Value}");
+            return Task.CompletedTask;
+        }
         if(args.Length is 4 or 5&&args[0] is "--standalone" or "--standalone-pool")return Program.RunStandalone(args);
         if (args is ["--state-check", var accounts, var keys])
         {

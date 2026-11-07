@@ -132,6 +132,9 @@ def fixture(root, mode):
 
 
 def measure(mode, binary, case, server, env, directory, repeats, count, variant="tool"):
+    env = dict(env)
+    if mode.startswith("conserve"):
+        env["DOTNET_GCConserveMemory"] = mode.removeprefix("conserve")
     protocol, size, concurrency, frames = case
     fixture(directory, mode)
     args = [str(binary)]
@@ -222,7 +225,8 @@ def main():
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--variant",choices=("tool","user"),default="tool")
     parser.add_argument("--rounds", type=int, default=3, choices=(1, 3, 7))
-    parser.add_argument("--requests", type=int, default=16, choices=(4, 16))
+    parser.add_argument("--requests", type=int, default=16, choices=(4, 16, 64))
+    parser.add_argument("--memory-tuning", action="store_true")
     parser.add_argument("--case-index", type=int, action="append", choices=range(len(CASES)))
     args = parser.parse_args()
     cases = [CASES[index] for index in args.case_index] if args.case_index else CASES
@@ -232,6 +236,10 @@ def main():
     modes = {"go": args.go.resolve(), "aot": args.aot.resolve()}
     if args.candidate is not None:
         modes["candidate"] = args.candidate.resolve()
+    if args.memory_tuning:
+        assert args.candidate is not None
+        modes = {"go": args.go.resolve(), "candidate": args.candidate.resolve(),
+                 "conserve5": args.candidate.resolve(), "conserve9": args.candidate.resolve()}
     env = {name: os.environ[name] for name in ("PATH", "LANG", "TZ") if name in os.environ}
     env.update(GOMEMLIMIT="512MiB", GOGC="100", GOMAXPROCS="1", DOTNET_PROCESSOR_COUNT="1",
                DOTNET_GCHeapHardLimit="0x20000000", DOTNET_EnableDiagnostics="0",
@@ -243,7 +251,16 @@ def main():
         name: {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
         for name, path in modes.items()}, "cpuAffinity": sorted(os.sched_getaffinity(0)),
         "rounds": args.rounds, "requestsPerRound": args.requests, "fixture": "loopback HTTPS/HTTP1.1, TCP_NODELAY, fixed SSE",
-        "realModelCalls": 0,"variant":args.variant})
+        "realModelCalls": 0,"variant":args.variant,"memoryTuning":args.memory_tuning})
+    if args.memory_tuning:
+        configs = {}
+        for mode, binary in modes.items():
+            if mode == "go": continue
+            config_env = dict(env)
+            if mode.startswith("conserve"):
+                config_env["DOTNET_GCConserveMemory"] = mode.removeprefix("conserve")
+            configs[mode] = subprocess.check_output([str(binary), "--benchmark-gc-config"],env=config_env,text=True)
+        write_json(args.out / "gc-config.json", configs)
     rows = []
     with tempfile.TemporaryDirectory(prefix="gateway-benchmark-") as tmp, (args.out / "results.jsonl").open("w") as output:
         root = Path(tmp)
