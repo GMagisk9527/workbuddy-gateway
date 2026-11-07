@@ -28,9 +28,11 @@ public static class OpenWire
     public static long Int(JsonNode? node) => node is JsonValue v && v.TryGetValue<long>(out var n) ? n : 0;
     public static IEnumerable<JsonNode?> Items(JsonNode? node) => node is JsonArray a ? a : [];
     public static string Canonical(JsonNode? node) => GoJson.Format(node);
-    internal sealed class RequestDocument(JsonDocument document,JsonObject root):IDisposable
+    internal sealed class RequestDocument(JsonDocument document,JsonObject root,ReadOnlyMemory<byte> raw,bool hasDuplicates):IDisposable
     {
         internal JsonObject Root{get;}=root;
+        internal ReadOnlyMemory<byte> Raw{get;}=raw;
+        internal bool HasDuplicates{get;}=hasDuplicates;
         public void Dispose()=>document.Dispose();
     }
     // The request adapters consume this tree synchronously. Only encoded bytes
@@ -38,15 +40,27 @@ public static class OpenWire
     internal static RequestDocument ParseRequest(ReadOnlyMemory<byte> input)
     {
         if(input.Length>RequestLimit)throw new OpenAiFailure("request_too_large","请求体超过大小限制",413);
-        JsonDocument? document=null;
+        JsonDocument? document=null;bool duplicate=false;
         try
         {
-            document=JsonDocument.Parse(input,new JsonDocumentOptions{MaxDepth=256});
+            try { document=JsonDocument.Parse(input,new JsonDocumentOptions{MaxDepth=256,AllowDuplicateProperties=false}); }
+            catch(JsonException) { duplicate=true;document=JsonDocument.Parse(input,new JsonDocumentOptions{MaxDepth=256}); }
             if(document.RootElement.ValueKind!=JsonValueKind.Object)throw new OpenAiFailure("invalid_request","请求体必须是 JSON 对象");
-            return new(document,(JsonObject)Deduplicate(document.RootElement,false)!);
+            return new(document,(JsonObject)Deduplicate(document.RootElement,duplicate)!,input,duplicate);
         }
         catch(JsonException){document?.Dispose();throw new OpenAiFailure("invalid_json","无效的 JSON 请求体");}
         catch{document?.Dispose();throw;}
+    }
+    internal static bool IsMinified(ReadOnlySpan<byte> bytes)
+    {
+        bool quoted=false,escaped=false;
+        foreach(byte b in bytes)
+        {
+            if(quoted){if(escaped)escaped=false;else if(b==(byte)'\\')escaped=true;else if(b==(byte)'"')quoted=false;continue;}
+            if(b==(byte)'"'){quoted=true;continue;}
+            if(b is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')return false;
+        }
+        return !quoted&&!escaped;
     }
     internal static bool IsString(JsonValue value)
     {

@@ -19,6 +19,9 @@ public static class ChatRequestAdapter
         }
         bool stream = Bool(root["stream"]); root["model"] = model; root["stream"] = true;
         bool compatible=compatibility?.Invoke(root)??false;
+        bool explicitModel=root["model"] is JsonValue modelValue&&modelValue.TryGetValue<string>(out var rawModel)&&rawModel==model;
+        if(stream&&explicitModel&&!document.HasDuplicates&&OpenWire.IsMinified(document.Raw.Span))
+            return new(model,true,document.Raw.ToArray(),ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
         return new(model, stream, Encode(root, RequestLimit,optimizeLarge:bytes.Length>=32768), ClientProtocol.Chat, new Dictionary<string, ResponseTool>(), new()){OutboundCompatible=compatible};
     }
     // Normalize empty protocol noise while retaining extension fields and exact argument fragments.
