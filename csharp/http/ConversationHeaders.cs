@@ -17,7 +17,7 @@ internal sealed class ConversationHeaders
 
     internal static ConversationHeaders Prepare(IHeaderDictionary headers,JsonElement original,string caller)
     {
-        string? session=SessionAffinity.SessionDigest(headers,original);
+        string? session=string.IsNullOrEmpty(caller)?null:SessionAffinity.SessionDigest(headers,original);
         // No session seed: independent calls stay independent. Prefix affinity
         // must not invent a conversation shared by unrelated identical prompts.
         string id=session is null?Guid.NewGuid().ToString("D"):Name(caller+"\0conversation\0"+session);

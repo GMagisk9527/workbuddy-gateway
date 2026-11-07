@@ -66,6 +66,7 @@ internal static class ConversationTests
         string uuidSession=Guid.NewGuid().ToString();
         Check(Make(new(){{"X-Conversation-ID",uuidSession}}).Id!=Make(new(){{"X-Conversation-ID",uuidSession}},caller:"caller-b").Id,"Explicit UUID session is also scoped by caller");
         var independent=Make(new());Check(independent.Id!=Make(new()).Id&&independent.SessionDigest is null,"No prompt-derived or global default conversation");
+        Check(Make(new(){{"session_id","same"}},caller:"").Id!=Make(new(){{"session_id","same"}},caller:"").Id,"Unauthenticated clients cannot create a globally shared conversation");
         var repeated=Make(new(){{"session_id","parent-private"}});
         Check(first.Id==repeated.Id&&first.RequestId!=repeated.RequestId&&first.MessageId!=repeated.MessageId,"New HTTP calls retain the session with fresh default turn/message IDs");
         var explicitIds=new HeaderDictionary{{"session_id","parent-private"},{"X-Conversation-Request-ID","private-turn"},{"X-Conversation-Message-ID","private-message"}};
