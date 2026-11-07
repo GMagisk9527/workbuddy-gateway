@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -18,6 +19,7 @@ namespace HttpMigration;
 [JsonSerializable(typeof(List<Dictionary<string, object>>))]
 [JsonSerializable(typeof(List<object>))]
 [JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(ImmutableArray<string>))]
 [JsonSerializable(typeof(double?[]))]
 [JsonSerializable(typeof(ConsoleAccount[]))]
 [JsonSerializable(typeof(ConsoleAttempt[]))]

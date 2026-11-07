@@ -86,8 +86,31 @@ jobs:
           name: full-gateway-aot-diagnostics
           path: csharp/out/full-gateway/publish.log
           if-no-files-found: error
+      - name: Validate the compiled gateway with synthetic accounts and upstream
+        shell: bash
+        run: |
+          docker build -t workbuddy-native-smoke - <<'DOCKERFILE'
+          FROM alpine:3.21
+          RUN apk add --no-cache python3 openssl libstdc++ zstd file
+          DOCKERFILE
+          set -o pipefail
+          docker run --rm --network none --add-host www.workbuddy.cn:127.0.0.1 \
+            -v "$GITHUB_WORKSPACE:/src" -w /src/csharp workbuddy-native-smoke sh -ec '
+              binary=out/full-gateway/native/HttpMigration
+              file "$binary"
+              ldd "$binary"
+              python3 -B ci/smoke-gateway.py "$binary"
+            ' 2>&1 | tee csharp/out/full-gateway/smoke.log
+      - name: Package the verified gateway
+        run: |
+          output=csharp/out/full-gateway
+          (cd "$output/native" && sha256sum HttpMigration > ../SHA256SUMS)
+          tar -czf "$output/workbuddy-gateway-linux-musl-x64.tar.gz" -C "$output/native" HttpMigration
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-musl-native-gateway-candidate
-          path: csharp/out/full-gateway/native/HttpMigration
+          name: linux-musl-native-gateway
+          path: |
+            csharp/out/full-gateway/workbuddy-gateway-linux-musl-x64.tar.gz
+            csharp/out/full-gateway/SHA256SUMS
+            csharp/out/full-gateway/smoke.log
           if-no-files-found: error

@@ -206,7 +206,7 @@
     "tests/web/app.test.cjs": "58781e07d02b95a767e95b3b4eaaeaeac48f1707b1a71a46ba748c8354b78567",
     "http/StandaloneHost.cs": "263d9ee5250c217828151cf27c0737a3e734264bb6f2ac51818a1c5d904ba76e",
     "http/AotProgram.cs": "0fd58b5fc0e239024ce66c5c11ccbdaa3722c856bea716c8ac4b33d2ab5e8359",
-    "http/GatewayJson.cs": "48d3e2ef16c26cabc0c56bb09877a7fcf5c47a60d6c6d05a60f8346a344d0005"
+    "http/GatewayJson.cs": "0702e996b41f0e688e24f1ab8e32f6954248f0c4f7430c5b018dbfd1644e0bf8"
   },
   "hashNormalization": "Git blob bytes (UTF-8 source with LF line endings)"
 }
