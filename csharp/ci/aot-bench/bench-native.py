@@ -209,9 +209,11 @@ def main():
     parser.add_argument("aot", type=Path)
     parser.add_argument("out", type=Path)
     parser.add_argument("--candidate", type=Path)
-    parser.add_argument("--rounds", type=int, default=3, choices=(1, 3))
+    parser.add_argument("--rounds", type=int, default=3, choices=(1, 3, 7))
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16))
+    parser.add_argument("--case-index", type=int, action="append", choices=range(len(CASES)))
     args = parser.parse_args()
+    cases = [CASES[index] for index in args.case_index] if args.case_index else CASES
     args.out.mkdir(exist_ok=False)
     assert {name for _, name in socket.if_nameindex()} == {"lo"}, "Isolated loopback network is required"
     os.nice(10)
@@ -235,7 +237,7 @@ def main():
         root = Path(tmp)
         with upstream(root) as (server, cert):
             env["SSL_CERT_FILE"] = str(cert)
-            for index, case in enumerate(CASES):
+            for index, case in enumerate(cases):
                 for repetition in range(args.rounds):
                     order = list(modes)
                     offset = (index + repetition) % len(order)
@@ -249,7 +251,7 @@ def main():
                         output.flush()
                         print(f"{mode} {case}: {len(result['answers'])} complete", flush=True)
     summary = []
-    for protocol, size, concurrency, frames in CASES:
+    for protocol, size, concurrency, frames in cases:
         row = {"protocol": protocol, "targetKiB": size // 1024, "concurrency": concurrency, "frames": frames}
         for mode in modes:
             selected = [r for r in rows if (r["mode"], r["protocol"], r["targetBytes"], r["concurrency"], r["frames"]) == (mode, protocol, size, concurrency, frames)]
@@ -259,6 +261,7 @@ def main():
                          "completeMs": helpers.percentile([s["total_ms"] for s in samples], .5),
                          "requestsPerSecond": round(statistics.median(r["requests"] / r["elapsed"] for r in selected), 2),
                          "idleMiB": round(statistics.median(r["idleRss"] for r in selected) / (1 << 20), 2),
+                         "medianPeakMiB": round(statistics.median(r["peakRss"] for r in selected) / (1 << 20), 2),
                          "peakMiB": round(max(r["peakRss"] for r in selected) / (1 << 20), 2),
                          "cpuMsPerRequest": round(1000 * sum(r["cpuSeconds"] for r in selected) / len(samples), 2)}
         summary.append(row)

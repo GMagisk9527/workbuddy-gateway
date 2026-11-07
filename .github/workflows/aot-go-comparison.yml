@@ -69,7 +69,8 @@ jobs:
             --add-host www.workbuddy.cn:127.0.0.1 --add-host www.codebuddy.cn:127.0.0.1 --add-host copilot.tencent.com:127.0.0.1 \
             -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci:/ci:ro" workbuddy-comparison sh -ec '
               python3 -B /ci/smoke-gateway.py /binary/optimized/HttpMigration
-              python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence --candidate /binary/optimized/HttpMigration
+              python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence \
+                --candidate /binary/optimized/HttpMigration --rounds 7 --case-index 2 --case-index 3 --case-index 5
             '
           python3 -m json.tool "$dir/evidence/summary.json"
       - uses: actions/upload-artifact@v4
