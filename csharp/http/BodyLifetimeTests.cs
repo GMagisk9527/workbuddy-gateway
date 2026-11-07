@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using AccountMaintenance;
@@ -44,7 +46,10 @@ internal static class BodyLifetimeTests
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})foreach(bool stream in new[]{false,true})
         {
             string content=new('x',750<<10);object input=path.EndsWith("responses",StringComparison.Ordinal)?new{model="m",input=content,stream}:(object)new{model="m",messages=new[]{new{role="user",content}},stream};
-            using var response=await client.PostAsJsonAsync(path,input);string result=await response.Content.ReadAsStringAsync();
+            // Exercise both Kestrel body framing paths for every protocol.
+            using HttpContent body=stream?new ByteArrayContent(JsonSerializer.SerializeToUtf8Bytes(input)):JsonContent.Create(input);
+            body.Headers.ContentType=new MediaTypeHeaderValue("application/json");
+            using var response=await client.PostAsync(path,body);string result=await response.Content.ReadAsStringAsync();
             Check(response.IsSuccessStatusCode,path+" should fit the budget after temporary buffers are released; got "+(int)response.StatusCode+" "+result);
             Check(stream?result.Contains(path.EndsWith("messages",StringComparison.Ordinal)?"message_stop":"[DONE]"):result.Contains("ok"),"Correct protocol completion");Check(resources.Used==0,"All reservations released");
         }
@@ -58,6 +63,39 @@ internal static class BodyLifetimeTests
         }
         finally{backend.Release.TrySetResult();using var response=await held;Check(response.IsSuccessStatusCode,"Held response finishes");}
         Check(resources.Used==0,"Reservations released after held response");
+        await InterruptedBodies(new Uri(LocalGateway.Address(app)),client.DefaultRequestHeaders.Authorization!.Parameter!,app,backend,ledger,issued.Item.Id);
         Console.WriteLine(JsonSerializer.Serialize(new{bodyLifetimeChecks=checks,syntheticCalls=backend.Calls,realNetworkCalls=0,modelCreditsUsed=0}));
+    }
+
+    static async Task InterruptedBodies(Uri address,string secret,WebApplication app,Backend backend,CreditLedger ledger,string key)
+    {
+        var resources=app.Services.GetRequiredService<PreparationAdmission>();
+        var admission=app.Services.GetRequiredService<RequestAdmission>();
+        int calls=backend.Calls;long requests=ledger.GetUsage(key).Requests;
+        foreach(bool disconnect in new[]{false,true})
+        {
+            using(var tcp=new TcpClient{NoDelay=true})
+            {
+                await tcp.ConnectAsync(address.Host,address.Port);
+                var stream=tcp.GetStream();
+                byte[] header=Encoding.ASCII.GetBytes($"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {secret}\r\nContent-Type: application/json\r\nContent-Length: 65536\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(header);
+                await stream.WriteAsync(new byte[20<<10]);
+                for(int i=0;i<200&&resources.Used==0;i++)await Task.Delay(5);
+                Check(resources.Used==65536,"A partial fixed-length upload reserves its declared buffer once");
+                if(!disconnect)
+                {
+                    tcp.Client.Shutdown(SocketShutdown.Send);
+                    using var reader=new StreamReader(stream,Encoding.ASCII);
+                    string? status=await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3));
+                    // Kestrel can close a peer's half-closed connection before an
+                    // error response is writable; both outcomes reject the upload.
+                    Check(status is null||status.Contains("400",StringComparison.Ordinal),"Truncated fixed-length body is rejected: "+status);
+                }
+            }
+            for(int i=0;i<200&&(resources.Used!=0||admission.Status.Active!=0);i++)await Task.Delay(5);
+            Check(resources.Used==0&&admission.Status.Active==0,"Interrupted upload releases request and memory admission");
+            Check(backend.Calls==calls&&ledger.Health.PendingAttempts==0&&ledger.GetUsage(key).Requests==requests,"Interrupted upload never calls or charges upstream");
+        }
     }
 }

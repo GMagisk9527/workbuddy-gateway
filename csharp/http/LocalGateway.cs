@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.IO.Compression;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -389,12 +391,48 @@ public static class LocalGateway
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(c.RequestAborted);var remaining=GracefulRequests.RemainingRead(c);
         if(remaining<=TimeSpan.Zero)throw new RequestFailure("读取请求体超时",408,"request_read_timeout");deadline.CancelAfter(remaining);
         byte[] wire;
-        try{wire=await ReadBounded(c.Request.Body, limit, deadline.Token, memory.Wire(c.Request.ContentLength));}
+        try
+        {
+            if (c.Request.ContentLength is > 0 and var length)
+            {
+                int size = checked((int)length);
+                memory.Reserve(size);
+                wire = await ReadFixedLength(c.Request.BodyReader, size, deadline.Token);
+            }
+            else wire = await ReadBounded(c.Request.Body, limit, deadline.Token, memory.Wire(c.Request.ContentLength));
+        }
         catch(OperationCanceledException)when(!c.RequestAborted.IsCancellationRequested){throw new RequestFailure("读取请求体超时",408,"request_read_timeout");}
         if (coding == "zstd") return ZstdBody.Decode(wire, limit, memory.Reserve);
         if (coding != "gzip") return wire;
         await using var compressed = new GZipStream(new MemoryStream(wire), CompressionMode.Decompress);
         return await ReadBounded(compressed, limit, deadline.Token, memory.Reserve);
+    }
+    static async Task<byte[]> ReadFixedLength(PipeReader reader, int size, CancellationToken cancellation)
+    {
+        // Wait for an initial chunk before allocating for a large, possibly slow upload.
+        ReadResult read = await reader.ReadAtLeastAsync(Math.Min(size, 16 << 10), cancellation);
+        byte[]? body = null;
+        int written = 0;
+        while (true)
+        {
+            var buffer = read.Buffer;
+            try
+            {
+                if (read.IsCanceled) throw new OperationCanceledException(cancellation);
+                int remaining = size - written;
+                if (buffer.Length > remaining || read.IsCompleted && buffer.Length != remaining)
+                    throw new BadHttpRequestException("请求体长度与 Content-Length 不符");
+                if (!buffer.IsEmpty)
+                {
+                    body ??= GC.AllocateUninitializedArray<byte>(size);
+                    buffer.CopyTo(body.AsSpan(written));
+                    written += (int)buffer.Length;
+                }
+                if (read.IsCompleted) return body!;
+            }
+            finally { reader.AdvanceTo(buffer.End); }
+            read = await reader.ReadAsync(cancellation);
+        }
     }
     internal static async Task<byte[]> ReadBounded(Stream source, int limit, CancellationToken cancellation, Action<int>? reserve = null)
     {

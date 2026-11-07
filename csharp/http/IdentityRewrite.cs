@@ -323,12 +323,13 @@ internal static class IdentityRewrite
     // policy before the typed mapper concatenates them; retain all non-text blocks.
     internal static InputRequest BeforeMap(InputRequest input,JsonElement root,IdentityOptions? options)
     {
-        if(!IdentitySettings.Build(options).Enabled)return input;
+        var settings=IdentitySettings.Build(options);
+        if(!settings.Enabled)return input;
         string? system=input.SystemText;
         if(root.TryGetProperty("system",out var rawSystem)&&rawSystem.ValueKind is JsonValueKind.String or JsonValueKind.Array)
         {
             var message=OutboundPreparation.V.Object(("role",OutboundPreparation.V.Text("system")),("content",OutboundPreparation.V.From(rawSystem)));
-            if(Apply([message],options))
+            if(Apply([message],settings))
             {
                 var content=message.Get("content")!;
                 system=content.Is(JsonValueKind.String)?content.Str():string.Join("\n",content.Arr.Where(p=>p.S("type")=="text"&&p.S("text")!="").Select(p=>p.S("text")));
@@ -345,16 +346,15 @@ internal static class IdentityRewrite
             };
             if(content is null)return message;
             var wrapper=OutboundPreparation.V.Object(("role",OutboundPreparation.V.Text(message.Role.WireName)),("content",content));
-            if(!Apply([wrapper],options))return message;
+            if(!Apply([wrapper],settings))return message;
             content=wrapper.Get("content")!;
             if(message.Content is TypedMigration.StringContent)return message with{Content=new TypedMigration.StringContent(content.Str())};
             int i=0;return message with{Content=new BlocksContent(((BlocksContent)message.Content).Blocks.Select(b=>b is TextBlock?new TextBlock(content.Arr[i++].S("text")):b).ToImmutableArray())};
         }).ToImmutableArray();
         return input with{SystemText=system,Messages=messages};
     }
-    internal static bool Apply(List<OutboundPreparation.V> messages,IdentityOptions? options,bool allowWildcard=true)
+    internal static bool Apply(List<OutboundPreparation.V> messages,IdentitySettings settings,bool allowWildcard=true)
     {
-        var settings=IdentitySettings.Build(options);
         if(!settings.Enabled)return false;
         bool changed=false;
         foreach(var message in messages)
@@ -377,10 +377,9 @@ internal static class IdentityRewrite
     }
 
     /// <summary>Rewrite a standalone string, preserving its code context (used for force dedup).</summary>
-    internal static string Transform(string text,IdentityOptions? options)
+    internal static string Transform(string text,IdentitySettings settings)
     {
         if(string.IsNullOrEmpty(text))return text;
-        var settings=IdentitySettings.Build(options);
         if(!settings.Enabled)return text;
         if(!settings.MightMatch(text,false))return text;
         return settings.Rewrite(text,IdentitySettings.CodeRanges(text),0,true,false);

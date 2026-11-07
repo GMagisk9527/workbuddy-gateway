@@ -59,8 +59,9 @@ public static class OutboundPreparation
         else if(string.IsNullOrWhiteSpace(root.S("reasoning_summary"))){root.Set("reasoning_summary",V.Text("auto"));changed=true;}
         var messages=root.Get("messages") is { } m&&m.Is(JsonValueKind.Array)?m.Arr:[];
         foreach(var msg in messages.Where(v=>v.Role=="developer")){msg.Set("role",V.Text("system"));changed=true;}
+        var identity=IdentitySettings.Build(settings.Identity);
         // Pass A: identity replacement on the client blocks before any prompt is injected.
-        changed|=IdentityRewrite.Apply(messages,settings.Identity);
+        changed|=IdentityRewrite.Apply(messages,identity);
         bool injected=false;
         if(messages.Count==0||messages[0].Role!="system")
         {
@@ -70,7 +71,7 @@ public static class OutboundPreparation
             changed=true;
         }
         // Go applies its injected-prompt pass with wildcards still enabled.
-        if(injected&&messages.Count>0)changed|=IdentityRewrite.Apply([messages[0]],settings.Identity);
+        if(injected&&messages.Count>0)changed|=IdentityRewrite.Apply([messages[0]],identity);
         var first=messages[0];string force=settings.Force;
         if(!string.IsNullOrWhiteSpace(force))
         {
@@ -80,7 +81,7 @@ public static class OutboundPreparation
             {
                 string old=content.Str();
                 // Compare both raw and identity-rewritten force so a rewritten client prompt is not duplicated.
-                string forceWire=IdentityRewrite.Transform(force,settings.Identity);
+                string forceWire=IdentityRewrite.Transform(force,identity);
                 bool has=old==force||old.EndsWith("\n\n"+force,StringComparison.Ordinal)
                     ||(forceWire.Length>0&&(old==forceWire||old.EndsWith("\n\n"+forceWire,StringComparison.Ordinal)));
                 if(!has){first.Set("content",V.Text(old.Length==0?force:old+"\n\n"+force));changed=true;injected=true;}
@@ -88,13 +89,13 @@ public static class OutboundPreparation
             else if(content.Is(JsonValueKind.Array))
             {
                 var parts=content.Arr;var last=parts.LastOrDefault();
-                string forceWire=IdentityRewrite.Transform(force,settings.Identity);
+                string forceWire=IdentityRewrite.Transform(force,identity);
                 if(last is null||last.S("type")!="text"||last.Get("text") is not { } lastText||!lastText.Is(JsonValueKind.String)||(lastText.Str()!=force&&lastText.Str()!=forceWire))
                 {parts.Add(V.Object(("type",V.Text("text")),("text",V.Text(force))));changed=true;injected=true;}
             }
         }
         // Pass B: after injection, Go normalises every message again with wildcards disabled.
-        changed|=IdentityRewrite.Apply(messages,settings.Identity,false);
+        changed|=IdentityRewrite.Apply(messages,identity,false);
         messages=RepairTools(messages,ref changed);
         root.Set("messages",V.Array(messages));
         if(root.S("model").Trim().StartsWith("deepseek",StringComparison.OrdinalIgnoreCase))
