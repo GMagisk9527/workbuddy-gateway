@@ -51,6 +51,7 @@ jobs:
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
             bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
             export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            python3 ci/aot-bench/instrument.py
             dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o /binary/optimized
           '
       - name: Exercise the same isolated HTTPS fixture

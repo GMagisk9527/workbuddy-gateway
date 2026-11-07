@@ -438,7 +438,8 @@ public static class LocalGateway
                 if (read.IsCompleted) return body!;
             }
             finally { reader.AdvanceTo(buffer.End); }
-            read = await reader.ReadAsync(cancellation);
+            int next=Math.Min(size-written,32<<10);
+            read = next>0?await reader.ReadAtLeastAsync(next,cancellation):await reader.ReadAsync(cancellation);
         }
     }
     internal static async Task<byte[]> ReadBounded(Stream source, int limit, CancellationToken cancellation, Action<int>? reserve = null)
