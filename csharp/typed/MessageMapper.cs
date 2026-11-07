@@ -14,6 +14,7 @@ public static class MessageMapper
     };
     static string ContentText(Content content) => content switch {
         StringContent text => text.Text,
+        BorrowedTextContent text => text.Text.GetString()!,
         BlocksContent list => string.Concat(list.Blocks.OfType<TextBlock>().Select(t => t.Text)),
         _ => ""
     };
@@ -49,18 +50,19 @@ public static class MessageMapper
     sealed class UserCollector : IBlockVisitor
     {
         public ImmutableArray<ChatPart>.Builder Parts { get; } = ImmutableArray.CreateBuilder<ChatPart>();
-        public List<ToolMessage> Tools { get; } = [];
+        public List<ChatMessage> Tools { get; } = [];
         public void Visit(TextBlock block) => Parts.Add(new ChatText(block.Text));
         public void Visit(ImageBlock block) { if (ImageUrl(block.Source) is { Length: > 0 } url) Parts.Add(new ChatImage(url)); }
         public void Visit(ToolResultBlock block)
         {
+            if(!block.IsError&&block.Content is BorrowedTextContent raw){Tools.Add(new BorrowedToolMessage(block.Id,raw.Text));return;}
             string text = ContentText(block.Content); bool hasImage = false;
             if (block.Content is BlocksContent list)
                 foreach (var image in list.Blocks.OfType<ImageBlock>())
                     if (ImageUrl(image.Source) is { Length: > 0 } url) { hasImage = true; Parts.Add(new ChatImage(url)); }
             if (text == "" && hasImage) text = "[图片]";
             if (block.IsError) text = text == "" ? "[Tool execution error]" : "[Tool execution error]\n" + text;
-            Tools.Add(new(block.Id, text));
+            Tools.Add(new ToolMessage(block.Id, text));
         }
         public void Visit(ToolUseBlock block) { }
         public void Visit(ThinkingBlock block) { }

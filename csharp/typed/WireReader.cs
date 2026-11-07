@@ -25,17 +25,23 @@ public static class WireReader
             default: return null;
         }
     }
-    static Content ReadContent(JsonElement e) => e.ValueKind switch {
+    static Content ReadContent(JsonElement e,bool borrowToolResults=false) => e.ValueKind switch {
         JsonValueKind.String => new StringContent(Text(e)),
-        JsonValueKind.Array => new BlocksContent(Items(e).Select(ReadBlock).ToImmutableArray()),
+        JsonValueKind.Array => new BlocksContent(Items(e).Select(b=>ReadBlock(b,borrowToolResults)).ToImmutableArray()),
         JsonValueKind.Null or JsonValueKind.Undefined => new EmptyContent(),
         _ => new InvalidContent()
     };
-    static Block ReadBlock(JsonElement e) => Text(e, "type") switch {
+    static Content ToolContent(JsonElement block,bool borrow)
+    {
+        var content=Property(block,"content");
+        return borrow&&Property(block,"is_error").ValueKind!=JsonValueKind.True&&GoJson.TryRawString(content,out _,out _)
+            ?new BorrowedTextContent(content):ReadContent(content);
+    }
+    static Block ReadBlock(JsonElement e,bool borrowToolResults) => Text(e, "type") switch {
         "text" => new TextBlock(Text(e, "text")),
         "image" => new ImageBlock(Image(e)),
         "tool_use" => new ToolUseBlock(new(Text(e, "id")), new(Text(e, "name")), Owned(Property(e, "input"))),
-        "tool_result" => new ToolResultBlock(new(Text(e, "tool_use_id")), ReadContent(Property(e, "content")), Property(e, "is_error").ValueKind == JsonValueKind.True),
+        "tool_result" => new ToolResultBlock(new(Text(e, "tool_use_id")), ToolContent(e,borrowToolResults), Property(e, "is_error").ValueKind == JsonValueKind.True),
         "thinking" => new ThinkingBlock(Property(e, "thinking").ValueKind == JsonValueKind.String ? Text(e, "thinking") : null),
         "redacted_thinking" => new RedactedBlock(),
         _ => new UnknownBlock()
@@ -45,13 +51,17 @@ public static class WireReader
         using var document = JsonDocument.Parse(input, new JsonDocumentOptions { MaxDepth = 256 });
         return Read(document.RootElement);
     }
-    public static InputRequest Read(JsonElement root)
+    public static InputRequest Read(JsonElement root)=>Read(root,false);
+    // The caller must keep root's JsonDocument alive through WireWriter encoding.
+    // The normal Read overloads continue to produce independently owned models.
+    public static InputRequest ReadBorrowed(JsonElement root)=>Read(root,true);
+    static InputRequest Read(JsonElement root,bool borrowToolResults)
     {
         if (root.ValueKind != JsonValueKind.Object) throw new JsonException("object required");
         var system = Property(root, "system");
         var systemText = system.ValueKind == JsonValueKind.String ? Text(system) : string.Join("\n", Items(system).Where(b => Text(b, "type") == "text" && Text(b, "text") != "").Select(b => Text(b, "text")));
         var messages = Items(Property(root, "messages")).Where(m => m.ValueKind == JsonValueKind.Object)
-            .Select(m => new InputMessage(MessageRole.Parse(Text(m, "role")), ReadContent(Property(m, "content")))).ToImmutableArray();
+            .Select(m => new InputMessage(MessageRole.Parse(Text(m, "role")), ReadContent(Property(m, "content"),borrowToolResults))).ToImmutableArray();
         var tools = ImmutableArray.CreateBuilder<InputTool>();
         foreach (var tool in Items(Property(root, "tools"))) {
             if (tool.ValueKind != JsonValueKind.Object) continue;

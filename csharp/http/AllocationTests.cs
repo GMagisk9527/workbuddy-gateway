@@ -23,6 +23,7 @@ internal static class AllocationTests
         using var doc = JsonDocument.Parse(duplicate.UpstreamBody);
         if (doc.RootElement.GetProperty("tools")[0].GetProperty("function").GetProperty("parameters").GetProperty("type").GetString() != "object") throw new InvalidOperationException("Schema duplicate keys must retain last value");
         FixedLengthBody();
+        Utf8ToolResultTests.Run();
     }
 
     static void FixedLengthBody()

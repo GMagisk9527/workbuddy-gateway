@@ -64,7 +64,7 @@ public static class MessagesRequestAdapter
             }
             RequestValidation.Input(root); RequestValidation.Output(root);
 
-            var typed=WireReader.Read(root);
+            var typed=WireReader.ReadBorrowed(root);
             if(prompts is not null)typed=IdentityRewrite.BeforeMap(typed,root,prompts.Identity);
             var mapped = MessageMapper.Map(typed);
             var messages = mapped.Messages;
@@ -169,7 +169,8 @@ public static class MessagesRequestAdapter
                     Add(2); for (int n = 0; n < list.Count; n++) { if (n > 0) Add(1); Walk(list[n]); }
                     break;
                 case JsonValue scalar:
-                    if (scalar.TryGetValue<string>(out string? text)) Quote(text);
+                    if(GoJson.TryRawString(scalar,out _,out int size))Add(size);
+                    else if (scalar.TryGetValue<string>(out string? text)) Quote(text);
                     else Add(scalar.ToJsonString(EncodingOptions).Length);
                     break;
             }

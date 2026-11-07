@@ -12,6 +12,7 @@ public static class WireWriter
         {
             TextMessage t => new() { ["role"] = t.Role.WireName, ["content"] = t.Text },
             ToolMessage t => new() { ["role"] = "tool", ["tool_call_id"] = t.Id.Value, ["content"] = t.Text },
+            BorrowedToolMessage t => new() { ["role"] = "tool", ["tool_call_id"] = t.Id.Value, ["content"] = JsonValue.Create(t.Text) },
             UserPartsMessage u => new() { ["role"] = "user", ["content"] = new JsonArray(u.Parts.Select(p => (JsonNode)(p switch
             {
                 ChatText t => new JsonObject { ["type"] = "text", ["text"] = t.Text },
@@ -82,6 +83,8 @@ public static class WireWriter
             case TextMessage text: writer.WriteString("role", text.Role.WireName); writer.WriteString("content", text.Text); break;
             case ToolMessage tool:
                 writer.WriteString("role", "tool"); writer.WriteString("tool_call_id", tool.Id.Value); writer.WriteString("content", tool.Text); break;
+            case BorrowedToolMessage tool:
+                writer.WriteString("role","tool");writer.WriteString("tool_call_id",tool.Id.Value);writer.WritePropertyName("content");tool.Text.WriteTo(writer);break;
             case UserPartsMessage user:
                 writer.WriteString("role", "user"); writer.WriteStartArray("content");
                 foreach (var part in user.Parts) {

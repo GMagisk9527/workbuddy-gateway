@@ -3,12 +3,67 @@ using System.Buffers;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Encodings.Web;
+using System.Runtime.InteropServices;
+using System.Text.Unicode;
 namespace TypedMigration;
 static class GoJson
 {
     static readonly JsonSerializerOptions ScalarJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     static readonly SearchValues<char> Escapes = SearchValues.Create(new string(Enumerable.Range(0,32).Select(i=>(char)i).ToArray()) + "\"\\<>&\u2028\u2029");
+    static readonly SearchValues<byte> RawEscapes=SearchValues.Create(new byte[]{(byte)'\\',(byte)'<',(byte)'>',(byte)'&',0xe2});
     const string Hex = "0123456789abcdef";
+    // Common tool-result strings can remain UTF-8 throughout mapping. Unusual
+    // escape spellings fall back to the existing decoder/canonicalizer.
+    internal static bool TryRawString(JsonValue value,out ReadOnlySpan<byte> raw,out int size)
+    {
+        raw=default;size=0;
+        return value.TryGetValue<JsonElement>(out var element)&&TryRawString(element,out raw,out size);
+    }
+    internal static bool TryRawString(JsonElement element,out ReadOnlySpan<byte> raw,out int size)
+    {
+        raw=default;size=0;
+        if(element.ValueKind!=JsonValueKind.String)return false;
+        var token=JsonMarshal.GetRawUtf8Value(element);
+        if(token.Length<4096||!Utf8.IsValid(token))return false;
+        int extra=0;var rest=token[1..^1];
+        while(true)
+        {
+            int i=rest.IndexOfAny(RawEscapes);if(i<0)break;
+            byte b=rest[i];int consumed=1;
+            if(b==(byte)'\\')
+            {
+                if(i+1>=rest.Length||rest[i+1] is not ((byte)'"' or (byte)'\\' or (byte)'b' or (byte)'f' or (byte)'n' or (byte)'r' or (byte)'t'))return false;
+                consumed=2;
+            }
+            else if(b==0xe2)
+            {
+                if(i+2<rest.Length&&rest[i+1]==0x80&&rest[i+2] is 0xa8 or 0xa9){extra=checked(extra+3);consumed=3;}
+            }
+            else extra=checked(extra+5);
+            rest=rest[(i+consumed)..];
+        }
+        raw=token;size=checked(token.Length+extra);return true;
+    }
+    static void WriteRawString(ReadOnlySpan<byte> raw,Span<byte> output)
+    {
+        int position=0,start=0,scan=1;
+        while(scan<raw.Length-1)
+        {
+            int next=raw[scan..^1].IndexOfAny(RawEscapes);if(next<0)break;
+            int i=scan+next;byte b=raw[i];
+            if(b==(byte)'\\'){scan=i+2;continue;}
+            bool separator=b==0xe2&&i+2<raw.Length-1&&raw[i+1]==0x80&&raw[i+2] is 0xa8 or 0xa9;
+            if(b==0xe2&&!separator){scan=i+1;continue;}
+            raw[start..i].CopyTo(output[position..]);position+=i-start;
+            char c=separator?(char)(0x2028+raw[i+2]-0xa8):(char)b;
+            output[position++]=(byte)'\\';output[position++]=(byte)'u';
+            output[position++]=(byte)Hex[c>>12];output[position++]=(byte)Hex[(c>>8)&15];
+            output[position++]=(byte)Hex[(c>>4)&15];output[position++]=(byte)Hex[c&15];
+            scan=i+(separator?3:1);start=scan;
+        }
+        raw[start..].CopyTo(output[position..]);position+=raw.Length-start;
+        if(position!=output.Length)throw new InvalidOperationException("JSON size mismatch");
+    }
     internal static int QuotedUtf8Size(string value)
     {
         int size=checked(2+Encoding.UTF8.GetByteCount(value));ReadOnlySpan<char> rest=value;
@@ -76,7 +131,8 @@ static class GoJson
                 case JsonArray array:
                     One((byte)'[');for(int i=0;i<array.Count;i++){if(i>0)One((byte)',');Walk(array[i]);}One((byte)']');break;
                 case JsonValue value:
-                    if(value.TryGetValue<string>(out var text))Quote(text);else Text(value.ToJsonString(ScalarJson));break;
+                    if(TryRawString(value,out var raw,out int size)){WriteRawString(raw,bytes.AsSpan(position,size));position+=size;}
+                    else if(value.TryGetValue<string>(out var text))Quote(text);else Text(value.ToJsonString(ScalarJson));break;
             }
         }
         internal byte[] Finish(){if(position!=bytes.Length)throw new InvalidOperationException("JSON size mismatch");return bytes;}
