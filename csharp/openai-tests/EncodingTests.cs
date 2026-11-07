@@ -63,6 +63,26 @@ internal static class EncodingTests
             if(result.RootElement.GetProperty("messages").GetArrayLength()!=expected)throw new Exception("UTF-8 user input changed whitespace semantics");
             checks++;
         }
+        var prefixSamples=samples.Take(8).Concat(new[]{new string('x',1<<20),"first\\nsecond\\t"+new string('z',8192)});
+        foreach(string sample in prefixSamples)
+        {
+            var tree=OpenWire.Parse(JsonSerializer.SerializeToUtf8Bytes(new JsonObject{
+                ["role"]="user",["content"]=new JsonArray(new JsonObject{["type"]="text",["text"]=sample}),
+                ["after"]=new JsonArray(true,null,JsonValue.Create(1.23m))},options));
+            byte[] expected=OpenWire.Encode(tree,OpenWire.RequestLimit);
+            foreach(int limit in new[]{1,2,3,7,31,127,256,1024,2048,4096,65536})
+            {
+                byte[] output=new byte[limit];
+                if(OpenWire.TryEncodePrefix(tree,output,out int written)&&
+                    (written!=Math.Min(limit,expected.Length)||!output.AsSpan(0,written).SequenceEqual(expected.AsSpan(0,written))))
+                    throw new Exception("Bounded JSON prefix changed the encoded bytes");
+                checks++;
+            }
+        }
+        var large=OpenWire.Parse(Encoding.UTF8.GetBytes("{\"role\":\"user\",\"content\":\""+new string('x',1<<20)+"\"}"));
+        if(!OpenWire.TryEncodePrefix(large,new byte[65536],out int prefixLength)||prefixLength!=65536)
+            throw new Exception("Large canonical user prefix did not take the bounded path");
+        checks++;
         return checks;
 
         void Compare(JsonNode? node)

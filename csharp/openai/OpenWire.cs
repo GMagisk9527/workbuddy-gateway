@@ -214,6 +214,62 @@ public static class OpenWire
         }
         return true;
     }
+    // Encode only a bounded prefix of an already validated request tree. A
+    // noncanonical string falls back to the complete encoder; no partial result
+    // may be used when false is returned. Large canonical strings stay UTF-8.
+    public static bool TryEncodePrefix(JsonNode? node,Span<byte> destination,out int written)
+    {
+        var writer=new PrefixWriter(destination);
+        bool result=writer.Walk(node,0);written=writer.Written;return result;
+    }
+    ref struct PrefixWriter(Span<byte> destination)
+    {
+        readonly Span<byte> bytes=destination;
+        public int Written{get;private set;}
+        bool Full=>Written==bytes.Length;
+        void Put(ReadOnlySpan<byte> value)
+        {int take=Math.Min(value.Length,bytes.Length-Written);value[..take].CopyTo(bytes[Written..]);Written+=take;}
+        void One(byte value){if(!Full)bytes[Written++]=value;}
+        bool Name(string name)
+        {
+            if(name.Length>4096)return false;
+            One((byte)'"');Put(JsonEncodedText.Encode(name,JavaScriptEncoder.UnsafeRelaxedJsonEscaping).EncodedUtf8Bytes);One((byte)'"');return true;
+        }
+        public bool Walk(JsonNode? node,int depth)
+        {
+            if(Full)return true;
+            if(depth>256)return false;
+            switch(node)
+            {
+                case null:Put("null"u8);return true;
+                case JsonObject obj:
+                    One((byte)'{');bool first=true;
+                    foreach(var p in obj)
+                    {
+                        if(Full)return true;
+                        if(!first)One((byte)',');first=false;if(Full)return true;
+                        if(!Name(p.Key))return false;One((byte)':');if(!Walk(p.Value,depth+1))return false;
+                    }
+                    One((byte)'}');return true;
+                case JsonArray array:
+                    One((byte)'[');for(int i=0;i<array.Count&&!Full;i++){if(i>0)One((byte)',');if(!Walk(array[i],depth+1))return false;}One((byte)']');return true;
+                case JsonValue value when value.TryGetValue<JsonElement>(out var element):
+                    var raw=JsonMarshal.GetRawUtf8Value(element);
+                    if(element.ValueKind==JsonValueKind.String)
+                    {
+                        // Inspect a little beyond the cut so a split escape cannot
+                        // masquerade as canonical. Split UTF-8 conservatively falls back.
+                        int count=Math.Min(raw.Length-2,bytes.Length-Written+8);
+                        if(!CanonicalString(raw.Slice(1,count)))return false;
+                    }
+                    Put(raw);return true;
+                case JsonValue value:
+                    if(value.TryGetValue<string>(out var text)&&text.Length>4096)return false;
+                    Put(Encode(value,RequestLimit));return true;
+                default:return false;
+            }
+        }
+    }
     sealed class BudgetStream(long limit,IRetainedOutputBudget? budget,int capacity=0) : Stream
     {
         readonly MemoryStream inner = new(capacity);

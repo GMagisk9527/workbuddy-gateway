@@ -227,6 +227,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3, choices=(1, 3, 7))
     parser.add_argument("--requests", type=int, default=16, choices=(4, 16, 64))
     parser.add_argument("--memory-tuning", action="store_true")
+    parser.add_argument("--verify-conserve-memory", type=int, choices=range(10))
     parser.add_argument("--case-index", type=int, action="append", choices=range(len(CASES)))
     args = parser.parse_args()
     cases = [CASES[index] for index in args.case_index] if args.case_index else CASES
@@ -261,6 +262,11 @@ def main():
                 config_env["DOTNET_GCConserveMemory"] = mode.removeprefix("conserve")
             configs[mode] = subprocess.check_output([str(binary), "--benchmark-gc-config"],env=config_env,text=True)
         write_json(args.out / "gc-config.json", configs)
+    elif args.verify_conserve_memory is not None:
+        assert args.candidate is not None
+        config = subprocess.check_output([str(args.candidate.resolve()), "--benchmark-gc-config"], env=env, text=True)
+        assert f"GCConserveMem={args.verify_conserve_memory}\n" in config, config
+        write_json(args.out / "gc-config.json", {"candidate":config})
     rows = []
     with tempfile.TemporaryDirectory(prefix="gateway-benchmark-") as tmp, (args.out / "results.jsonl").open("w") as output:
         root = Path(tmp)

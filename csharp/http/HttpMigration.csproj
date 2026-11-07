@@ -13,6 +13,7 @@
   </PropertyGroup>
   <ItemGroup Condition="'$(GatewayNativeAot)' == 'true'">
     <Compile Remove="Program.cs;*Tests.cs" />
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
   </ItemGroup>
   <ItemGroup Condition="'$(GatewayNativeAot)' != 'true'">
     <Compile Remove="AotProgram.cs" />

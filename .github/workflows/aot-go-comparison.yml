@@ -39,7 +39,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 42333795715
+          run-id: 42348891532
           name: linux-musl-native-gateway
           path: ${{ runner.temp }}/gateway-pair
       - name: Compile the optimized full gateway with strict Native AOT
@@ -59,7 +59,7 @@ jobs:
           dir="$RUNNER_TEMP/gateway-pair"
           cd "$dir"
           tar -xzf workbuddy-gateway-linux-musl-x64.tar.gz
-          echo '776f5f4db99178a66e652f97a36f6cbf0d4101f2d13d01137178dd396470e2b2  HttpMigration' | sha256sum -c -
+          echo 'a93f5e03098aee6cb7b1614c7940a44ab9047bbed1769d58a94d333bfa2b82d1  HttpMigration' | sha256sum -c -
           docker build -t workbuddy-comparison - <<'DOCKERFILE'
           FROM alpine:3.21
           RUN apk add --no-cache python3 openssl zstd libstdc++
@@ -70,9 +70,9 @@ jobs:
             -v "$dir:/binary" -v "$GITHUB_WORKSPACE/csharp/ci:/ci:ro" workbuddy-comparison sh -ec '
               python3 -B /ci/smoke-gateway.py /binary/optimized/HttpMigration
               python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/evidence \
-                --candidate /binary/optimized/HttpMigration --rounds 3 --requests 64 --memory-tuning --case-index 0 --case-index 2 --case-index 3 --case-index 5 --case-index 6
+                --candidate /binary/optimized/HttpMigration --rounds 7 --requests 64 --verify-conserve-memory 5
               python3 -B /ci/aot-bench/bench-native.py /binary/workbuddy-go /binary/HttpMigration /binary/user-evidence \
-                --candidate /binary/optimized/HttpMigration --rounds 3 --requests 64 --memory-tuning --variant user --case-index 2 --case-index 3 --case-index 4 --case-index 5
+                --candidate /binary/optimized/HttpMigration --rounds 7 --requests 64 --verify-conserve-memory 5 --variant user --case-index 2 --case-index 3 --case-index 4 --case-index 5
             '
           python3 -m json.tool "$dir/evidence/summary.json"
       - uses: actions/upload-artifact@v4
