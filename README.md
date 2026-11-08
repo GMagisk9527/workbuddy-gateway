@@ -1,5 +1,7 @@
 # WorkBuddy Local Gateway
 
+> **实现状态（2026-11-08）**：生产已切换为 C# 实现（`csharp/`，.NET Linux Native AOT/自包含，OpenRC 服务 `workbuddy-csharp-standalone`）。Go 实现保留作参考与 outbound parity oracle，不再作为部署目标；C# 的构建、离线验证与发布准备见 [csharp/README.md](csharp/README.md)。
+
 纯 Go、零 CGO 依赖的跨平台单二进制网关，支持国内站与国际站、多账号调度、OpenAI / Anthropic 协议及可选网页控制台。
 
 ## 快速开始

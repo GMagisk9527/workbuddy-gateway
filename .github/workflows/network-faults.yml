@@ -2,8 +2,20 @@ name: TCP network faults
 
 on:
   pull_request:
+    paths:
+      - '*.go'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/network-faults.yml'
   push:
     branches: [main]
+    paths:
+      - '*.go'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/network-faults.yml'
 
 permissions:
   contents: read
