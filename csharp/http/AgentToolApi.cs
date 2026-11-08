@@ -41,16 +41,26 @@ internal static class AgentToolApi
             admission=await c.RequestServices.GetRequiredService<RequestAdmission>().AcquireAsync(key.Identity?.Id??"",c.RequestAborted);
             byte[] input=await LocalGateway.ReadBody(c,Math.Min(options.MaxRequestBytes,AgentToolProtocol.Limit),memory);
             byte[] payload=AgentToolProtocol.Prepare(input,fetch);memory.Reserve(payload.Length);
+            using var original=JsonDocument.Parse(input);
+            var conversation=ConversationHeaders.Prepare(c.Request.Headers,original.RootElement,key.Identity?.Id??"");
             key.CheckModel(model);
             admission.FinishPreparing();
             using var deadline=CancellationTokenSource.CreateLinkedTokenSource(c.RequestAborted);deadline.CancelAfter(TimeSpan.FromSeconds(fetch?30:20));
-            account=await options.Accounts!.AcquireAsync(model,cancellation:deadline.Token);
+            var attempted=new HashSet<AccountId>();int lastStatus=503;string lastCode="upstream_error";
+            for(int tries=0;tries<Math.Min(3,options.Accounts!.Count);tries++)
+            {
+            key.CheckModel(model);
+            options.Catalog?.RefreshPricing();
+            try{account=await options.Accounts.AcquireAsync(model,attempted:attempted,cancellation:deadline.Token);}
+            catch(SchedulingFailure)when(attempted.Count>0){await Error(lastStatus,lastCode,"上游工具接口拒绝请求");return;}
+            attempted.Add(account.Account.Id);
             credential=await options.Credentials!.AcquireForHeadersAsync(account,deadline.Token);
             options.Accounts.Revalidate(account,model);
             if(account.Account.Upstream!=SiteEndpoints.Model(account.Account.Site))throw new CredentialFailure("credential_endpoint_mismatch");
             using var request=new HttpRequestMessage(HttpMethod.Post,SiteEndpoints.AgentTool(account.Account.Site,fetch));
             credential.ApplyToAgentTool(request,fetch);
             request.Headers.UserAgent.ParseAdd("WorkBuddy-Gateway-CSharp/0.1");request.Headers.Add("X-Trace-ID",c.Response.Headers["X-Trace-ID"].ToString());
+            conversation.Apply(request);
             request.Content=new ByteArrayContent(payload);request.Content.Headers.ContentType=new("application/json");
             request.Headers.Accept.ParseAdd("application/json");
             if(key.Identity is {} identity)attempt=ledger.Begin(identity.Id);
@@ -76,11 +86,25 @@ internal static class AgentToolApi
                     if(code=="11140"){restricted=true;options.Credentials.Block(account.Account.Id);}
                     Settle();
                     int status=upstreamStatus<400?502:upstreamStatus;
+                    // An explicit HTTP rejection with no usage is the only paid-tool
+                    // response that permits failover. Unknown/network/5xx outcomes and
+                    // channel/restriction codes never replay across accounts.
+                    if(evidence is null&&upstreamStatus is 401 or 403 or 429&&code is not("11128" or "11140")&&tries+1<Math.Min(3,options.Accounts.Count))
+                    {
+                        if(upstreamStatus==429)options.Accounts.ObserveModelFailure(account.Account.Id,model,429,code);
+                        if(upstreamStatus==401)await options.Credentials.DisableAsync(account.Account.Id);
+                        lastStatus=status;lastCode=code is not(null or "0")?code:"upstream_error";
+                        account.Dispose();account=null;attempt=null;settled=false;sent=false;cancelSafe=false;evidence=null;upstreamStatus=0;
+                        continue;
+                    }
                     await Error(status,code is not (null or "0")?code:"upstream_error","上游工具接口拒绝请求");return;
                 }
                 object result=AgentToolProtocol.Project(root,fetch);
                 Settle();await GatewayJson.WriteAsync(c, result);
+                return;
             }
+            }
+            await Error(lastStatus,lastCode,"暂无可用账号");
         }
         catch(RequestFailure e){await Error(e.Status,e.ErrorType,e.Message);}
         catch(KeyFailure e){await Error(e.Status,e.Code,e.Message);}

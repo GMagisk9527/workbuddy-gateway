@@ -42,6 +42,7 @@
     rateDetails: null,
     rateDetailsAt: 0,
     rateDetailsPending: null,
+    rateDetailsVersion: 0,
     openRateKeys: {},
     openRawLogs: {},
     statsPending: false,
@@ -224,6 +225,7 @@
     state.rateDetails = null;
     state.rateDetailsAt = 0;
     state.rateDetailsPending = null;
+    state.rateDetailsVersion++;
     state.openRateKeys = {};
     state.openRawLogs = {};
     state.statsVersion++;
@@ -1846,6 +1848,10 @@
   }
 
   function renderModels(data) {
+    if (data.rateDisplayRevision && (!state.lastModels || state.lastModels.rateDisplayRevision !== data.rateDisplayRevision)) {
+      state.rateDetails = null; state.rateDetailsAt = 0;
+      state.rateDetailsPending = null; state.rateDetailsVersion++;
+    }
     state.lastModels = data;
     var list = data.models || [];
     var onlyUsable = $("onlyUsable").checked;
@@ -1897,13 +1903,15 @@
   function ensureRateDetails() {
     if (state.rateDetails && Date.now() - state.rateDetailsAt < 60000) return Promise.resolve(state.rateDetails);
     if (state.rateDetailsPending) return state.rateDetailsPending;
+    var version = state.rateDetailsVersion;
     state.rateDetailsPending = api("/admin/api/rate-detail").then(function (data) {
+      if (version !== state.rateDetailsVersion) return ensureRateDetails();
       state.rateDetails = data;
       state.rateDetailsAt = Date.now();
       state.rateDetailsPending = null;
       return data;
     }).catch(function (err) {
-      state.rateDetailsPending = null;
+      if (version === state.rateDetailsVersion) state.rateDetailsPending = null;
       throw err;
     });
     return state.rateDetailsPending;
@@ -1911,7 +1919,7 @@
 
   function rateDetailHTML(payload, site, model) {
     var info = payload && payload.rates ? payload.rates[rateKey(site, model)] : null;
-    if (!info || !info.hasLog) {
+    if (!info || !(info.hasSource || info.hasLog)) {
       return "<p class='rate-none'>没有日志</p><p class='hint'>" +
         esc(payload && payload.noLogHint || "普通日志中没有该模型的倍率记录。") + "</p>";
     }
@@ -2025,6 +2033,120 @@
   }
 
   // ---- 渲染：配置 --------------------------------------------------------
+  function jsonLiteralBoundary(text, end) {
+    if (end >= text.length) return true;
+    return !/[A-Za-z0-9_$]/.test(text.charAt(end));
+  }
+
+  function jsonNumberLength(text, start) {
+    var i = start, length = text.length;
+    if (text.charAt(i) === "-") i++;
+    if (i >= length) return 0;
+    if (text.charAt(i) === "0") {
+      i++;
+    } else if (text.charAt(i) >= "1" && text.charAt(i) <= "9") {
+      while (i < length && text.charAt(i) >= "0" && text.charAt(i) <= "9") i++;
+    } else {
+      return 0;
+    }
+    if (text.charAt(i) === ".") {
+      i++;
+      if (text.charAt(i) < "0" || text.charAt(i) > "9") return 0;
+      while (i < length && text.charAt(i) >= "0" && text.charAt(i) <= "9") i++;
+    }
+    if (text.charAt(i) === "e" || text.charAt(i) === "E") {
+      i++;
+      if (text.charAt(i) === "+" || text.charAt(i) === "-") i++;
+      if (text.charAt(i) < "0" || text.charAt(i) > "9") return 0;
+      while (i < length && text.charAt(i) >= "0" && text.charAt(i) <= "9") i++;
+    }
+    return i - start;
+  }
+
+  function jsonHighlightHTML(text) {
+    var source = String(text === undefined || text === null ? "" : text);
+    if (source.length > 65536) return esc(source);
+    var out = [], plain = "", i = 0;
+    function flush() {
+      if (plain) {
+        out.push(esc(plain));
+        plain = "";
+      }
+    }
+    function token(className, value) {
+      flush();
+      out.push('<span class="json-' + className + '">' + esc(value) + "</span>");
+    }
+    while (i < source.length) {
+      var ch = source.charAt(i);
+      if (ch === '"') {
+        var start = i++;
+        while (i < source.length) {
+          if (source.charAt(i) === "\\") {
+            i += 2;
+            continue;
+          }
+          if (source.charAt(i) === '"') {
+            i++;
+            break;
+          }
+          i++;
+        }
+        var value = source.slice(start, i);
+        var next = i;
+        while (next < source.length && /\s/.test(source.charAt(next))) next++;
+        token(source.charAt(next) === ":" ? "key" : "string", value);
+        continue;
+      }
+      if (ch === "-" || (ch >= "0" && ch <= "9")) {
+        var numberLength = jsonNumberLength(source, i);
+        if (numberLength > 0) {
+          token("number", source.slice(i, i + numberLength));
+          i += numberLength;
+          continue;
+        }
+      }
+      if (source.slice(i, i + 4) === "true" && jsonLiteralBoundary(source, i + 4)) {
+        token("boolean", "true");
+        i += 4;
+        continue;
+      }
+      if (source.slice(i, i + 5) === "false" && jsonLiteralBoundary(source, i + 5)) {
+        token("boolean", "false");
+        i += 5;
+        continue;
+      }
+      if (source.slice(i, i + 4) === "null" && jsonLiteralBoundary(source, i + 4)) {
+        token("null", "null");
+        i += 4;
+        continue;
+      }
+      if ("{}[]:,".indexOf(ch) >= 0) {
+        token("punctuation", ch);
+        i++;
+        continue;
+      }
+      plain += ch;
+      i++;
+    }
+    flush();
+    return out.join("");
+  }
+
+  function syncConfigEditorHighlight() {
+    var area = $("configEditor"), layer = $("configEditorHighlight");
+    if (!area || !layer) return;
+    layer.scrollTop = area.scrollTop;
+    layer.scrollLeft = area.scrollLeft;
+  }
+
+  function renderConfigEditorHighlight() {
+    var area = $("configEditor"), layer = $("configEditorHighlight");
+    if (!area || !layer) return;
+    layer.innerHTML = jsonHighlightHTML(area.value + (area.value.endsWith("\n") ? " " : ""));
+    syncConfigEditorHighlight();
+  }
+
   function loadConfig() {
     var version = ++state.configPreviewVersion;
     return api("/admin/api/config").then(function (data) {
@@ -2032,6 +2154,7 @@
       var box = $("configBox");
       if (!data.exists) { box.textContent = "未找到 " + (data.path || "config.json"); return; }
       box.textContent = data.content;
+      box.innerHTML = jsonHighlightHTML(data.content);
     }).catch(function () {
       // 保留上次内容。
     });
@@ -2056,6 +2179,7 @@
     state.configRevision = "";
     state.configOriginal = "";
     $("configEditor").value = "";
+    $("configEditorHighlight").innerHTML = "";
     $("configEditorStatus").textContent = "";
     $("configWarning").classList.add("hidden");
     $("configEditorPanel").classList.add("hidden");
@@ -2101,6 +2225,9 @@
       state.configOriginal = data.content;
       state.configMode = "edit";
       $("configEditor").value = data.content;
+      $("configEditor").scrollTop = 0;
+      $("configEditor").scrollLeft = 0;
+      renderConfigEditorHighlight();
       $("configWarning").classList.add("hidden");
       $("configBox").classList.add("hidden");
       $("configEditorPanel").classList.remove("hidden");
@@ -2717,7 +2844,9 @@
     $("cancelConfigEdit").addEventListener("click", exitConfigEdit);
     $("reloadConfigEditor").addEventListener("click", loadConfigEditor);
     $("saveConfig").addEventListener("click", saveConfigEditor);
+    $("configEditor").addEventListener("scroll", syncConfigEditorHighlight);
     $("configEditor").addEventListener("input", function () {
+      renderConfigEditorHighlight();
       $("configEditorStatus").textContent = configDirty() ? "有未保存的修改。离开配置页会提示确认；不会自动保存。" : "内容未修改。";
     });
     window.addEventListener("beforeunload", function (event) {

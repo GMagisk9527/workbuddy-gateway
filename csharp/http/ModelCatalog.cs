@@ -9,7 +9,7 @@ namespace HttpMigration;
 
 public sealed partial class ModelCatalog
 {
-    sealed class Row
+    sealed record Row
     {
         public string Id { get; set; }="";
         public int MaxInputTokens { get; set; }
@@ -22,6 +22,12 @@ public sealed partial class ModelCatalog
         public double Multiplier { get; set; }
         public bool PromoExpired { get; set; }
         public long PriceUpdatedAt { get; set; }
+        public string? OriginalId { get; set; }
+        public double? BaseMultiplier { get; set; }
+        public Promotion[]? Promotions { get; set; }
+        public long RateCheckedAt { get; set; }
+        public long RateChangedAt { get; set; }
+        public bool RateCached { get; set; }
     }
     sealed class LiveRow
     {
@@ -53,12 +59,14 @@ public sealed partial class ModelCatalog
     State state=new([],[]);
     readonly object publish=new();
     public bool IsEmpty { get {var s=Volatile.Read(ref state);return s.Cn.Length==0&&s.Intl.Length==0;} }
-    public byte[] Export()
+    public byte[] Export()=>Export(out _);
+    internal byte[] Export(out long version)
     {
-        var s=Volatile.Read(ref state);var sites=new Dictionary<string,Row[]>();
+        lock(publish){var s=Volatile.Read(ref state);var sites=new Dictionary<string,Row[]>();
         if(s.Cn.Length>0)sites["cn"]=s.Cn;
         if(s.Intl.Length>0)sites["intl"]=s.Intl;
-        return JsonSerializer.SerializeToUtf8Bytes(new CatalogDocument(5, sites), CatalogJson.Default.CatalogDocument);
+        version=revision;
+        return JsonSerializer.SerializeToUtf8Bytes(new CatalogDocument(5, sites,observations.Values.Concat(probeObservations.Values).ToArray()), CatalogJson.Default.CatalogDocument);}
     }
     public string Source
     {
@@ -69,15 +77,18 @@ public sealed partial class ModelCatalog
     sealed record ConsolePolicy(FrozenSet<string> Block,FrozenSet<string>? Allow);
     ConsolePolicy consolePolicy=new(FrozenSet<string>.Empty,null);
     internal void SetConsolePolicy(FrozenSet<string> blocked,FrozenSet<string>? allowed)=>Volatile.Write(ref consolePolicy,new(blocked,allowed));
-    sealed record CatalogDocument(int Schema, Dictionary<string, Row[]> Catalogs);
+    sealed record CatalogDocument(int Schema, Dictionary<string, Row[]> Catalogs,RateObservation[]? Observations=null);
 
     [System.Text.Json.Serialization.JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
     [System.Text.Json.Serialization.JsonSerializable(typeof(CatalogDocument))]
     [System.Text.Json.Serialization.JsonSerializable(typeof(Row[]))]
     [System.Text.Json.Serialization.JsonSerializable(typeof(LiveRow))]
+    [System.Text.Json.Serialization.JsonSerializable(typeof(RateObservation[]))]
     partial class CatalogJson : System.Text.Json.Serialization.JsonSerializerContext { }
-    public ModelCatalog(IEnumerable<string>? allow=null,IEnumerable<string>? block=null)
+    readonly TimeProvider clock;
+    public ModelCatalog(IEnumerable<string>? allow=null,IEnumerable<string>? block=null,TimeProvider? time=null)
     {
+        clock=time??TimeProvider.System;
         var allowed=(allow??[]).Select(KeyRules.Model).Where(m=>m.Length>0).ToFrozenSet();
         this.allow=allowed.Count>0?allowed:null;
         this.block=(block??[]).Select(KeyRules.Model).Where(m=>m.Length>0).ToFrozenSet();
@@ -101,15 +112,18 @@ public sealed partial class ModelCatalog
             if(!root.GetProperty("catalogs").TryGetProperty(site,out var list))return [];
             if(list.ValueKind!=JsonValueKind.Array || list.GetArrayLength() is <1 or >500)throw new ArgumentException("Catalog count exceeds bounds");
             var rows=JsonSerializer.Deserialize(list, CatalogJson.Default.RowArray)!;
-            foreach(var r in rows)Normalize(r);
+            foreach(var r in rows){Normalize(r);r.OriginalId??=r.Id;r.Id=DisplayId(site=="cn"?AccountSite.Cn:AccountSite.Intl,r.Id);if(r.RateCheckedAt==0&&r.PriceUpdatedAt>0)r.RateCheckedAt=checked(r.PriceUpdatedAt*1000);}
             return rows;
         }
         var next=new State(Site("cn"),Site("intl"));
-        lock(publish){Volatile.Write(ref state,next);PublishPricing();} // Invalid reloads never publish a half catalog.
+        var evidence=root.TryGetProperty("observations",out var saved)?JsonSerializer.Deserialize(saved,CatalogJson.Default.RateObservationArray)??[]:[];
+        ValidateObservations(evidence);
+        lock(publish){Volatile.Write(ref state,next);foreach(var e in evidence)StoreObservation(e);revision++;persistedRevision=revision;PublishPricing();} // Invalid reloads never publish a half catalog.
     }
     static void Normalize(Row r)
     {
         if(r is not null&&(!double.IsFinite(r.Multiplier)||r.Multiplier<0))throw new ArgumentException("Invalid model multiplier");
+        if(r is not null&&(r.BaseMultiplier is{} b&&(!double.IsFinite(b)||b<0)||r.RateCheckedAt<0||r.RateChangedAt<0||r.Promotions?.Length>1024||r.Promotions?.Any(p=>p is null||!double.IsFinite(p.Factor)||p.Factor<0||p.Factor>1||p.From<0||p.Until<0)==true||r.OriginalId is{} original&&(original!=KeyRules.Model(original)||original.Length>256)))throw new ArgumentException("Invalid model pricing");
         if(r is null || r.Id is null || r.Id!=KeyRules.Model(r.Id) || r.Id.Length==0 || Encoding.UTF8.GetByteCount(r.Id)>256 || r.Id.EnumerateRunes().Any(x=>Rune.IsWhiteSpace(x)||Rune.GetUnicodeCategory(x) is System.Globalization.UnicodeCategory.Control or System.Globalization.UnicodeCategory.Format) || r.MaxInputTokens<0 || r.MaxAllowedSize<0 || r.MaxOutputTokens<0 || r.ContextDefaultLength<0 || r.ContextLengths?.Length>128)throw new ArgumentException("Invalid catalog entry");
         int ceiling=r.MaxInputTokens>0?r.MaxInputTokens:r.MaxAllowedSize;
         int[] options=(r.ContextLengths??[]).Where(n=>n>0&&(ceiling==0||n<=ceiling)).Distinct().Order().ToArray();
@@ -129,14 +143,15 @@ public sealed partial class ModelCatalog
             var live=JsonSerializer.Deserialize(model, CatalogJson.Default.LiveRow)??throw new ArgumentException("Invalid live catalog entry");
             // Live contextWindow is authoritative; cache-shaped extras are ignored.
             var row=new Row{Id=KeyRules.Model(live.Id??""),MaxInputTokens=live.MaxInputTokens,MaxOutputTokens=live.MaxOutputTokens,MaxAllowedSize=live.MaxAllowedSize,ContextLengths=live.ContextWindow?.SupportedLengths,ContextDefaultLength=live.ContextWindow?.DefaultLength??0};
-            row.FromLive=true;row.PriceUpdatedAt=DateTimeOffset.UtcNow.ToUnixTimeSeconds();ReadPrice(row,model,data,DateTimeOffset.UtcNow);
+            row.FromLive=true;row.OriginalId=row.Id;ReadPrice(row,model,data);row.Id=DisplayId(site,row.Id);
             Normalize(row);if(seen.Add(row.Id))rows.Add(row);
         }
         lock(publish)
         {
             var s=Volatile.Read(ref state);
+            Stamp(rows,site==AccountSite.Cn?s.Cn:s.Intl);
             Volatile.Write(ref state,site==AccountSite.Cn?s with{Cn=rows.ToArray(),CnLive=true}:s with{Intl=rows.ToArray(),IntlLive=true});
-            PublishPricing();
+            revision++;PublishPricing();
         }
     }
     static Capability Cap(Row r)=>new(r.MaxInputTokens>0?r.MaxInputTokens:r.MaxAllowedSize,r.MaxOutputTokens,r.ContextDefaultLength,r.ContextLengths??[]);
@@ -167,7 +182,7 @@ public sealed partial class ModelCatalog
     {
         var s=Volatile.Read(ref state); model=KeyRules.Model(model);
         var rows=site is null?s.Cn.Concat(s.Intl):site==AccountSite.Cn?s.Cn:s.Intl;
-        return rows.Where(r=>r.Id==model).Select(r=>r.MaxOutputTokens).DefaultIfEmpty().Max();
+        return rows.Where(r=>r.Id==DisplayId(site??AccountSite.Cn,model)||site is null&&r.Id==DisplayId(AccountSite.Intl,model)).Select(r=>r.MaxOutputTokens).DefaultIfEmpty().Max();
     }
     // Scan structural tokens only; never decode/copy large content strings.
     internal byte[] PrepareOutput(byte[] original,string model,AccountSite? site,Action<int> reserve,int limit)

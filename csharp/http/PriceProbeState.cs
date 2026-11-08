@@ -9,7 +9,7 @@ internal static class PriceProbeState
     {
         if(!File.Exists(path))return [];
         var probes=JsonSerializer.Deserialize(ConsoleSettings.Read(path,1<<20), StorageJson.Default.ListProbe)??throw new InvalidDataException();
-        if(probes.Count>1000||probes.Any(p=>p is null||p.Model is null||p.Site is not("cn" or "intl")||p.Model.Length is 0 or >256||p.Model!=KeySecurity.KeyRules.Model(p.Model)||p.Model.Any(char.IsControl)||p.LastAt<0||p.LastAt>now.AddMinutes(5).ToUnixTimeSeconds()||!Enum.IsDefined(p.Cost))||probes.Select(p=>(p.Site,p.Model)).Distinct().Count()!=probes.Count)throw new InvalidDataException();
+        if(probes.Count>1000||probes.Any(p=>p is null||p.Model is null||p.Site is not("cn" or "intl")||p.Model.Length is 0 or >256||p.Model!=KeySecurity.KeyRules.Model(p.Model)||p.Model.Any(char.IsControl)||p.VerdictAt<0||p.VerdictAt>now.AddMinutes(5).ToUnixTimeSeconds()||p.FreeUntil<0||p.FreeUntil>253402300799||p.LastAt<0||p.LastAt>now.AddMinutes(5).ToUnixTimeSeconds()||!Enum.IsDefined(p.Cost))||probes.Select(p=>(p.Site,p.Model)).Distinct().Count()!=probes.Count)throw new InvalidDataException();
         return probes;
     }
     // Reading old observations must not instantiate or enable a model caller.
@@ -18,7 +18,7 @@ internal static class PriceProbeState
         try
         {
             foreach(var p in Read(Path.Combine(directory,"price-probes.json"),DateTimeOffset.UtcNow))
-                catalog.ObserveProbeCost(p.Site=="cn"?AccountSite.Cn:AccountSite.Intl,p.Model,p.Cost,p.LastAt);
+                catalog.ObserveProbeCost(p.Site=="cn"?AccountSite.Cn:AccountSite.Intl,p.Model,p.Cost,p.VerdictAt>0?p.VerdictAt:p.LastAt,p.FreeUntil);
             return true;
         }
         catch(Exception e)when(e is IOException or UnauthorizedAccessException or JsonException or ArgumentException){return false;}

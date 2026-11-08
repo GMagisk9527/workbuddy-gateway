@@ -27,7 +27,8 @@ internal static partial class Program
             replacements=[];
             foreach(var p in rp.EnumerateObject())replacements[p.Name]=p.Value.ValueKind==JsonValueKind.String?p.Value.GetString()??"":"";
         }
-        return new IdentityOptions(enabled,target,replacements);
+        bool restore=id.TryGetProperty("responseRestore",out var rr)&&rr.ValueKind==JsonValueKind.True&&rr.GetBoolean();
+        return new IdentityOptions(enabled,target,replacements,restore);
     }
 
     static async Task Main(string[] args)
@@ -36,6 +37,7 @@ internal static partial class Program
         if(args is ["--calendar-check",var calendarScratch]){await CalendarTests.Run(calendarScratch);return;}
         if(args is ["--scheduled-tasks-check"]){ScheduledTaskTests.Run();return;}
         if(args is ["--identity-check"]){IdentityTests.Run();return;}
+        if(args is ["--upstream-sync-check",var syncScratch]){await UpstreamSyncTests.Run(syncScratch);return;}
         if(args is ["--conversation-check",var conversationScratch]){await ConversationTests.Run(conversationScratch);return;}
         if(args is ["--body-lifetime-check",var bodyScratch]){await BodyLifetimeTests.Run(bodyScratch);return;}
         if(args is ["--console-check",var consoleScratch]){await ConsoleTests.Run(consoleScratch);return;}

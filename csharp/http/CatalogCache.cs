@@ -108,11 +108,12 @@ public sealed class CatalogCache : IDisposable
             ObjectDisposedException.ThrowIf(disposed,this);
             try
             {
-                byte[] next=Envelope(catalog.Export());var current=Read("catalog.json");
+                byte[] next=Envelope(catalog.Export(out long version));var current=Read("catalog.json");
                 // A corrupt primary must never overwrite the last valid backup.
                 if(current.Envelope is not null)Atomic("catalog.backup.json",current.Envelope);
                 else if(Read("catalog.backup.json").Snapshot is null)Atomic("catalog.backup.json",next);
                 Atomic("catalog.json",next);
+                catalog.MarkSaved(version);
                 Volatile.Write(ref status,Status with{WriteFailed=false,Saves=Status.Saves+1});return true;
             }
             catch(Exception e) when(e is IOException or UnauthorizedAccessException or ArgumentException or JsonException)

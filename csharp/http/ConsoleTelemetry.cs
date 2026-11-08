@@ -170,9 +170,10 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
     }
 }
 
-internal sealed class ConsoleHistoryWorker(ConsoleTelemetry telemetry,ScheduledTaskJournal? tasks=null):BackgroundService,IHostedLifecycleService
+internal sealed class ConsoleHistoryWorker(ConsoleTelemetry telemetry,ScheduledTaskJournal? tasks=null,ModelCatalog? catalog=null,CatalogCache? cache=null):BackgroundService,IHostedLifecycleService
 {
-    protected override async Task ExecuteAsync(CancellationToken token){using var timer=new PeriodicTimer(TimeSpan.FromSeconds(5));while(await timer.WaitForNextTickAsync(token))await Task.Run(()=>{telemetry.Save();tasks?.Save();},CancellationToken.None);}
+    void Save(){telemetry.Save();tasks?.Save();if(cache is not null&&catalog?.NeedsSave==true)cache.TrySave(catalog);}
+    protected override async Task ExecuteAsync(CancellationToken token){using var timer=new PeriodicTimer(TimeSpan.FromSeconds(5));while(await timer.WaitForNextTickAsync(token))await Task.Run(Save,CancellationToken.None);}
     public Task StartingAsync(CancellationToken token)=>Task.CompletedTask;public Task StartedAsync(CancellationToken token)=>Task.CompletedTask;public Task StoppingAsync(CancellationToken token)=>Task.CompletedTask;
-    public Task StoppedAsync(CancellationToken token){telemetry.Save();tasks?.Save();return Task.CompletedTask;}
+    public Task StoppedAsync(CancellationToken token){Save();return Task.CompletedTask;}
 }

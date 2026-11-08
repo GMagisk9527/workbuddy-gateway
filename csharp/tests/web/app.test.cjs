@@ -78,6 +78,7 @@ function fixture(fetchImpl = async () => response(200, {}), cookies = new Map(),
   let source = fs.readFileSync(path.join(projectRoot, "http", "web", "app.js"), "utf8");
   source = source.replace(/\}\)\(\);\s*$/, `globalThis.review = {
     state, api, showAlert, hideAlert, togglePolicy, renderAccounts, renderModels, renderStatus, refreshActive,
+    jsonHighlightHTML, renderConfigEditorHighlight, syncConfigEditorHighlight,
     renderPoolHealth, renderAccountAlerts, bindAccountAlertTooltip, loadAccountAlerts, lockDashboard,
     saveKey, saveAPISettings, initializeAdmin, discoverSetup,
     showConfigWarning, loadConfigEditor, saveConfigEditor, exitConfigEdit, setTab, lockDashboard,
@@ -2191,4 +2192,34 @@ test("登录二维码在本地生成且不嵌入授权链接正文", () => {
   assert.match(svg,/<path d="M/);assert.match(svg,/shape-rendering="crispEdges"/);
   assert(!svg.includes("synthetic-only"));assert(!svg.includes("http://www.workbuddy"));
   assert.equal(f.review.loginQRCode(""),"");
+});
+
+
+test("configuration highlighting escapes HTML and preserves exact JSON source", () => {
+  const {review} = fixture();
+  const input = '{"html":"<img src=x onerror=alert(1)>","n":-1.2e+3,"b":true,"v":null,"x":"\\\""}\n';
+  const html = review.jsonHighlightHTML(input);
+  assert(!html.includes("<img"));
+  for (const type of ["key", "string", "number", "boolean", "null", "punctuation"]) assert(html.includes('class="json-' + type + '"'));
+  const text = html.replace(/<span class="json-[a-z]+">|<\/span>/g, "").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
+  assert.equal(text,input);
+  assert.equal(review.jsonHighlightHTML("x".repeat(65537)),"x".repeat(65537));
+});
+
+test("highlight layer follows scrolling without modifying selection or IME text", () => {
+  const {review,element} = fixture();
+  const editor=element("configEditor"),layer=element("configEditorHighlight");
+  editor.value='{"hello":"中文😀"}\n'; editor.selectionStart=10;editor.selectionEnd=12;editor.scrollTop=91;editor.scrollLeft=37;
+  review.renderConfigEditorHighlight();
+  assert.equal(editor.value,'{"hello":"中文😀"}\n');assert.equal(editor.selectionStart,10);assert.equal(editor.selectionEnd,12);
+  assert.equal(layer.scrollTop,91);assert.equal(layer.scrollLeft,37);assert(layer.innerHTML.endsWith("\n "));
+  editor.scrollTop=15;review.syncConfigEditorHighlight();assert.equal(layer.scrollTop,15);
+});
+
+test("rate source detail works without retained logs and model revision clears cached details", () => {
+  const {review} = fixture();
+  const html=review.rateDetailHTML({rates:{"cn|m":{hasSource:true,hasLog:false,source:"official catalog",updatedAt:1800000000,explain:"source evidence"}}},"cn","m");
+  assert(html.includes("official catalog"));assert(html.includes("source evidence"));
+  review.state.lastModels={rateDisplayRevision:"1:0"};review.state.rateDetails={secret:"old"};review.state.rateDetailsAt=100;
+  review.renderModels({models:[],rateDisplayRevision:"2:0"});assert.equal(review.state.rateDetails,null);assert.equal(review.state.rateDetailsAt,0);
 });

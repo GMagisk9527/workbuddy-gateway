@@ -330,7 +330,10 @@
       <div id="configEditorPanel" class="hidden">
         <p class="config-sensitive">编辑中 · 支持模型、调度、提示词、亲和及日志等配置；保存后立即生效。</p>
         <label for="configEditor" class="hint">完整配置 JSON</label>
-        <textarea id="configEditor" class="config-editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="configEditorStatus"></textarea>
+        <div class="config-editor-shell">
+          <pre id="configEditorHighlight" class="config-editor-highlight" aria-hidden="true"></pre>
+          <textarea id="configEditor" class="config-editor" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="configEditorStatus"></textarea>
+        </div>
         <p id="configEditorStatus" class="hint action-result" role="status" aria-live="polite"></p>
         <div class="actions">
           <button id="saveConfig" type="button">校验并保存</button>

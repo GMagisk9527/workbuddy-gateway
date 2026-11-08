@@ -71,10 +71,11 @@ public sealed class MessageAggregate(long limit,IRetainedOutputBudget? budget=nu
             var state = new MessageStreamState(options.Model, options.WantThinking, options.Hidden, options.RetainedLimit, (int)Math.Min(int.MaxValue, options.RetainedLimit),options.Budget);
             var accumulator = new MessageAggregate(outputLimit,options.Budget); var reader = new SseReader(upstream);
             bool receivedOutput = false;
+            var restorers = new Dictionary<(int Choice, string Channel), ResponseIdentityRestorer>();
             try
             {
                 while (await reader.NextAsync(cancellation) is { } chunk)
-                { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; foreach (var e in state.Feed(chunk)) e.Accept(accumulator); }
+                { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; if(options.ResponseRestore is { Active:true } plan) chunk=plan.RestoreChunk(chunk,restorers); foreach (var e in state.Feed(chunk)) e.Accept(accumulator); }
                 foreach (var e in state.Finish()) e.Accept(accumulator);
                 return new(true, "", accumulator.Encode(state.Model), state.Usage, state.RawUsageJson, receivedOutput);
             }

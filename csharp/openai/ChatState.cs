@@ -5,13 +5,14 @@ using static OpenAiProtocols.OpenWire;
 
 namespace OpenAiProtocols;
 
-public sealed class ChatState(string model, long limit,IRetainedOutputBudget? budget=null)
+public sealed class ChatState(string model, long limit,IRetainedOutputBudget? budget=null,ResponseIdentityPlan? responseRestore=null)
 {
     public sealed class Tool
     {
         public int Index; public string Id = "", Name = "", Type = "function"; public StringBuilder Arguments = new();
     }
     readonly Dictionary<int, Tool> tools = [];
+    readonly Dictionary<(int Choice, string Channel), ResponseIdentityRestorer> restorers = [];
     public sealed record ToolChange(int Choice, int Index, string Id, string Name, string Arguments, string Accumulated);
     public List<ToolChange> Changes { get; } = [];
     public List<Tool> Calls { get; } = [];
@@ -36,6 +37,8 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
         var raw = payload.Trim() == "null" ? new JsonObject() : Parse(Encoding.UTF8.GetBytes(payload));
         if (raw["usage"] is JsonObject evidence) { Reserve(evidence.ToJsonString()); Usage = (JsonObject)evidence.DeepClone(); }
         var parsed = ChunkReader.Parse(payload); ReceivedOutput |= parsed.HasOutput;
+        if (responseRestore is { Active: true })
+        { ResponseIdentityWire.Apply(raw, responseRestore, restorers); parsed = ChunkReader.Parse(raw.ToJsonString()); }
         if (Text(raw["id"]) != "") Id = Text(raw["id"]);
         if (Text(raw["model"]) != "") Model = Text(raw["model"]);
         if (raw["created"] is not null) Created = Int(raw["created"]);

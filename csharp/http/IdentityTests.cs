@@ -157,6 +157,19 @@ internal static class IdentityTests
         byte[] anthropicCode=JsonSerializer.SerializeToUtf8Bytes(new{model="m",system=new[]{new{type="text",text="`open"},new{type="text",text="Claude Code\nclose`"}},messages=new[]{new{role="user",content="hello"}}});
         Check(SystemContent(Encoding.UTF8.GetString(MessagesRequestAdapter.Prepare(anthropicCode,Program.TestKey,prompts:new(Identity:named)).UpstreamBody))=="`open\nClaude Code\nclose`","Anthropic pre-merge processing protects cross-block code spans");
 
+        using (var restoreDoc=JsonDocument.Parse(SysJson("You are an AI agent powered by DeepSeek Harness. Continue.")))
+        {
+            var restorePlan=ResponseIdentityFactory.Create(restoreDoc.RootElement,new IdentityOptions(Target:"WorkBuddy",ResponseRestore:true));
+            Check(restorePlan is { Active:true }&&restorePlan.Restore("WorkBuddy says WorkBuddy_code") == "DeepSeek Harness says WorkBuddy_code","Response restore respects identifier boundaries");
+            var restorer=restorePlan!.CreateRestorer();
+            string restored = restorer.Write("Work") + restorer.Write("Buddy says ") + restorer.Write("WorkBuddy_code") + restorer.Flush();
+            Check(restored=="DeepSeek Harness says WorkBuddy_code","Response restore holds split target text and flushes safely");
+            using var mentionDoc=JsonDocument.Parse(SysJson("The prompt mentions DeepSeek Harness but does not declare an agent."));
+            Check(ResponseIdentityFactory.Create(mentionDoc.RootElement,new IdentityOptions(Target:"WorkBuddy",ResponseRestore:true)) is null,"Response restore ignores ordinary mentions");
+            using var ambiguousDoc=JsonDocument.Parse(SysJson("You are Claude Code and Codex."));
+            Check(ResponseIdentityFactory.Create(ambiguousDoc.RootElement,new IdentityOptions(Target:"WorkBuddy",ResponseRestore:true)) is null,"Response restore skips ambiguous declarations");
+        }
+
         Console.WriteLine($"identity checks passed: {checks}");
     }
 }

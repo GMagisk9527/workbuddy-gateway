@@ -12,7 +12,7 @@ namespace HttpMigration;
 /// user, tool, reasoning and tool arguments are never rewritten, and matches
 /// that overlap Markdown code are skipped.
 /// </summary>
-public sealed record IdentityOptions(bool? Enabled=null,string Target="",IReadOnlyDictionary<string,string>? Replacements=null)
+public sealed record IdentityOptions(bool? Enabled=null,string Target="",IReadOnlyDictionary<string,string>? Replacements=null,bool ResponseRestore=false)
 {
     public static IdentityOptions Default{get;}=new();
     // Keep configuration out of logs, matching SystemPromptOptions.

@@ -33,7 +33,7 @@ internal static class RuntimeCacheTests
     {try{using var lease=await pool.AcquireAsync(model);throw new InvalidOperationException("Unexpected eligible account");}catch(SchedulingFailure e){Check(e.Code=="no_eligible_account","Restored scheduling guard applies");}}
     static async Task SnapshotRules(Clock clock)
     {
-        var source=New(clock);source.Pool.ObserveModelUsage(Id,"free","{\"credit\":0,\"total_tokens\":100}");source.Pool.ObserveModelUsage(Id,"paid","{\"credit\":1}");source.Pool.ObserveModelFailure(Id,"blocked",400,"14018");source.Pool.ObserveModelFailure(Id,"cool",400,"6004");source.Pool.ObserveQuota(Id,true,default,0);
+        var source=New(clock);source.Pool.ObserveModelUsage(Id,"free","{\"credit\":0,\"total_tokens\":100}");source.Pool.ObserveModelUsage(Id,"paid","{\"credit\":1}");source.Pool.ObserveModelFailure(Id,"blocked",400,"14018");source.Pool.ObserveModelFailure(Id,"cool",429,"6004");source.Pool.ObserveQuota(Id,true,default,0);
         using(var probe=await source.Pool.AcquireAsync("probe"))Check(probe.Kind==SelectionKind.ProbeExhausted,"Reserve probe before checkpoint");
         var export=source.Pool.ExportRuntime(source.Manager.RuntimeIdentities);string raw=Encoding.UTF8.GetString(export.Snapshot);
         Check(!raw.Contains("synthetic-private")&&!raw.Contains("access")&&!raw.Contains("refresh"),"Snapshot contains digests and model state only");

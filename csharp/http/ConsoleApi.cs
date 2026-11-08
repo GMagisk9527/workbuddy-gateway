@@ -135,7 +135,7 @@ internal static class ConsoleApi
         var models=o.Catalog!.List(includeDisabled:true)["data"]!.AsArray().Select(m=>
         {
             string id=m!["id"]!.GetValue<string>();var history=rows.Where(r=>r.Model==id).ToArray();var sum=ConsoleTelemetry.Aggregate(history);return new Dictionary<string, object?> { ["id"] = id, ["enabled"] = o.Catalog.Allows(id), ["policyReason"] = o.Catalog.Allows(id)?"允许调用":"控制台规则已停用", ["cnMultiplier"] = o.Catalog.PriceLabel(AccountSite.Cn,id), ["intlMultiplier"] = o.Catalog.PriceLabel(AccountSite.Intl,id), ["availableAccounts"] = accounts.Count(a=>o.Accounts.Allows(a.Id,id)&&SchedulingRules.Eligibility(a,id,DateTimeOffset.UtcNow) is not null), ["requests"] = history.Length, ["avgTtftMs"] = sum["avgTtftMs"], ["hasTtft"] = history.Any(r=>r.TtftMs.HasValue), ["ttftMetric"] = "first_token_v2", ["avgLatencyMs"] = sum["avgLatencyMs"], ["hasLatency"] = history.Length>0, ["tokens"] = sum["tokens"], ["lastStatus"] = history.LastOrDefault()?.Code };
-        }).ToArray();return new Dictionary<string, object?> { ["models"] = models, ["stale"] = false, ["policyMode"] = "blocklist", ["updatedAt"] = Now };
+        }).ToArray();return new Dictionary<string, object?> { ["models"] = models, ["rateDisplayRevision"] = o.Catalog.RateRevision, ["stale"] = false, ["policyMode"] = "blocklist", ["updatedAt"] = Now };
     }
     static object Tasks(HttpContext c,LocalGatewayOptions o)
     {
