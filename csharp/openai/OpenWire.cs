@@ -15,7 +15,7 @@ public enum ResponseToolKind { Function, Namespace, Custom, WebSearch }
 public sealed record ResponseTool(string Name, string Namespace, ResponseToolKind Kind);
 public sealed record OpenAiRequest(string Model, bool Stream, byte[] Body, ClientProtocol Protocol,
     IReadOnlyDictionary<string, ResponseTool> Tools, JsonObject Metadata, bool EncryptedReasoning = false)
-{public bool OutboundCompatible{get;init;}}
+{public bool OutboundCompatible{get;init;} public ResponseIdentityPlan? ResponseRestore{get;init;}}
 public sealed class OpenAiFailure(string code, string message, int status = 400) : Exception(message)
 { public string Code { get; } = code; public int Status { get; } = status; }
 

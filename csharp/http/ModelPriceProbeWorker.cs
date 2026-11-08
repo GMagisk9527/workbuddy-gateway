@@ -11,7 +11,7 @@ namespace HttpMigration;
 // so a crash or ambiguous reply never immediately duplicates a paid request.
 public sealed class ModelPriceProbeWorker:BackgroundService
 {
-    public sealed record Probe(string Site,string Model,long LastAt,ModelCost Cost=ModelCost.Unknown);
+    public sealed record Probe(string Site,string Model,long LastAt,ModelCost Cost=ModelCost.Unknown,long VerdictAt=0,long FreeUntil=0);
     readonly CredentialManager credentials;readonly ModelCatalog catalog;readonly ConsoleTelemetry telemetry;readonly HttpClient client;
     readonly string path;readonly TimeProvider clock;readonly SemaphoreSlim gate=new(1,1);List<Probe> probes=[];
     public bool Blocked{get;private set;}
@@ -27,7 +27,7 @@ public sealed class ModelPriceProbeWorker:BackgroundService
             probes=PriceProbeState.Read(path,this.clock.GetUtcNow());
         }
         catch(Exception e)when(e is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or ArgumentException){Blocked=true;}
-        if(!Blocked){published=probes.ToArray();foreach(var p in probes)catalog.ObserveProbeCost(p.Site=="cn"?AccountSite.Cn:AccountSite.Intl,p.Model,p.Cost,p.LastAt);}
+        if(!Blocked){published=probes.ToArray();foreach(var p in probes)catalog.ObserveProbeCost(p.Site=="cn"?AccountSite.Cn:AccountSite.Intl,p.Model,p.Cost,p.VerdictAt>0?p.VerdictAt:p.LastAt,p.FreeUntil);}
     }
     IEnumerable<(AccountSite Site,string Model,AccountId Account)> Pending()
     {
@@ -54,7 +54,7 @@ public sealed class ModelPriceProbeWorker:BackgroundService
                 token.ThrowIfCancellationRequested();string site=item.Site==AccountSite.Cn?"cn":"intl";
                 var old=probes.SingleOrDefault(p=>p.Site==site&&p.Model==item.Model);
                 if(old is null&&probes.Count==1000)break;
-                var reserved=new Probe(site,item.Model,clock.GetUtcNow().ToUnixTimeSeconds(),old?.Cost??ModelCost.Unknown);
+                var reserved=new Probe(site,item.Model,clock.GetUtcNow().ToUnixTimeSeconds(),old?.Cost??ModelCost.Unknown,old is null?0:old.VerdictAt>0?old.VerdictAt:old.LastAt,old?.FreeUntil??0);
                 if(old is not null)probes.Remove(old);probes.Add(reserved);
                 try{Save();}catch(Exception e)when(e is IOException or UnauthorizedAccessException){Blocked=true;failed++;break;}
                 attempted++;
@@ -80,7 +80,8 @@ public sealed class ModelPriceProbeWorker:BackgroundService
                     if(restricted)credentials.Block(item.Account);
                     var cost=result.Outcome==StreamOutcome.Complete?ModelObservations.Cost(result.RawUsageJson):ModelCost.Unknown;
                     if(cost==ModelCost.Unknown){failed++;continue;}
-                    probes[probes.IndexOf(reserved)]=reserved with{Cost=cost};Save();catalog.ObserveProbeCost(item.Site,item.Model,cost,reserved.LastAt);ok++;
+                    long verdictAt=clock.GetUtcNow().ToUnixTimeSeconds();long freeUntil=cost==ModelCost.Free?catalog.ProbeFreeUntil(item.Site,item.Model,verdictAt):0;
+                    probes[probes.IndexOf(reserved)]=reserved with{Cost=cost,VerdictAt=verdictAt,FreeUntil=freeUntil};Save();catalog.ObserveProbeCost(item.Site,item.Model,cost,verdictAt,freeUntil);ok++;
                 }
                 catch(OperationCanceledException)when(!token.IsCancellationRequested){failed++;}
                 catch(Exception e)when(e is CredentialFailure or HttpRequestException or IOException or UnauthorizedAccessException or RequestFailure){failed++;}

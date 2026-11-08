@@ -19,7 +19,7 @@ public sealed partial class ConsoleSettings
         {Fields(p,"fallback","force");next=next with{Fallback=p.TryGetProperty("fallback",out var f)?f.GetString()!:fallback.Fallback,Force=p.TryGetProperty("force",out var force)?force.GetString()!:fallback.Force};}
         if(root.TryGetProperty("identity",out var identity))
         {
-            Fields(identity,"enabled","target","replacements");var old=fallback.Identity??new();
+            Fields(identity,"enabled","target","replacements","responseRestore");var old=fallback.Identity??new();
             IReadOnlyDictionary<string,string>? replacements=old.Replacements;
             if(identity.TryGetProperty("replacements",out var r))
             {
@@ -27,7 +27,7 @@ public sealed partial class ConsoleSettings
                 replacements=r.EnumerateObject().ToFrozenDictionary(p=>p.Name,p=>p.Value.GetString()??throw new ArgumentException("Invalid replacement"));
                 if(replacements.Any(p=>p.Key.Length is 0 or >4096||p.Value.Length>4096))throw new ArgumentException("Invalid replacement bounds");
             }
-            next=next with{Identity=new(identity.TryGetProperty("enabled",out var enabled)?enabled.GetBoolean():old.Enabled,identity.TryGetProperty("target",out var target)?target.GetString()!:old.Target,replacements)};
+            next=next with{Identity=new(identity.TryGetProperty("enabled",out var enabled)?enabled.GetBoolean():old.Enabled,identity.TryGetProperty("target",out var target)?target.GetString()!:old.Target,replacements,identity.TryGetProperty("responseRestore",out var restore)?restore.GetBoolean():old.ResponseRestore)};
             if(next.Identity.Target is null||next.Identity.Target.Length>4096)throw new ArgumentException("Invalid target");
         }
         next.Validate();return next;

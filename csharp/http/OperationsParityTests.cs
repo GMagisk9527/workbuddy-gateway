@@ -37,7 +37,7 @@ internal static class OperationsParityTests
         Create(root,"a");Create(root,"b",true);Manifest(root,"a","b");var control=new Control();
         using var owner=StandaloneAccounts.OpenManifest(Path.Combine(root,"accounts.json"),_=>control);
         Check(!await owner.ReloadAsync(),"Unchanged disk does not reset live state");
-        owner.Pool.ObserveModelFailure(new("a"),"m",400,"6004");
+        owner.Pool.ObserveModelFailure(new("a"),"m",429,"6004");
         Create(root,"c");Manifest(root,"a","b","c");
         Check(await owner.ReloadAsync()&&owner.Pool.Count==3,"New manifest entry admitted without restart");
         Check(owner.Pool.Snapshot(new("a"))!.Models!["m"].CooldownUntil>DateTimeOffset.UtcNow,"Reload preserves existing model cooldown");
@@ -153,9 +153,10 @@ internal static class OperationsParityTests
         }
         using(var restarted=new ModelPriceProbeWorker(owner.Credentials,catalog,console,client,clock))
         {
-            await restarted.RunOnceAsync();Check(handler.Calls==1,"Probe window persists across restart");clock.Now=clock.Now.AddHours(12);handler.Reject=true;
+            await restarted.RunOnceAsync();Check(handler.Calls==1,"Probe window persists across restart");long verdictAt=restarted.Results.Single().VerdictAt;clock.Now=clock.Now.AddHours(12);handler.Reject=true;
             await restarted.RunOnceAsync();Check(handler.Calls==2&&restarted.TaskState.Snapshot.Status=="failed"&&restarted.Results.Single().Cost==ModelCost.Free,"Rejection is failed and preserves earlier verdict without replay");
             Check(!owner.Credentials.Status.Single().Disabled,"Price observation does not modify account rejection state");
+            Check(restarted.Results.Single().VerdictAt==verdictAt&&restarted.Results.Single().LastAt>verdictAt,"Failed probe advances reservation time without refreshing the successful verdict");
         }
         var restoredCatalog=new ModelCatalog();restoredCatalog.Load(catalog.Export());
         // The saved synthetic clock is ahead, so use a separate current-time fixture.
@@ -163,7 +164,7 @@ internal static class OperationsParityTests
         File.WriteAllBytes(Path.Combine(offline,"price-probes.json"),JsonSerializer.SerializeToUtf8Bytes(new[]{new ModelPriceProbeWorker.Probe("cn","m",DateTimeOffset.UtcNow.ToUnixTimeSeconds(),ModelCost.Free)}));
         Check(PriceProbeState.Restore(offline,restoredCatalog)&&restoredCatalog.PriceLabel(AccountSite.Cn,"m")=="免费（实测）"&&handler.Calls==2,"Restoring price history never enables a probe or sends a request");
         using(var detail=JsonDocument.Parse(JsonSerializer.Serialize(restoredCatalog.PriceDetails())))
-            Check(detail.RootElement.GetProperty("rates").GetProperty("cn|m").GetProperty("hasLog").GetBoolean(),"Rate detail uses original UI site/model key and real saved evidence");
+            Check(detail.RootElement.GetProperty("rates").GetProperty("cn|m").GetProperty("hasSource").GetBoolean(),"Rate detail uses original UI site/model key and real saved evidence");
         string path=Path.Combine(root,"console/price-probes.json");File.WriteAllText(path,"invalid");using(var broken=new ModelPriceProbeWorker(owner.Credentials,catalog,console,client,clock))
         {await broken.RunOnceAsync();Check(broken.Blocked&&handler.Calls==2&&File.ReadAllText(path)=="invalid","Corrupt probe state blocks sends and is never overwritten");}
     }

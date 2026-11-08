@@ -29,7 +29,9 @@ internal static class ModelRuntimeTests
         Check(ModelObservations.Failure(429,"11128","{\"code\":6004}",clock.Now).Kind==ModelRejection.None,"Existing channel code wins conflicting body");
         Check(ModelObservations.Failure(429,null,"{\"code\":11140,\"error\":{\"code\":6004}}",clock.Now).Kind==ModelRejection.None,"Root restriction wins conflicting nested error");
         Check(ModelObservations.Failure(400,null,"{\"code\": 14018}",clock.Now).Kind==ModelRejection.Quota,"Structured spaced business code");
-        Check(ModelObservations.Failure(400,null,"{\"error\":{\"code\":\"6004\"}}",clock.Now).Kind==ModelRejection.ModelRate,"Nested business code");
+        Check(ModelObservations.Failure(400,null,"{\"error\":{\"code\":\"6004\"}}",clock.Now).Kind==ModelRejection.None,"Non-429 model text cannot start cooldown");
+        Check(ModelObservations.Failure(500,null,"{\"code\":\"11134\",\"message\":\"switch to another model\"}",clock.Now).Kind==ModelRejection.None,"Upstream 500 cannot start model cooldown");
+        Check(ModelObservations.Failure(429,null,"{\"error\":{\"code\":\"6004\"}}",clock.Now).Kind==ModelRejection.ModelRate,"429 model rate code");
         Check(ModelObservations.Reset("reset at 2027-01-15 08:00:00 UTC-3:30")==new DateTimeOffset(2027,1,15,11,30,0,TimeSpan.Zero),"Signed minute timezone");
         foreach(string text in new[]{"2027-02-30 08:00:00","2027-01-15 08:00:00 UTC+99","2027-01-15 08:00:00 UTC+14:01"})Check(ModelObservations.Reset(text) is null,"Reject impossible reset date/offset");
         Check(ModelObservations.Failure(429,null,"{\"message\":\"reset 2099-01-01 00:00:00 UTC+8\"}",clock.Now).Until==clock.Now.AddDays(1),"Bound future cooldown");
@@ -39,7 +41,8 @@ internal static class ModelRuntimeTests
         pool.ObserveModelFailure(id,"m",400,"14018");var state=pool.Snapshot(id)!.Models!["m"];
         Check(state.Cost==ModelCost.Free&&state.QuotaBlocked,"Quota rejection preserves free classification");await None(pool,"m");
         pool.ObserveQuota(id,false,default,0);using(var lease=await pool.AcquireAsync("m"))Check(!lease.Account.Models!["m"].QuotaBlocked,"Positive quota releases model block");
-        pool.ObserveModelFailure(id,"m",400,"6004");await None(pool,"m");using(var lease=await pool.AcquireAsync("other"))Check(true,"Model cooldown leaves other models eligible");
+        pool.ObserveModelFailure(id,"m",400,"6004");using(var lease=await pool.AcquireAsync("m"))Check(true,"Non-429 model text leaves model eligible");
+        pool.ObserveModelFailure(id,"m",429,"6004");await None(pool,"m");using(var lease=await pool.AcquireAsync("other"))Check(true,"Model cooldown leaves other models eligible");
         pool.ObserveQuota(id,false,default,0);await None(pool,"m");clock.Now=clock.Now.AddSeconds(61);using(var lease=await pool.AcquireAsync("m"))Check(true,"Model cooldown recovers by time without polling");
         pool.ObserveModelFailure(id,"m",429,null);pool.RestoreCredentialAvailability(id,true);await None(pool,"other");
         pool.Replace([new(id,endpoint)]);await None(pool,"other");
@@ -62,7 +65,8 @@ internal static class ModelRuntimeTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r,CancellationToken ct)
         {
             Calls++;string? code=mode switch{"quota" or "ssequota"=>"14018","model" or "ssemodel" or "partial" or "late"=>"6004","channel"=>"11128",_=>null};
-            if(mode is "model" or "quota" or "rate" or "forbidden" or "channel")return Task.FromResult(new HttpResponseMessage(mode=="rate"?HttpStatusCode.TooManyRequests:mode=="forbidden"?HttpStatusCode.Forbidden:HttpStatusCode.BadRequest){Content=new StringContent(JsonSerializer.Serialize(new{code=code??"ordinary",message="synthetic rejection"}),Encoding.UTF8,"application/json")});
+            if(mode=="unavailable")return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError){Content=new StringContent("{\"code\":11134,\"msg\":\"switch to another model\"}",Encoding.UTF8,"application/json")});
+            if(mode is "model" or "quota" or "rate" or "forbidden" or "channel")return Task.FromResult(new HttpResponseMessage(mode is "model" or "rate"?HttpStatusCode.TooManyRequests:mode=="forbidden"?HttpStatusCode.Forbidden:HttpStatusCode.BadRequest){Content=new StringContent(JsonSerializer.Serialize(new{code=code??"ordinary",message="synthetic rejection"}),Encoding.UTF8,"application/json")});
             string text=mode=="late"?string.Concat(Enumerable.Repeat("data: {\"choices\":[]}\n\n",65)):mode=="partial"?"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n":"";
             if(code is not null)text+="data: {\"code\":"+code+",\"usage\":{\"credit\":2}}\n\n";
             else text+="data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":"+(mode=="paid"?"2":"0")+",\"total_tokens\":"+(mode=="tiny"?"99":"100")+"}}\n\ndata: [DONE]\n\n";
@@ -72,7 +76,7 @@ internal static class ModelRuntimeTests
     internal static async Task Run(string scratch)
     {
         checks=0;Directory.CreateDirectory(scratch);Check(!Directory.EnumerateFileSystemEntries(scratch).Any(),"Empty scratch required");await Rules();int scenarios=0;
-        foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})foreach(bool stream in new[]{false,true})foreach(string mode in new[]{"model","quota","rate","forbidden","channel","ssemodel","ssequota","partial","late","free","paid","tiny"})
+        foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})foreach(bool stream in new[]{false,true})foreach(string mode in new[]{"model","quota","rate","forbidden","channel","unavailable","ssemodel","ssequota","partial","late","free","paid","tiny"})
         {
             string root=Path.Combine(scratch,Guid.NewGuid().ToString("N"));var id=new AccountId("first");var endpoint=SiteEndpoints.Model(AccountSite.Cn);var pool=new AccountPool([new(id,endpoint),new(new("second"),endpoint)]);
             using var files=CredentialFiles.Create(Path.Combine(root,"account"),new(new("synthetic-user"),"synthetic-access","synthetic-refresh",DateTimeOffset.UtcNow.ToUnixTimeSeconds()+7200));
@@ -84,7 +88,9 @@ internal static class ModelRuntimeTests
             object body=path=="/v1/responses"?new{model="m",input="hello",stream}:(object)new{model="m",messages=new[]{new{role="user",content="hello"}},stream};
             using var response=await client.PostAsJsonAsync(path,body);string text=await response.Content.ReadAsStringAsync();var snapshot=pool.Snapshot(id)!;var model=snapshot.Models!.GetValueOrDefault("m")??new();
             Check(fake.Calls==1,"No rate/quota/channel/403 replay");Check(!files.Load().Disabled&&!second.Load().Disabled,"Non-restriction never disables either account");
-            if(mode is "model" or "ssemodel" or "partial" or "late")Check(model.CooldownUntil>DateTimeOffset.UtcNow&&snapshot.CooldownUntil==default,"Model-only cooldown applied");
+            if(mode == "model")Check(model.CooldownUntil>DateTimeOffset.UtcNow&&snapshot.CooldownUntil==default,"429 model cooldown applied");
+            if(mode is "ssemodel" or "partial" or "late")Check(model.CooldownUntil==default&&snapshot.CooldownUntil==default,"SSE business error without HTTP 429 does not imply rate limit");
+            if(mode=="unavailable")Check((int)response.StatusCode==500&&snapshot.CooldownUntil==default&&(!snapshot.Models?.Values.Any(s=>s.CooldownUntil>DateTimeOffset.UtcNow||s.QuotaBlocked)??true),"HTTP 500/11134 preserved without model/account cooldown");
             if(mode is "quota" or "ssequota")Check(model.QuotaBlocked&&model.Cost==ModelCost.Unknown,"Quota blocks without paid inference");
             if(mode=="rate")Check(snapshot.CooldownUntil>DateTimeOffset.UtcNow&&!model.QuotaBlocked,"Account rate cooldown applied");
             if(mode is "forbidden" or "channel")Check(snapshot.CooldownUntil==default&&snapshot.Models!.Count==0,"Unrelated refusal never changes scheduling");

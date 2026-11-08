@@ -10,7 +10,7 @@ using TypedMigration;
 namespace HttpMigration;
 
 public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody)
-{public bool OutboundCompatible{get;init;}}
+{public bool OutboundCompatible{get;init;} public ResponseIdentityPlan? ResponseRestore{get;init;}}
 
 public static class MessagesRequestAdapter
 {

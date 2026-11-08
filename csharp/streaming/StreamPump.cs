@@ -2,7 +2,7 @@ namespace StreamingMigration;
 
 public enum StreamOutcome { Complete, Failed, Cancelled, DownstreamFailed }
 public sealed record StreamResult(StreamOutcome Outcome, string Code, Usage Usage, string? RawUsageJson, bool ReceivedOutput = false);
-public sealed record StreamOptions(string Model = "test-model", bool WantThinking = false, ReasoningCodec? Hidden = null, long RetainedLimit = 64L << 20,Action? FirstOutput=null,Action? UpstreamCompleted=null,IRetainedOutputBudget? Budget=null);
+public sealed record StreamOptions(string Model = "test-model", bool WantThinking = false, ReasoningCodec? Hidden = null, long RetainedLimit = 64L << 20,Action? FirstOutput=null,Action? UpstreamCompleted=null,IRetainedOutputBudget? Budget=null,ResponseIdentityPlan? ResponseRestore=null);
 
 public static class StreamPump
 {
@@ -13,6 +13,7 @@ public static class StreamPump
         {
             var state = new MessageStreamState(options.Model, options.WantThinking, options.Hidden, options.RetainedLimit,budget:options.Budget);
             var reader = new SseReader(upstream); var writer = new EventWriter();
+            var restorers = new Dictionary<(int Choice, string Channel), ResponseIdentityRestorer>();
             bool receivedOutput = false, notified = false; string? failureUsage=null;
             StreamResult Result(StreamOutcome outcome, string code) => new(outcome, code, state.Usage, failureUsage??state.RawUsageJson, receivedOutput);
             StreamResult Notify(StreamOutcome outcome, string code)
@@ -35,7 +36,7 @@ public static class StreamPump
             }
             try
             {
-                while (await reader.NextAsync(cancellation) is { } chunk) { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; await Send(state.Feed(chunk)); }
+                while (await reader.NextAsync(cancellation) is { } chunk) { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; if (options.ResponseRestore is { Active: true } plan) chunk = plan.RestoreChunk(chunk, restorers); await Send(state.Feed(chunk)); }
                 var terminal = state.Finish();
                 Notify(StreamOutcome.Complete, "");
                 await Send(terminal);

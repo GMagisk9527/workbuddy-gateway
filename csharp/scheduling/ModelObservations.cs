@@ -57,7 +57,10 @@ public static partial class ModelObservations
         if (code is "11128" or "11140") return new(ModelRejection.None);
         bool Has(string text) => message.Contains(text, StringComparison.OrdinalIgnoreCase);
         if (code == "14018" || status == 429 && (Has("额度已用尽") || Has("credits exhausted"))) return new(ModelRejection.Quota);
-        bool model = code == "6004" || Has("切换其他模型") || Has("switch to another model");
+        // A model-specific cooldown is justified only by a 429 response. Some
+        // upstream 500/11134 bodies reuse the same suggestion text while the
+        // model is merely unavailable; cooling it would drain the whole pool.
+        bool model = status == 429 && (code == "6004" || code == "14003" || Has("切换其他模型") || Has("switch to another model") || Has("模型繁忙") || Has("model busy"));
         bool rate = model || status == 429 || code == "429" || Has("频率限制") || Has("frequency limit") || Has("rate limit") || Has("ratelimit") || Has("too many requests");
         if (!rate) return new(ModelRejection.None);
         var until = Reset(message);

@@ -13,7 +13,7 @@ public static class OpenAiPump
     {
         await using (upstream)
         {
-            var state = new ChatState(request.Model, limit,budget); var reader = new SseReader(upstream);
+            var state = new ChatState(request.Model, limit,budget,request.ResponseRestore); var reader = new SseReader(upstream);
             var responses = request.Protocol == ClientProtocol.Responses ? new ResponsesStream(request, key) : null;
             var pending = new List<byte[]>(); long written = 0, held = 0; bool notified = false, downstreamFailed = false;
             OpenAiResult Result(StreamOutcome outcome, string code, byte[]? body = null) => new(outcome, code, body, state.Usage?.ToJsonString(), state.ReceivedOutput);
@@ -38,7 +38,7 @@ public static class OpenAiPump
                 while (await reader.NextPayloadAsync(cancellation) is { } payload)
                 {
                     bool hadOutput=state.ReceivedOutput;var (raw, chunk) = state.Feed(payload);
-                    if(!hadOutput&&chunk.HasOutput)firstOutput?.Invoke();
+                    if(!hadOutput&&state.ReceivedOutput)firstOutput?.Invoke();
                     if(chunk.Choices.Any(c=>c.Finish.Length>0))upstreamCompleted?.Invoke();
                     if (!request.Stream) continue;
                     if (responses is not null) foreach (var e in responses.Feed(chunk, state)) await Send(Frame(e, true));

@@ -295,10 +295,33 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .config-warning li + li { margin-top: 8px; }
 .config-warning .actions { margin-top: 16px; }
 .config-sensitive { color: var(--warn); font-size: 12px; margin: 0 0 12px; }
+.config-editor-shell { position: relative; margin-top: 8px; }
+.config-editor, .config-editor-highlight {
+  display: block; width: 100%; min-height: 320px; height: 52vh; margin: 0; padding: 12px;
+  tab-size: 2; font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  white-space: pre; overflow-wrap: normal; word-break: normal;
+}
 .config-editor {
-  display: block; width: 100%; min-height: 320px; height: 52vh; margin-top: 8px; padding: 12px;
-  resize: vertical; overflow: auto; tab-size: 2; font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  position: relative; z-index: 1; resize: vertical; overflow: auto;
+  color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text);
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+}
+.config-editor::selection { color: transparent; background: rgba(15, 157, 88, .24); }
+.config-editor-highlight {
+  position: absolute; inset: 0; z-index: 0; height: 100%; min-height: 0; overflow: auto; pointer-events: none;
   color: var(--text); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 8px;
+  scrollbar-width: none;
+}
+.config-editor-highlight::-webkit-scrollbar { display: none; }
+.json-key { color: #287dbc; }
+.json-string { color: #b65532; }
+.json-number { color: #9770ce; }
+.json-boolean { color: #0f9d58; }
+.json-null { color: #b75b94; }
+.json-punctuation { color: var(--text-muted); }
+@media (forced-colors: active) {
+  .config-editor { color: CanvasText; -webkit-text-fill-color: CanvasText; background: Canvas; }
+  .config-editor-highlight { visibility: hidden; }
 }
 .config-editor:focus-visible, #panel-config button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 #configEditorStatus { min-height: 20px; overflow-wrap: anywhere; }

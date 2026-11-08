@@ -6,7 +6,8 @@ using System.Text.Json;
 namespace StreamingMigration;
 
 public sealed record ToolFragment(int Index, string Id, string Name, string Arguments, bool Named = false);
-public sealed record Choice(string Reasoning, string Text, string Refusal, ImmutableArray<ToolFragment> Tools, string Finish, bool OtherOutput = false);
+public sealed record Choice(string Reasoning, string Text, string Refusal, ImmutableArray<ToolFragment> Tools, string Finish, bool OtherOutput = false)
+{ public int Index { get; init; } }
 public sealed record UsageObservation(Usage Tokens, string RawJson);
 public sealed record ChatChunk(string Model, ImmutableArray<Choice> Choices, UsageObservation? Usage)
 {
@@ -99,7 +100,7 @@ public static class ChunkReader
                 }).ToImmutableArray();
                 var legacy = Field(d, "function_call");
                 return new Choice(Text(Field(d, "reasoning_content")), Text(Field(d, "content")), Text(Field(d, "refusal")), tools, Text(Field(c, "finish_reason")),
-                    Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0);
+                    Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0){Index=(int)Integer(Field(c,"index"))};
             }).ToImmutableArray(), usage);
         }
         catch (JsonException) { throw new ConversionFailure("invalid_json"); }

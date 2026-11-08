@@ -51,7 +51,7 @@ internal static class CredentialEditingTests
         var listed=await Send("credentials");Check(listed.GetProperty("files").GetArrayLength()==3&&!listed.GetRawText().Contains("private-access")&&!listed.GetRawText().Contains("private-refresh"),"Credential list is masked including short tokens");
         await Send("credential-edit?file=..%2Fa",expected:404);
         var original=await Send("credential-edit?file=a");Check(original.GetProperty("content").GetString()!.Contains("private-access-a"),"Only explicit admin editor returns full credential");
-        await owner.Credentials.FetchResourcesAsync(new("a"));owner.Pool.ObserveModelFailure(new("a"),"m",400,"6004");
+        await owner.Credentials.FetchResourcesAsync(new("a"));owner.Pool.ObserveModelFailure(new("a"),"m",429,"6004");
         string updated=Replace(original,"private-new-access-a");await Edit("a",original,updated);
         var current=await Send("credential-edit?file=a");Check(current.GetProperty("content").GetString()==updated,"Edited JSON including unknown metadata preserved byte for byte");
         Check(owner.Credentials.ResourceStatus.Single(x=>x.Id=="a").Known&&owner.Pool.Snapshot(new("a"))!.Models!["m"].CooldownUntil>DateTimeOffset.UtcNow,"Same account edit preserves quota and model cooldown");

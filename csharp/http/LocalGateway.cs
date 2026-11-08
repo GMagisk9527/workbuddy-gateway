@@ -75,7 +75,7 @@ public static class LocalGateway
             builder.Services.AddSingleton(_=>new OutputAdmission(new SystemMemorySampler().Snapshot));
             builder.Services.AddSingleton<RetryAdmission>();
             builder.Services.AddSingleton(sp=>new GracefulRequests(sp.GetRequiredService<IHostApplicationLifetime>(),sp.GetRequiredService<ConsoleRuntime>().Settings));
-            builder.Services.AddHostedService(sp=>new ConsoleHistoryWorker(sp.GetRequiredService<ConsoleRuntime>().Telemetry,sp.GetRequiredService<ConsoleRuntime>().TaskJournal));
+            builder.Services.AddHostedService(sp=>new ConsoleHistoryWorker(sp.GetRequiredService<ConsoleRuntime>().Telemetry,sp.GetRequiredService<ConsoleRuntime>().TaskJournal,options.Catalog,options.CatalogCache));
             builder.Services.AddSingleton(sp=>new ConsoleMaintenanceWorker(sp.GetRequiredService<ConsoleRuntime>()));
             builder.Services.AddHostedService(sp=>sp.GetRequiredService<ConsoleMaintenanceWorker>());
         }
@@ -177,7 +177,7 @@ public static class LocalGateway
             if(options.DirectUpstream && accountLease is not null && modelName is not null)
             {
                 if(status==200&&code.Length==0&&selectedIdentity==options.Credentials!.AffinityIdentity(accountLease.Account.Id))affinity.ObserveCache(affinityKey,accountLease.Account.Id,selectedIdentity,SessionAffinity.CachedTokens(raw),true);
-                if(status==200||receivedOutput)options.Accounts!.ObserveModelUsage(accountLease.Account.Id,modelName,raw);
+                if(status==200||receivedOutput){options.Accounts!.ObserveModelUsage(accountLease.Account.Id,modelName,raw);options.Catalog?.ObserveUsage(accountLease.Account.Site,modelName,raw);}
                 if(status!=200)options.Accounts!.ObserveModelFailure(accountLease.Account.Id,modelName,status,code,errorBody);
             }
             if (attempt is null || options.Security?.Ledger is not { } ledger) return;
@@ -211,6 +211,7 @@ public static class LocalGateway
             var currentPrompts=options.DirectUpstream?c.RequestServices.GetRequiredService<ConsoleRuntime>().Settings.Prompts:options.SystemPrompts??new();
             string? sessionDigest=null;bool usesSession=affinity.UsesSession;
             ConversationHeaders? conversation=null;
+            StreamingMigration.ResponseIdentityPlan? responseRestore=null;
             string? prefixDigest=null;int prefixBytes=affinity.PrefixBytes;bool preparedReserved=false;
             Func<System.Text.Json.Nodes.JsonObject,bool>? compatibility=options.DirectUpstream?root=>
             {
@@ -228,6 +229,7 @@ public static class LocalGateway
             {
                 conversation=ConversationHeaders.Prepare(c.Request.Headers,root,keyLease?.Identity?.Id??"");
                 if(usesSession)sessionDigest=conversation.SessionDigest;
+                if(responseRestore is null && currentPrompts.Identity?.ResponseRestore == true) responseRestore=ResponseIdentityFactory.Create(root,currentPrompts.Identity);
             }:usesSession?root=>sessionDigest=SessionAffinity.SessionDigest(c.Request.Headers,root):null;
             OpenAiRequest? openAi = protocol switch
             {
@@ -242,7 +244,8 @@ public static class LocalGateway
             if(!preparedReserved&&!ReferenceEquals(input,prepared.UpstreamBody))memory.Reserve(prepared.UpstreamBody.Length);
             input=[];
             // Streaming adapters need tool/response metadata, not the old request body.
-            if(openAi is not null)openAi=openAi with{Body=[]};
+            if(openAi is not null)openAi=openAi with{Body=[],ResponseRestore=responseRestore};
+            prepared=prepared with{ResponseRestore=responseRestore};
             memory.Retain(prepared.UpstreamBody.Length);
             if(options.DirectUpstream)
             {
@@ -276,6 +279,7 @@ public static class LocalGateway
             keyLease?.CheckModel(prepared.Model);
             if (options.Accounts is { } pool)
             {
+                options.Catalog?.RefreshPricing();
                 try { var preferred=affinity.Lookup(affinityKey);var preferredIdentity=preferred is null?null:options.Credentials?.AffinityIdentity(preferred);accountLease = affinityKey is null ? await pool.AcquireAsync(prepared.Model,attempted:excluded,cancellation:c.RequestAborted) : await pool.AcquireAffinityAsync(prepared.Model, preferred:preferred, attempted: excluded, cancellation: c.RequestAborted,cacheGrace:affinity.CacheGrace(affinityKey,preferred,preferredIdentity,prepared.UpstreamBody.Length,pool.Options.CacheGrace));selectedIdentity=options.Credentials?.AffinityIdentity(accountLease.Account.Id); }
                 catch(SchedulingFailure e) when(excluded.Count>0 && e.Code=="no_eligible_account") { await Error(c,403,"upstream_error","没有可回退的账号","11140"); return; }
             }
@@ -316,7 +320,7 @@ public static class LocalGateway
                     try { raw = await ReadBounded(await response.Content.ReadAsStreamAsync(deadline.Token), 65536, deadline.Token); }
                     catch (RequestFailure) { throw new RequestFailure("上游错误响应超过大小限制", 502, "api_error"); }
                     string? code = null;
-                    try { ChunkReader.Parse(Encoding.UTF8.GetString(raw)); } catch (ConversionFailure e) { if (e.Code is "11128" or "11140" or "6004" or "14018" or "429") code = e.Code; }
+                    try { ChunkReader.Parse(Encoding.UTF8.GetString(raw)); } catch (ConversionFailure e) { if (e.Code is "11128" or "11140" or "11134" or "6004" or "14003" or "14018" or "429") code = e.Code; }
                     try { using var parsed = JsonDocument.Parse(raw); if (parsed.RootElement.ValueKind == JsonValueKind.Object && parsed.RootElement.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object) evidence = u.GetRawText(); } catch (JsonException) { }
                     int status = response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest ? 502 : (int)response.StatusCode;
                     Settle(evidence, code ?? "http_error", false, status,Encoding.UTF8.GetString(raw));
@@ -354,7 +358,7 @@ public static class LocalGateway
                     }
                     return;
                 }
-                var streamOptions = new StreamOptions(prepared.Model, prepared.Thinking, prepared.Hidden ? new ReasoningCodec(reasoningKey, prepared.Model) : null, options.MaxOutputBytes,FirstOutput,firstToken.Finish,outputBudget);
+                var streamOptions = new StreamOptions(prepared.Model, prepared.Thinking, prepared.Hidden ? new ReasoningCodec(reasoningKey, prepared.Model) : null, options.MaxOutputBytes,FirstOutput,firstToken.Finish,outputBudget,prepared.ResponseRestore);
                 if (prepared.Stream)
                 {
                     if(!c.Response.HasStarted){c.Response.ContentType = "text/event-stream"; c.Response.Headers.CacheControl = "no-cache"; c.Response.Headers["X-Accel-Buffering"] = "no";}

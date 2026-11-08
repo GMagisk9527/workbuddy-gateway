@@ -13,7 +13,8 @@ internal static partial class Program
         string? enabledRaw=Environment.GetEnvironmentVariable("WORKBUDDY_IDENTITY_ENABLED");
         string target=Environment.GetEnvironmentVariable("WORKBUDDY_IDENTITY_TARGET")??"";
         string? replacementsRaw=Environment.GetEnvironmentVariable("WORKBUDDY_IDENTITY_REPLACEMENTS");
-        if(string.IsNullOrWhiteSpace(enabledRaw)&&target.Length==0&&string.IsNullOrWhiteSpace(replacementsRaw))return null;
+        string? restoreRaw=Environment.GetEnvironmentVariable("WORKBUDDY_IDENTITY_RESPONSE_RESTORE");
+        if(string.IsNullOrWhiteSpace(enabledRaw)&&target.Length==0&&string.IsNullOrWhiteSpace(replacementsRaw)&&string.IsNullOrWhiteSpace(restoreRaw))return null;
         bool? enabled=enabledRaw?.Trim().ToLowerInvariant() switch
         {
             null or ""=>null,"1" or "true"=>true,"0" or "false"=>false,
@@ -27,7 +28,8 @@ internal static partial class Program
             replacements=[];
             foreach(var p in doc.RootElement.EnumerateObject())replacements[p.Name]=p.Value.GetString()??"";
         }
-        return new IdentityOptions(enabled,target,replacements);
+        bool restore=restoreRaw?.Trim().ToLowerInvariant() switch { null or ""=>false,"1" or "true"=>true,"0" or "false"=>false,_=>throw new ArgumentException("WORKBUDDY_IDENTITY_RESPONSE_RESTORE must be true or false") };
+        return new IdentityOptions(enabled,target,replacements,restore);
     }
 
     internal static async Task RunStandalone(string[] args)
