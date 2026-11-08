@@ -2,6 +2,30 @@
 
 This directory contains the .NET 11 RC3 gateway, its offline checks, and the Linux Native AOT build. The SDK is pinned in `global.json`.
 
+## Release preparation
+
+Prepare a production bundle from an exact commit without compiling on the
+production server:
+
+```powershell
+powershell -NoProfile -File csharp/ci/prepare-release.ps1
+```
+
+The command locates the newest successful `CSharp Linux Native AOT` run for that
+SHA, downloads `linux-musl-native-gateway`, verifies the ELF architecture and
+both SHA-256 values and the synthetic smoke evidence, then writes a manifest
+under `csharp/out/releases/<sha>/`. If that exact release is already prepared,
+the command revalidates and reuses it. A missing CI artifact fails by default;
+pass `-BuildIfMissing` to dispatch Actions from the checked-out branch, which
+must already be pushed at the requested SHA, and wait. A different artifact is
+never overwritten. The prepared bundle and manifest are the verified inputs
+for the separately authorized deployment process. The server is never used as
+a build machine.
+
+The Actions jobs cache the pinned Alpine SDK and NuGet packages under the job
+workspace cache. A cache miss still produces the same self-contained artifact;
+it only affects build time.
+
 The GitHub Actions workflow uses Alpine 3.21 and `linux-musl-x64`, matching the production libc. It installs the native compiler only in an ephemeral build container and has no deployment credentials or deployment step.
 
 Three results are intentionally separate:

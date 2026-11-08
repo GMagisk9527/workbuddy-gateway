@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p out/verification
 scratch="$(mktemp -d)"
+python3 ci/release_tests.py > out/verification/release-verifier.json
 dll="$PWD/out/jit/HttpMigration.dll"
 dotnet build http/HttpMigration.csproj -c Release --configfile NuGet.Config -p:GatewayLibraryBuild=true -p:NuGetAudit=false -p:UseSharedCompilation=false -o out/jit
 dotnet build bench-aot/BenchAot.csproj -c Release --configfile NuGet.Config -p:NuGetAudit=false -p:GatewayAssemblies="$PWD/out/jit" -o out/aot-reference

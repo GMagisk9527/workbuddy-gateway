@@ -21,14 +21,24 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Alpine SDK and NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/csharp-aot-cache/dotnet
+            ${{ runner.temp }}/csharp-aot-cache/nuget
+          key: csharp-aot-${{ runner.os }}-${{ hashFiles('csharp/global.json', 'csharp/NuGet.Config', 'csharp/**/*.csproj') }}
+          restore-keys: csharp-aot-${{ runner.os }}-
+      - name: Prepare cache directories
+        run: mkdir -p "${RUNNER_TEMP}/csharp-aot-cache/dotnet" "${RUNNER_TEMP}/csharp-aot-cache/nuget"
       - name: Validate and compile inside Alpine musl
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/csharp-aot-cache/dotnet:/dotnet-cache" -v "$RUNNER_TEMP/csharp-aot-cache/nuget:/nuget-cache" -w /src/csharp alpine:3.21 sh -ec '
             apk add --no-cache bash curl clang build-base binutils zlib-dev openssl-dev icu-libs libstdc++ zstd-libs python3 nodejs file
             curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
-            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
-            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            if [ ! -x "/dotnet-cache/$sdk/dotnet" ]; then bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir "/dotnet-cache/$sdk"; fi
+            export PATH="/dotnet-cache/$sdk:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false NUGET_PACKAGES=/nuget-cache/packages NUGET_HTTP_CACHE_PATH=/nuget-cache/http
             bash ci/verify.sh --reference-only
             bash ci/native.sh
           '
@@ -46,14 +56,24 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Alpine SDK and NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/csharp-aot-cache/dotnet
+            ${{ runner.temp }}/csharp-aot-cache/nuget
+          key: csharp-aot-${{ runner.os }}-${{ hashFiles('csharp/global.json', 'csharp/NuGet.Config', 'csharp/**/*.csproj') }}
+          restore-keys: csharp-aot-${{ runner.os }}-
+      - name: Prepare cache directories
+        run: mkdir -p "${RUNNER_TEMP}/csharp-aot-cache/dotnet" "${RUNNER_TEMP}/csharp-aot-cache/nuget"
       - name: Offline gateway and foundation regressions
         run: |
-          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/csharp-aot-cache/dotnet:/dotnet-cache" -v "$RUNNER_TEMP/csharp-aot-cache/nuget:/nuget-cache" -w /src/csharp alpine:3.21 sh -ec '
             apk add --no-cache bash curl icu-libs libstdc++ zstd-libs python3 nodejs
             curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
-            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
-            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            if [ ! -x "/dotnet-cache/$sdk/dotnet" ]; then bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir "/dotnet-cache/$sdk"; fi
+            export PATH="/dotnet-cache/$sdk:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false NUGET_PACKAGES=/nuget-cache/packages NUGET_HTTP_CACHE_PATH=/nuget-cache/http
             bash ci/verify.sh
           '
       - uses: actions/upload-artifact@v4
@@ -67,17 +87,27 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Cache Alpine SDK and NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/csharp-aot-cache/dotnet
+            ${{ runner.temp }}/csharp-aot-cache/nuget
+          key: csharp-aot-${{ runner.os }}-${{ hashFiles('csharp/global.json', 'csharp/NuGet.Config', 'csharp/**/*.csproj') }}
+          restore-keys: csharp-aot-${{ runner.os }}-
+      - name: Prepare cache directories
+        run: mkdir -p "${RUNNER_TEMP}/csharp-aot-cache/dotnet" "${RUNNER_TEMP}/csharp-aot-cache/nuget"
       - name: Strict full gateway AOT compilation
         shell: bash
         run: |
           mkdir -p csharp/out/full-gateway
           set -o pipefail
-          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/csharp-aot-cache/dotnet:/dotnet-cache" -v "$RUNNER_TEMP/csharp-aot-cache/nuget:/nuget-cache" -w /src/csharp alpine:3.21 sh -ec '
             apk add --no-cache bash curl clang build-base binutils zlib-dev openssl-dev icu-libs libstdc++ python3
             curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
             sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
-            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
-            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            if [ ! -x "/dotnet-cache/$sdk/dotnet" ]; then bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir "/dotnet-cache/$sdk"; fi
+            export PATH="/dotnet-cache/$sdk:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false NUGET_PACKAGES=/nuget-cache/packages NUGET_HTTP_CACHE_PATH=/nuget-cache/http
             dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o out/full-gateway/native
           ' 2>&1 | tee csharp/out/full-gateway/publish.log
       - uses: actions/upload-artifact@v4
