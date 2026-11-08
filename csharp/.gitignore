@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+bin/
+out/
+runs/
+results/
+dist/
+*.log
+*.user
+*.suo

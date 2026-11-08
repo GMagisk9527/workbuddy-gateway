@@ -1,0 +1,116 @@
+name: CSharp Linux Native AOT
+
+on:
+  push:
+    branches: [main]
+    paths: ['csharp/**', '.github/workflows/csharp-native-aot.yml']
+  pull_request:
+    paths: ['csharp/**', '.github/workflows/csharp-native-aot.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: csharp-aot-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  native-components:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate and compile inside Alpine musl
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+            apk add --no-cache bash curl clang build-base binutils zlib-dev openssl-dev icu-libs libstdc++ zstd-libs python3 nodejs file
+            curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
+            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
+            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            bash ci/verify.sh --reference-only
+            bash ci/native.sh
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-musl-native-components-and-checks
+          path: |
+            csharp/out/verification/
+            csharp/out/native-evidence/
+            csharp/out/workbuddy-native-components-linux-musl-x64.tar.gz
+          if-no-files-found: warn
+  jit-regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline gateway and foundation regressions
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+            apk add --no-cache bash curl icu-libs libstdc++ zstd-libs python3 nodejs
+            curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
+            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
+            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            bash ci/verify.sh
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-jit-regression-checks
+          path: csharp/out/verification/
+          if-no-files-found: warn
+  full-gateway-aot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict full gateway AOT compilation
+        shell: bash
+        run: |
+          mkdir -p csharp/out/full-gateway
+          set -o pipefail
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src/csharp alpine:3.21 sh -ec '
+            apk add --no-cache bash curl clang build-base binutils zlib-dev openssl-dev icu-libs libstdc++ python3
+            curl --fail --location --retry 3 https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            sdk=$(python3 -c "import json; print(json.load(open(\"global.json\"))[\"sdk\"][\"version\"])")
+            bash /tmp/dotnet-install.sh --version "$sdk" --os linux-musl --architecture x64 --install-dir /tmp/dotnet
+            export PATH="/tmp/dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_GENERATE_ASPNET_CERTIFICATE=false
+            dotnet publish http/HttpMigration.csproj -c Release -r linux-musl-x64 --self-contained true --source https://api.nuget.org/v3/index.json -p:GatewayNativeAot=true -p:GatewayLibraryBuild=true -p:EnableAotAnalyzer=true -p:EnableTrimAnalyzer=true -p:TrimmerSingleWarn=false -p:InvariantGlobalization=true -p:NuGetAudit=false -o out/full-gateway/native
+          ' 2>&1 | tee csharp/out/full-gateway/publish.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-gateway-aot-diagnostics
+          path: csharp/out/full-gateway/publish.log
+          if-no-files-found: error
+      - name: Validate the compiled gateway with synthetic accounts and upstream
+        shell: bash
+        run: |
+          docker build -t workbuddy-native-smoke - <<'DOCKERFILE'
+          FROM alpine:3.21
+          RUN apk add --no-cache python3 openssl libstdc++ zstd file
+          DOCKERFILE
+          set -o pipefail
+          docker run --rm --network none --add-host www.workbuddy.cn:127.0.0.1 \
+            -v "$GITHUB_WORKSPACE:/src" -w /src/csharp workbuddy-native-smoke sh -ec '
+              binary=out/full-gateway/native/HttpMigration
+              file "$binary"
+              ldd "$binary"
+              python3 -B ci/smoke-gateway.py "$binary"
+            ' 2>&1 | tee csharp/out/full-gateway/smoke.log
+      - name: Package the verified gateway
+        run: |
+          output=csharp/out/full-gateway
+          (cd "$output/native" && sha256sum HttpMigration > ../SHA256SUMS)
+          tar -czf "$output/workbuddy-gateway-linux-musl-x64.tar.gz" -C "$output/native" HttpMigration
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-musl-native-gateway
+          path: |
+            csharp/out/full-gateway/workbuddy-gateway-linux-musl-x64.tar.gz
+            csharp/out/full-gateway/SHA256SUMS
+            csharp/out/full-gateway/smoke.log
+          if-no-files-found: error
