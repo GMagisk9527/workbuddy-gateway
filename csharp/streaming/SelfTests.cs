@@ -15,6 +15,27 @@ internal static class SelfTests
     {
         var passed = new List<string>();
         async Task Run(string name, Func<Task> action) { await action(); passed.Add(name); }
+        await Run("SSE framing preserves split CRLF, UTF-8 and exact event limits", async () =>
+        {
+            const string wire = "\ufeff: comment\r\nid: 1\r\ndata: {\"text\":\"中文\",\r\ndata: \"n\":1}\r\n\r\ndata: [DONE]\r\n\r\n";
+            foreach (int step in new[] { 1, 7, 8192 })
+            {
+                using var source = new FragmentedInput(Encoding.UTF8.GetBytes(wire), step);
+                var reader = new SseReader(source);
+                Check(await reader.NextPayloadAsync(default) == "{\"text\":\"中文\",\n\"n\":1}", "fragmented multiline event");
+                Check(await reader.NextPayloadAsync(default) is null, "terminal marker");
+            }
+            byte[] bounded = "data: value\n\n"u8.ToArray();
+            using var valid = new MemoryStream(bounded);
+            Check(await new SseReader(valid, bounded.Length + 1).NextPayloadAsync(default) == "value", "event just under limit");
+            using var invalid = new MemoryStream(bounded);
+            try
+            {
+                await new SseReader(invalid, bounded.Length).NextPayloadAsync(default);
+                throw new InvalidOperationException("Event at limit must be rejected");
+            }
+            catch (ConversionFailure error) when (error.Code == "event_limit") { }
+        });
         await Run("cancel blocked read and close upstream", async () =>
         {
             var source = new BlockingInput(); using var output = new MemoryStream(); using var cts = new CancellationTokenSource();

@@ -12,23 +12,37 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
     int offset, available, frameBytes;
     bool skipLf, first = true, done, hadLine;
     IOException? readError;
-    async ValueTask<int> ByteAsync(CancellationToken cancellation)
+    string DecodeLine(ReadOnlySpan<byte> bytes)
     {
-        cancellation.ThrowIfCancellationRequested();
-        if (offset == available)
-        {
-            try { available = await source.ReadAsync(buffer, cancellation); }
-            catch (IOException e) { readError = e; return -1; }
-            offset = 0; if (available == 0) return -1;
-        }
-        return buffer[offset++];
+        string value = Encoding.UTF8.GetString(bytes);
+        if (first) { first = false; if (value.StartsWith('\ufeff')) value = value[1..]; }
+        return value;
     }
     string TakeLine()
     {
-        string value = Encoding.UTF8.GetString(line.GetBuffer(), 0, (int)line.Length);
+        string value = DecodeLine(line.GetBuffer().AsSpan(0, (int)line.Length));
         line.SetLength(0);
-        if (first) { first = false; if (value.StartsWith('\ufeff')) value = value[1..]; }
         return value;
+    }
+    string? ScanLine()
+    {
+        var bytes = buffer.AsSpan(offset, available - offset);
+        int delimiter = bytes.IndexOfAny((byte)'\r', (byte)'\n');
+        int consumed = delimiter < 0 ? bytes.Length : delimiter + 1;
+        if (consumed >= maxEventBytes - frameBytes) throw new ConversionFailure("event_limit");
+        frameBytes += consumed;
+        offset += consumed;
+
+        if (delimiter < 0)
+        {
+            line.Write(bytes);
+            return null;
+        }
+        skipLf = bytes[delimiter] == '\r';
+        var content = bytes[..delimiter];
+        if (line.Length == 0) return DecodeLine(content);
+        line.Write(content);
+        return TakeLine();
     }
     void Reset() { frameBytes = 0; hadLine = false; data.Clear(); }
     // Returns a data payload, null for metadata/comment-only events.
@@ -81,9 +95,15 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
         if (done) { if (readError is not null) throw readError; return null; }
         while (true)
         {
-            int b = await ByteAsync(cancellation);
+            cancellation.ThrowIfCancellationRequested();
+            if (offset == available)
+            {
+                offset = 0;
+                try { available = await source.ReadAsync(buffer, cancellation); }
+                catch (IOException e) { readError = e; available = 0; }
+            }
             string? payload = null;
-            if (b < 0)
+            if (available == 0)
             {
                 done = true;
                 if (line.Length > 0) payload = ProcessLine(TakeLine(), true);
@@ -95,17 +115,16 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
                 if (skipLf)
                 {
                     skipLf = false;
-                    if (b == '\n')
+                    if (buffer[offset] == '\n')
                     {
+                        offset++;
                         // The LF belongs to the preceding CR delimiter. Count
                         // it while the event is open, including metadata lines.
                         if (hadLine && ++frameBytes >= maxEventBytes) throw new ConversionFailure("event_limit");
                         continue;
                     }
                 }
-                if (++frameBytes >= maxEventBytes) throw new ConversionFailure("event_limit");
-                if (b is '\r' or '\n') { skipLf = b == '\r'; payload = ProcessLine(TakeLine(), false); }
-                else line.WriteByte((byte)b);
+                if (ScanLine() is { } value) payload = ProcessLine(value, false);
             }
             if (payload is null || payload.Trim().Length == 0) continue;
             payload = payload.Trim();
