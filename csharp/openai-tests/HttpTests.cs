@@ -93,6 +93,39 @@ internal static class HttpTests
             }
             Check(f.Ledger!.GetUsage(f.KeyId!) is { Total: 12, Requests: 6 } && f.Ledger.Health.PendingAttempts == 0, "one WAL settlement per call");
         });
+        await Test("upstream error finish fails every protocol while retaining measured usage", async () =>
+        {
+            const string failed = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"error\"}]}\n\n";
+            foreach (string usage in new[] { "finish", "trailer", "absent" })
+            {
+                string end = usage switch
+                {
+                    "finish" => Finish.Replace("\"stop\"", "\"error\"", StringComparison.Ordinal),
+                    "trailer" => failed + "data: {\"choices\":[],\"usage\":{\"credit\":2}}\n\n",
+                    _ => failed
+                };
+                await using var f = await Fixture.Create(c =>
+                {
+                    c.Response.ContentType = "text/event-stream";
+                    return c.Response.WriteAsync(Text + end + "data: [DONE]\n\n");
+                }, bridge: false);
+                foreach (var path in Paths) foreach (bool stream in new[] { false, true })
+                {
+                    using var response = await f.Post(path, Body(path, stream));
+                    string output = await response.Content.ReadAsStringAsync();
+                    Check((int)response.StatusCode == (stream ? 200 : 502) && output.Contains("upstream_finish_error", StringComparison.Ordinal), "explicit upstream failure: " + path);
+                    if (stream)
+                    {
+                        string failure = path == "/v1/responses" ? "event: response.failed" : "\"error\":";
+                        Check(output.Contains("hello", StringComparison.Ordinal) && output.Contains(failure, StringComparison.Ordinal), "partial output followed by protocol error");
+                        Check(!output.Contains("[DONE]", StringComparison.Ordinal) && !output.Contains("message_stop", StringComparison.Ordinal) && !output.Contains("response.completed", StringComparison.Ordinal), "no success terminator");
+                    }
+                }
+                var settled = f.Ledger!.GetUsage(f.KeyId!);
+                Check(f.Calls.Count == 6 && settled.Requests == 6 && f.Ledger.Health.PendingAttempts == 0, "one settlement per failed request");
+                Check(usage == "absent" ? settled is { Total: 0, Unknown: 6 } : settled is { Total: 12, Unknown: 0 }, "only charge measured usage");
+            }
+        });
         await Test("all protocols reject a late generic Go error rather than forge success", async () =>
         {
             await using var f = await Fixture.Create(c => { c.Response.ContentType = "text/event-stream"; return c.Response.WriteAsync(Text + Finish + "data: {\"error\":{\"code\":\"stream_interrupted\"}}\n\n"); });

@@ -36,7 +36,18 @@ public static class StreamPump
             }
             try
             {
-                while (await reader.NextAsync(cancellation) is { } chunk) { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; if (options.ResponseRestore is { Active: true } plan) chunk = plan.RestoreChunk(chunk, restorers); await Send(state.Feed(chunk)); }
+                while (await reader.NextAsync(cancellation) is { } chunk)
+                {
+                    if (chunk.HasOutput && !receivedOutput) options.FirstOutput?.Invoke();
+                    receivedOutput |= chunk.HasOutput;
+                    if (chunk.Choices.Any(c => c.Finish.Length > 0))
+                    {
+                        options.UpstreamCompleted?.Invoke();
+                        await reader.ThrowIfFailedFinishAsync(chunk, cancellation);
+                    }
+                    if (options.ResponseRestore is { Active: true } plan) chunk = plan.RestoreChunk(chunk, restorers);
+                    await Send(state.Feed(chunk));
+                }
                 var terminal = state.Finish();
                 Notify(StreamOutcome.Complete, "");
                 await Send(terminal);

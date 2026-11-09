@@ -52,6 +52,30 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
         var payload = await NextPayloadAsync(cancellation);
         return payload is null ? null : ChunkReader.Parse(payload);
     }
+    public async ValueTask ThrowIfFailedFinishAsync(ChatChunk chunk, CancellationToken cancellation)
+    {
+        if (!chunk.Choices.Any(choice => choice.Finish == "error")) return;
+
+        string? usage = chunk.Usage?.RawJson;
+        if (usage is null)
+        {
+            // A usage-only event may follow the failed choice. Bound how long an
+            // explicit failure can be delayed by an optional trailer.
+            using var trailer = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            trailer.CancelAfter(TimeSpan.FromMilliseconds(500));
+            try
+            {
+                if (await NextPayloadAsync(trailer.Token) is { } payload)
+                {
+                    var next = ChunkReader.Parse(payload);
+                    if (next.Choices.IsEmpty) usage = next.Usage?.RawJson;
+                }
+            }
+            catch (OperationCanceledException) when (trailer.IsCancellationRequested && !cancellation.IsCancellationRequested) { }
+            catch (Exception e) when (e is IOException or ConversionFailure) { }
+        }
+        throw new ConversionFailure("upstream_finish_error") { RawUsageJson = usage };
+    }
     public async ValueTask<string?> NextPayloadAsync(CancellationToken cancellation)
     {
         if (done) { if (readError is not null) throw readError; return null; }

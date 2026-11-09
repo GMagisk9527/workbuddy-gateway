@@ -75,7 +75,17 @@ public sealed class MessageAggregate(long limit,IRetainedOutputBudget? budget=nu
             try
             {
                 while (await reader.NextAsync(cancellation) is { } chunk)
-                { if(chunk.HasOutput&&!receivedOutput)options.FirstOutput?.Invoke();if(chunk.Choices.Any(c=>c.Finish.Length>0))options.UpstreamCompleted?.Invoke(); receivedOutput |= chunk.HasOutput; if(options.ResponseRestore is { Active:true } plan) chunk=plan.RestoreChunk(chunk,restorers); foreach (var e in state.Feed(chunk)) e.Accept(accumulator); }
+                {
+                    if (chunk.HasOutput && !receivedOutput) options.FirstOutput?.Invoke();
+                    receivedOutput |= chunk.HasOutput;
+                    if (chunk.Choices.Any(c => c.Finish.Length > 0))
+                    {
+                        options.UpstreamCompleted?.Invoke();
+                        await reader.ThrowIfFailedFinishAsync(chunk, cancellation);
+                    }
+                    if (options.ResponseRestore is { Active: true } plan) chunk = plan.RestoreChunk(chunk, restorers);
+                    foreach (var e in state.Feed(chunk)) e.Accept(accumulator);
+                }
                 foreach (var e in state.Finish()) e.Accept(accumulator);
                 return new(true, "", accumulator.Encode(state.Model), state.Usage, state.RawUsageJson, receivedOutput);
             }

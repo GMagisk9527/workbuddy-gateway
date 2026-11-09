@@ -16,7 +16,8 @@ public static class OpenAiPump
             var state = new ChatState(request.Model, limit,budget,request.ResponseRestore); var reader = new SseReader(upstream);
             var responses = request.Protocol == ClientProtocol.Responses ? new ResponsesStream(request, key) : null;
             var pending = new List<byte[]>(); long written = 0, held = 0; bool notified = false, downstreamFailed = false;
-            OpenAiResult Result(StreamOutcome outcome, string code, byte[]? body = null) => new(outcome, code, body, state.Usage?.ToJsonString(), state.ReceivedOutput);
+            string? failureUsage = null;
+            OpenAiResult Result(StreamOutcome outcome, string code, byte[]? body = null) => new(outcome, code, body, failureUsage ?? state.Usage?.ToJsonString(), state.ReceivedOutput);
             OpenAiResult Notify(StreamOutcome outcome, string code, byte[]? body = null)
             { var r = Result(outcome, code, body); if (!notified) { notified = true; beforeTerminal?.Invoke(r); } return r; }
             byte[] Frame(JsonObject obj, bool response, bool failure = false)
@@ -39,7 +40,11 @@ public static class OpenAiPump
                 {
                     bool hadOutput=state.ReceivedOutput;var (raw, chunk) = state.Feed(payload);
                     if(!hadOutput&&state.ReceivedOutput)firstOutput?.Invoke();
-                    if(chunk.Choices.Any(c=>c.Finish.Length>0))upstreamCompleted?.Invoke();
+                    if (chunk.Choices.Any(c => c.Finish.Length > 0))
+                    {
+                        upstreamCompleted?.Invoke();
+                        await reader.ThrowIfFailedFinishAsync(chunk, cancellation);
+                    }
                     if (!request.Stream) continue;
                     if (responses is not null) foreach (var e in responses.Feed(chunk, state)) await Send(Frame(e, true));
                     else
@@ -71,6 +76,7 @@ public static class OpenAiPump
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return Notify(StreamOutcome.Cancelled, "cancelled"); }
             catch (Exception e) when (e is ConversionFailure or OpenAiFailure or IOException or ObjectDisposedException)
             {
+                if (e is ConversionFailure conversionFailure) failureUsage = conversionFailure.RawUsageJson;
                 string code = e is ConversionFailure conversion ? conversion.Code : e is OpenAiFailure protocol ? protocol.Code : "stream_interrupted";
                 if (downstreamFailed) return Notify(StreamOutcome.DownstreamFailed, "downstream_write");
                 var result = Notify(StreamOutcome.Failed, code);
