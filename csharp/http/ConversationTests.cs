@@ -24,7 +24,7 @@ internal static class ConversationTests
     sealed class Upstream:HttpMessageHandler
     {
         internal readonly List<Capture> Captured=[];
-        internal bool RefuseOnce;
+        internal bool RefuseOnce, FailAfterOutput;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellation)
         {
             string Header(string name)=>request.Headers.TryGetValues(name,out var values)?values.Single():"";
@@ -34,6 +34,8 @@ internal static class ConversationTests
             Check(Guid.TryParse(capture.Conversation,out var c)&&c!=Guid.Empty&&Guid.TryParse(capture.Turn,out var t)&&t!=Guid.Empty&&Guid.TryParse(capture.Message,out var m)&&m!=Guid.Empty,"Three nonzero correlation IDs reach the HTTP upstream");
             Check(!request.Headers.Contains("session_id")&&!request.Headers.Contains("X-Session-ID")&&!request.Headers.Contains("thread-id")&&!request.Headers.Contains("X-Client-ID")&&!request.Headers.Contains("Cookie"),"No raw client session, cookie or official-client identity forwarded");
             if(RefuseOnce){RefuseOnce=false;throw new HttpRequestException(HttpRequestError.ConnectionError,"synthetic refusal",new SocketException((int)SocketError.ConnectionRefused));}
+            if(FailAfterOutput)
+                return new(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"error\"}]}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")};
             return new(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1,\"prompt_cache_hit_tokens\":80,\"credit\":0}}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")};
         }
     }
@@ -116,9 +118,14 @@ internal static class ConversationTests
         {
             foreach(bool stream in new[]{false,true})
             {
-                bool responses=path=="/v1/responses";var body=new JsonObject{["model"]="hy4free",["stream"]=stream,["max_tokens"]=128};
+                bool responses=path=="/v1/responses";
+                string tokenField=responses?"max_output_tokens":path=="/v1/chat/completions"?"max_completion_tokens":"max_tokens";
+                var body=new JsonObject{["model"]="hy4free",["stream"]=stream,[tokenField]=stream?64000:128};
                 body[responses?"input":"messages"]=new JsonArray(new JsonObject{["role"]="user",["content"]="synthetic normal code: session_id=123; keep exactly"});
                 var captured=await Send(path,body);calls++;parent??=captured.Conversation;
+                Check(captured.Body["max_tokens"]?.GetValue<int>()==(stream?32768:128)
+                    && !captured.Body.ContainsKey("max_completion_tokens") && !captured.Body.ContainsKey("max_output_tokens"),
+                    "HY4free uses the lower request limit or configured limit through all three protocols");
                 Check(captured.Conversation==parent,"Same DSH session survives protocol/stream conversion even if affinity is disabled");
                 Check(captured.Body.ToJsonString().Contains("session_id=123; keep exactly"),"Normal user code is preserved");
                 var summary=new JsonObject{["model"]="hy4free",["stream"]=stream,["max_tokens"]=128,["metadata"]=new JsonObject{["sessionId"]="synthetic-dsh-parent"}};
@@ -143,6 +150,22 @@ internal static class ConversationTests
         var noSessionAgain=await Send("/v1/chat/completions",requestBody,null);calls++;
         Check(noSession.Conversation!=noSessionAgain.Conversation,"Identical prompts without a client identity do not share an inferred session");
         Check(fake.Captured.Count==calls&&ledger.Health.PendingAttempts==0&&ledger.GetUsage(issued.Item.Id).Total==0&&ledger.GetUsage(issued.Item.Id).Requests==calls-1,"Exactly one upstream call per request and zero-credit WAL settlement unchanged");
+        var console=app.Services.GetRequiredService<ConsoleRuntime>();
+        console.Settings.Update("""{"output":{"hy4freeMaxTokens":1024}}""",console.Settings.View().Revision);
+        var capped=new JsonObject{["model"]="hy4free",["stream"]=true,["max_completion_tokens"]=4096,
+            ["messages"]=new JsonArray(new JsonObject{["role"]="user",["content"]="synthetic-private-text"})};
+        fake.FailAfterOutput=true;
+        var failure=await Send("/v1/chat/completions",capped);
+        Check(failure.Body["max_tokens"]?.GetValue<int>()==1024,"Hot-reloaded HY4free budget reaches upstream");
+        string diagnostic=console.Telemetry.Logs(2).Single(line=>line.Contains("code=upstream_finish_error"));
+        Check(diagnostic.Contains("requestedOutputTokens=4096 sentOutputTokens=1024") &&
+            System.Text.RegularExpressions.Regex.IsMatch(diagnostic,@"lastUpstreamReadMs=[0-9.]+ downstreamBytes=[1-9][0-9]*") &&
+            !diagnostic.Contains("synthetic-private-text"),"A partial upstream error logs timing, bytes and budgets without text");
+        fake.FailAfterOutput=false;
+        console.Settings.Update("""{"output":{"hy4freeMaxTokens":0}}""",console.Settings.View().Revision);
+        var uncapped=await Send("/v1/chat/completions",capped);
+        Check(uncapped.Body["max_completion_tokens"]?.GetValue<int>()==4096 &&
+            !uncapped.Body.ContainsKey("max_tokens"),"A zero budget restores legacy forwarding");
         await app.StopAsync();
     }
 }

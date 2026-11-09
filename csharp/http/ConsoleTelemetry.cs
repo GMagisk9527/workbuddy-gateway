@@ -70,12 +70,13 @@ public sealed partial class ConsoleTelemetry
         foreach(var r in staged)rows.Enqueue(r);revision++;Storage="imported";
     }
     internal ConsoleTrace Begin(string protocol,string trace)=>new(this,protocol,trace);
-    internal void Complete(ConsoleRow row,ConsoleAttempt[] attempts)
+    internal void Complete(ConsoleRow row,ConsoleAttempt[] attempts,string streamDetails="")
     {
         Validate(row);lock(sync)
         {
             while(rows.Count>=Limit)rows.Dequeue();rows.Enqueue(row);revision++;
             string line=$"{DateTimeOffset.FromUnixTimeMilliseconds(row.At):O} trace={row.Trace} protocol={row.Protocol} model={row.Model} status={row.Status} result={(row.Complete?"complete":"failed")} code={row.Code} durationMs={row.LatencyMs:F1}";
+            line+=streamDetails;
             AddLog(row.At,line);requestLogs?.Append(line,DateTimeOffset.FromUnixTimeMilliseconds(row.At));
             while(traces.Count>=128)traces.Dequeue();traces.Enqueue((row.At,row.Trace,new Dictionary<string, object?> { ["trace"] = row.Trace, ["status"] = row.Status, ["attemptTrail"] = attempts, ["counters"] = new Dictionary<string, object?> { ["failed"] = row.Complete?0:1, ["canceled"] = row.Code=="cancelled"?1:0, ["incompleteStreams"] = row.Complete?0:1 }, ["attemptsDropped"] = 0 }));
         }
@@ -145,8 +146,22 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
 {
     readonly long start=Stopwatch.GetTimestamp();readonly List<ConsoleAttempt> attempts=[];string account="",model="",code="";long? input,output,cached,total;double? credit,ttft;bool complete;
     long attemptStart;int attemptNumber;double? headers;
+    bool trackStream;
+    long? requestedOutputTokens;
+    int? sentOutputTokens;
+    DeadlineWriteStream? downstream;
+    double? lastUpstreamReadMs;
     internal void Model(string value)=>model=value;
-    internal void Attempt(string id){account=id;attemptStart=Stopwatch.GetTimestamp();attemptNumber++;headers=null;}
+    internal void Attempt(string id){account=id;attemptStart=Stopwatch.GetTimestamp();attemptNumber++;headers=null;lastUpstreamReadMs=null;}
+    internal void TrackStream(DeadlineWriteStream? response, long? requested, int? sent)
+    {
+        trackStream=true;
+        downstream=response;
+        if(response is not null)response.TrackBytes=true;
+        requestedOutputTokens=requested;
+        sentOutputTokens=sent;
+    }
+    internal void UpstreamRead()=>lastUpstreamReadMs=Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;
     internal void Headers(){headers=Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;}
     internal void First(){ttft??=Stopwatch.GetElapsedTime(start).TotalMilliseconds;}
     internal void Result(StreamingMigration.StreamOutcome outcome,string failure){if(outcome!=StreamingMigration.StreamOutcome.Complete){complete=false;code=failure.Length<=128&&!failure.Any(char.IsControl)?failure:"stream_failed";}}
@@ -165,7 +180,11 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
     internal void End(int status)
     {
         if(model.Length==0||model.Length>256)return;
-        try{owner.Complete(new(account,model,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),status,complete&&status<400,total,input,output,cached,credit,Stopwatch.GetElapsedTime(start).TotalMilliseconds,ttft,protocol,trace,status==499?"cancelled":code,"v2"),attempts.ToArray());}
+        bool succeeded=complete&&status<400;
+        string streamDetails=trackStream&&!succeeded&&attemptStart!=0
+            ?FormattableString.Invariant($" upstreamMs={Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds:F1} lastUpstreamReadMs={lastUpstreamReadMs:F1} downstreamBytes={downstream?.BytesWritten} requestedOutputTokens={requestedOutputTokens} sentOutputTokens={sentOutputTokens}")
+            :"";
+        try{owner.Complete(new(account,model,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),status,succeeded,total,input,output,cached,credit,Stopwatch.GetElapsedTime(start).TotalMilliseconds,ttft,protocol,trace,status==499?"cancelled":code,"v2"),attempts.ToArray(),streamDetails);}
         catch(Exception e)when(e is IOException or InvalidDataException or ArgumentException or InvalidOperationException or OverflowException){owner.Audit("invalid_statistics_skipped");}
     }
 }

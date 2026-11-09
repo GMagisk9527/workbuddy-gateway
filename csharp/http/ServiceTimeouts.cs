@@ -32,13 +32,21 @@ public sealed partial class ConsoleSettings
 // A deadline bounds each actual downstream write, not the total model response.
 internal sealed class DeadlineWriteStream(Stream inner,TimeSpan timeout,Action abort):Stream
 {
-    async Task Run(Func<CancellationToken,Task> action,CancellationToken cancellation)
+    long bytesWritten;
+    internal bool TrackBytes { get; set; }
+    internal long BytesWritten => Interlocked.Read(ref bytesWritten);
+
+    async Task Run(Func<CancellationToken,Task> action,CancellationToken cancellation,int bytes=0)
     {
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellation);deadline.CancelAfter(timeout);
-        try{await action(deadline.Token);}
+        try
+        {
+            await action(deadline.Token);
+            if(TrackBytes && bytes>0)Interlocked.Add(ref bytesWritten,bytes);
+        }
         catch(OperationCanceledException)when(!cancellation.IsCancellationRequested){abort();throw new IOException("Downstream write timeout");}
     }
-    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer,CancellationToken cancellationToken=default)=>new(Run(token=>inner.WriteAsync(buffer,token).AsTask(),cancellationToken));
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer,CancellationToken cancellationToken=default)=>new(Run(token=>inner.WriteAsync(buffer,token).AsTask(),cancellationToken,buffer.Length));
     public override Task WriteAsync(byte[] buffer,int offset,int count,CancellationToken cancellationToken)=>WriteAsync(buffer.AsMemory(offset,count),cancellationToken).AsTask();
     public override Task FlushAsync(CancellationToken cancellationToken)=>Run(inner.FlushAsync,cancellationToken);
     // The response body belongs to Kestrel; wrappers do not dispose it.

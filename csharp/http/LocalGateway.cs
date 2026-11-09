@@ -297,7 +297,21 @@ public static class LocalGateway
                 foreach (string name in new[] { "User-Agent", "X-Session-ID", "X-Conversation-ID", "X-Parent-Message-ID", "X-Client-Session-ID", "X-Forwarded-For", "X-Real-IP" })
                     if (c.Request.Headers.TryGetValue(name, out var value)) message.Headers.TryAddWithoutValidation(name, value.ToArray());
             message.Headers.Add("X-Trace-ID", c.Response.Headers["X-Trace-ID"].ToString());
-            byte[] upstreamBody=options.Catalog?.PrepareOutput(prepared.UpstreamBody,prepared.Model,accountLease?.Account.Site,outboundMemory.Reserve,options.MaxRequestBytes)??prepared.UpstreamBody;
+            bool isHy4Free=options.DirectUpstream && prepared.Model.Equals("hy4free",StringComparison.OrdinalIgnoreCase);
+            var site=accountLease?.Account.Site;
+            int outputCap=isHy4Free?c.RequestServices.GetRequiredService<OutputAdmission>().Options.Hy4FreeMaxTokens:0;
+            long? requestedOutputTokens=null;
+            int? sentOutputTokens=null;
+            byte[] upstreamBody;
+            if(outputCap>0)
+            {
+                var capped=ModelCatalog.PrepareCappedOutput(prepared.UpstreamBody,outputCap,
+                    options.Catalog?.DefaultOutput(prepared.Model,site)??0,outboundMemory.Reserve,options.MaxRequestBytes);
+                (upstreamBody,requestedOutputTokens,sentOutputTokens)=(capped.Body,capped.Requested,capped.Effective);
+            }
+            else upstreamBody=options.Catalog?.PrepareOutput(prepared.UpstreamBody,prepared.Model,site,outboundMemory.Reserve,options.MaxRequestBytes)??prepared.UpstreamBody;
+            bool trackStream=isHy4Free&&prepared.Stream;
+            if(trackStream)trace?.TrackStream(c.Response.Body as DeadlineWriteStream,requestedOutputTokens,sentOutputTokens);
             message.Content = new ByteArrayContent(upstreamBody); message.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             if (keyLease?.Identity is { } identity && options.Security?.Ledger is { } journal) attempt = journal.Begin(identity.Id);
@@ -328,7 +342,8 @@ public static class LocalGateway
                     await Error(c, status, "api_error", code=="11128"?"上游渠道校验未通过（11128）；请使用上游授权接口或客户端，或向上游反馈":"上游拒绝请求", code); return;
                 }
                 if (response.Content.Headers.ContentType?.MediaType != "text/event-stream") throw new RequestFailure("上游未返回 SSE 响应", 502, "api_error");
-                await using var upstream = new IdleReadStream(await response.Content.ReadAsStreamAsync(firstToken.Token), timeouts.Idle);
+                Action? observeRead=trackStream&&trace is not null?trace.UpstreamRead:null;
+                await using var upstream = new IdleReadStream(await response.Content.ReadAsStreamAsync(firstToken.Token), timeouts.Idle,observeRead);
                 Stream source=firstToken.Wrap(upstream);
                 if(options.DirectUpstream)
                 {
@@ -486,12 +501,17 @@ public static class LocalGateway
         if (c.Request.Path == "/v1/messages") await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["type"] = "error", ["error"] = error });
         else await GatewayJson.WriteAsync(c, new Dictionary<string, object?> { ["error"] = error });
     }
-    sealed class IdleReadStream(Stream inner, TimeSpan timeout) : Stream
+    sealed class IdleReadStream(Stream inner, TimeSpan timeout, Action? observeRead) : Stream
     {
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(timeout);
-            try { return await inner.ReadAsync(buffer, deadline.Token); }
+            try
+            {
+                int read=await inner.ReadAsync(buffer, deadline.Token);
+                if(read>0)observeRead?.Invoke();
+                return read;
+            }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new IOException("Upstream idle timeout"); }
         }
         protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }

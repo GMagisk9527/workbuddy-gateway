@@ -2,6 +2,11 @@
 
 This directory contains the .NET 11 RC3 gateway, its offline checks, and the Linux Native AOT build. The SDK is pinned in `global.json`.
 
+Direct `hy4free` requests use a per-request output limit of 32,768 tokens by
+default. Set `output.hy4freeMaxTokens` in the admin configuration to change it.
+A value of `0` disables the gateway limit. The gateway uses any lower limit
+specified by the caller.
+
 ## Release preparation
 
 Prepare a production bundle from an exact commit without compiling on the

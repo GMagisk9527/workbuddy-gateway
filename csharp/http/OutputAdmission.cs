@@ -3,8 +3,8 @@ using StreamingMigration;
 
 namespace HttpMigration;
 
-internal sealed record OutputOptions(long MaxRequestBytes=0,long MaxSharedBytes=0)
-{internal void Validate(){if(MaxRequestBytes<0||MaxSharedBytes<0)throw new ArgumentException("Invalid output budget");}}
+internal sealed record OutputOptions(long MaxRequestBytes=0,long MaxSharedBytes=0,int Hy4FreeMaxTokens=32768)
+{internal void Validate(){if(MaxRequestBytes<0||MaxSharedBytes<0||Hy4FreeMaxTokens is <0 or >1000000)throw new ArgumentException("Invalid output budget");}}
 internal sealed class OutputAdmission(Func<MemorySample> sample)
 {
     readonly object sync=new();OutputOptions options=new();long used,rejected;
@@ -49,7 +49,11 @@ public sealed partial class ConsoleSettings
     internal void AttachOutput(OutputAdmission output){lock(sync){outputAdmission=output;outputBaseline=output.Options;ApplyRuntime();}}
     static OutputOptions ReadOutput(JsonElement root,OutputOptions baseline)
     {
-        if(!root.TryGetProperty("output",out var o))return baseline;Fields(o,"maxRequestBytes","maxSharedBytes");
-        var next=new OutputOptions(o.TryGetProperty("maxRequestBytes",out var per)?per.GetInt64():baseline.MaxRequestBytes,o.TryGetProperty("maxSharedBytes",out var shared)?shared.GetInt64():baseline.MaxSharedBytes);next.Validate();return next;
+        if(!root.TryGetProperty("output",out var o))return baseline;Fields(o,"maxRequestBytes","maxSharedBytes","hy4freeMaxTokens");
+        var next=new OutputOptions(
+            o.TryGetProperty("maxRequestBytes",out var per)?per.GetInt64():baseline.MaxRequestBytes,
+            o.TryGetProperty("maxSharedBytes",out var shared)?shared.GetInt64():baseline.MaxSharedBytes,
+            o.TryGetProperty("hy4freeMaxTokens",out var tokens)?tokens.GetInt32():baseline.Hy4FreeMaxTokens);
+        next.Validate();return next;
     }
 }

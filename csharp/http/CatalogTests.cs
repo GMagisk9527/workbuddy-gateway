@@ -39,6 +39,20 @@ internal static class CatalogTests
         Check(new ModelCatalog(allow:[]).Allows("m"),"Empty whitelist leaves model access unchanged");checks++;
         byte[] nested="{\"messages\":[{\"role\":\"user\",\"content\":\"用户正常正文\"}],\"tool\":{\"max_tokens\":999}}"u8.ToArray();
         using(var d=JsonDocument.Parse(catalog.PrepareOutput(nested,"m",AccountSite.Cn,_=>{},1024)))Check(d.RootElement.GetProperty("tool").GetProperty("max_tokens").GetInt32()==999&&d.RootElement.GetProperty("messages")[0].GetProperty("content").GetString()=="用户正常正文","Do not edit nested tool arguments or user text");checks++;
+        foreach(string body in new[]{
+            """{"max_completion_tokens":128, "tool":{"max_tokens":999}, "max_tokens":512}""",
+            """{"max_tokens":512,"max_completion_tokens":128, "tool":{"max_tokens":999}}"""})
+        {
+            int reserved=0;
+            var capped=ModelCatalog.PrepareCappedOutput(Encoding.UTF8.GetBytes(body),32768,0,n=>reserved=n,1024);
+            using var d=JsonDocument.Parse(capped.Body);
+            Check(capped.Requested==128 && capped.Effective==128 && reserved==capped.Body.Length &&
+                d.RootElement.GetProperty("max_tokens").GetInt32()==128 &&
+                !d.RootElement.TryGetProperty("max_completion_tokens",out _) &&
+                d.RootElement.GetProperty("tool").GetRawText()=="""{"max_tokens":999}""",
+                "Combining both top-level limits keeps the smaller value and preserves nested bytes");
+            checks++;
+        }
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})
         {
             var b=WebApplication.CreateSlimBuilder();b.Logging.ClearProviders();b.WebHost.ConfigureKestrel(k=>k.Listen(IPAddress.Loopback,0));await using var backend=b.Build();int calls=0;

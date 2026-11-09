@@ -184,6 +184,71 @@ public sealed partial class ModelCatalog
         var rows=site is null?s.Cn.Concat(s.Intl):site==AccountSite.Cn?s.Cn:s.Intl;
         return rows.Where(r=>r.Id==DisplayId(site??AccountSite.Cn,model)||site is null&&r.Id==DisplayId(AccountSite.Intl,model)).Select(r=>r.MaxOutputTokens).DefaultIfEmpty().Max();
     }
+
+    internal static (byte[] Body, long? Requested, int Effective) PrepareCappedOutput(
+        byte[] original, int cap, int catalogDefault, Action<int> reserve, int limit)
+    {
+        var reader = new Utf8JsonReader(original, new JsonReaderOptions { MaxDepth = 512 });
+        int firstStart = -1, firstEnd = 0, secondStart = -1, secondEnd = 0;
+        int previousValueEnd = 0, end = 0;
+        bool firstIsMaxTokens = false;
+        long? requested = null;
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.EndObject && reader.CurrentDepth == 0)
+                end = (int)reader.TokenStartIndex;
+            if (reader.TokenType != JsonTokenType.PropertyName || reader.CurrentDepth != 1) continue;
+
+            int propertyStart = (int)reader.TokenStartIndex;
+            bool maxTokens = reader.ValueTextEquals("max_tokens");
+            bool budgetField = maxTokens || reader.ValueTextEquals("max_completion_tokens");
+            reader.Read();
+            if (budgetField && reader.TokenType != JsonTokenType.Null)
+            {
+                if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt64(out long value) || value <= 0)
+                    throw new RequestFailure("输出 token 上限必须为正整数");
+                requested = Math.Min(requested ?? value, value);
+            }
+            reader.Skip();
+            int valueEnd = (int)reader.BytesConsumed;
+            if (budgetField)
+            {
+                if (firstStart < 0)
+                {
+                    firstStart = propertyStart;
+                    firstEnd = valueEnd;
+                    firstIsMaxTokens = maxTokens;
+                }
+                else
+                {
+                    // The second budget property has a preceding comma.
+                    secondStart = previousValueEnd;
+                    secondEnd = valueEnd;
+                }
+            }
+            previousValueEnd = valueEnd;
+        }
+
+        int effective = (int)Math.Min(cap, requested ?? (catalogDefault > 0 ? catalogDefault : cap));
+        if (firstIsMaxTokens && secondStart < 0 && requested == effective)
+            return (original, requested, effective);
+
+        bool needsComma = firstStart < 0 && previousValueEnd > 0;
+        byte[] patch = Encoding.ASCII.GetBytes((needsComma ? "," : "") + "\"max_tokens\":" +
+            effective.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (firstStart < 0) firstStart = firstEnd = end;
+        if (secondStart < 0) secondStart = secondEnd = original.Length;
+        int size = checked(original.Length - (firstEnd - firstStart) - (secondEnd - secondStart) + patch.Length);
+        if (size > limit) throw new RequestFailure("转换后的请求超过大小限制", 413, "request_too_large");
+        reserve(size);
+        byte[] body = new byte[size];
+        original.AsSpan(0, firstStart).CopyTo(body);
+        patch.CopyTo(body.AsSpan(firstStart));
+        original.AsSpan(firstEnd, secondStart - firstEnd).CopyTo(body.AsSpan(firstStart + patch.Length));
+        original.AsSpan(secondEnd).CopyTo(body.AsSpan(size - (original.Length - secondEnd)));
+        return (body, requested, effective);
+    }
+
     // Scan structural tokens only; never decode/copy large content strings.
     internal byte[] PrepareOutput(byte[] original,string model,AccountSite? site,Action<int> reserve,int limit)
     {
