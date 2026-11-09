@@ -7,11 +7,12 @@ default. Set `output.hy4freeMaxTokens` in the admin configuration to change it.
 A value of `0` disables the gateway limit. The gateway uses any lower limit
 specified by the caller.
 
-Successful direct `hy4free` requests with an outbound body of at least 16 KiB
-include cache diagnostics in the request log. The keyed tags cover the first
-64 KiB of each section: tool definitions, system messages, and the first two
-non-system messages. Tags are scoped to the caller and reset on restart.
-Set `logs.hy4CacheDiagnostics` to `false` to disable collection.
+Successful direct model requests with an outbound body of at least 16 KiB
+include cache diagnostics in the request log. The keyed tags cover up to
+64 KiB each for tool definitions, system messages, and the first two non-system
+messages. Tags are scoped to the caller and model and reset on restart.
+Set `logs.cacheDiagnostics` to `false` to disable collection. Existing
+`logs.hy4CacheDiagnostics` values apply when the new setting is absent.
 
 ## Release preparation
 

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using KeySecurity;
 
 namespace HttpMigration;
 
@@ -12,10 +13,10 @@ internal sealed record CacheDiagnostics(string Session, string Tools, string Sys
     static readonly byte[] ProcessKey = RandomNumberGenerator.GetBytes(32);
 
     internal static CacheDiagnostics Read(
-        ReadOnlySpan<byte> body, string caller, string? session, string account, string? credentialIdentity, string route)
+        ReadOnlySpan<byte> body, string caller, string model, string? session, string account, string? credentialIdentity, string route)
     {
         Span<byte> key = stackalloc byte[32];
-        HMACSHA256.HashData(ProcessKey, Encoding.UTF8.GetBytes(caller), key);
+        HMACSHA256.HashData(ProcessKey, Encoding.UTF8.GetBytes(caller + "\0" + KeyRules.Model(model)), key);
         using var tools = NewHash(key, "tools"u8);
         using var system = NewHash(key, "system"u8);
         using var history = NewHash(key, "history"u8);

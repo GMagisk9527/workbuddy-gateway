@@ -320,7 +320,7 @@ public static class LocalGateway
                 (upstreamBody,requestedOutputTokens,sentOutputTokens)=(capped.Body,capped.Requested,capped.Effective);
             }
             else upstreamBody=options.Catalog?.PrepareOutput(prepared.UpstreamBody,prepared.Model,site,outboundMemory.Reserve,options.MaxRequestBytes)??prepared.UpstreamBody;
-            if(isHy4Free && keyLease?.Identity is {} caller && accountLease is not null)
+            if(options.DirectUpstream && keyLease?.Identity is {} caller && accountLease is not null)
             {
                 var account=accountLease.Account.Id;
                 string route=affinityKey is null?"no_key":preferred is null?"unbound":preferred==account?"preferred":"fallback";

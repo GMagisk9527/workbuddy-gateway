@@ -87,8 +87,8 @@ internal static class ConversationTests
             Check(SessionAffinity.CachedTokens(raw) is null,"Unknown or invalid usage is not cache evidence");
 
         const string prefix="""{"tools":[{"name":"read"}],"messages":[{"role":"system","content":"sys"},{"role":"user","content":"one"},{"role":"assistant","content":"two"}]}""";
-        CacheDiagnostics Measure(string body, string caller="caller", string account="account") =>
-            CacheDiagnostics.Read(Encoding.UTF8.GetBytes(body),caller,"session",account,"credential","preferred");
+        CacheDiagnostics Measure(string body, string caller="caller", string account="account", string model="hy4free") =>
+            CacheDiagnostics.Read(Encoding.UTF8.GetBytes(body),caller,model,"session",account,"credential","preferred");
         var baseline=Measure(prefix);
         var appended=Measure(prefix[..^2]+""",{"role":"user","content":"three"}]}""");
         Check(baseline==appended,"Appending turns keeps diagnostic prefix tags stable");
@@ -102,6 +102,9 @@ internal static class ConversationTests
         Check(switched.Account!=baseline.Account && switched.Session==baseline.Session &&
             otherCaller.Session!=baseline.Session && otherCaller.History!=baseline.History,
             "Account changes are visible without linking request fingerprints across callers");
+        var otherModel=Measure(prefix,model:"deepseek-v4.1-flash");
+        Check(otherModel.Session!=baseline.Session && otherModel.History!=baseline.History &&
+            otherModel.Account!=baseline.Account,"Diagnostic fingerprints are isolated by model");
     }
     static async Task TransportRetry()
     {
@@ -188,9 +191,18 @@ internal static class ConversationTests
         Check(cacheLine.Contains("cacheDiag=1") && cacheLine.Contains("cacheReadTokens=80") &&
             !cacheLine.Contains("synthetic-private-text") && !cacheLine.Contains("synthetic-dsh-parent"),
             "Long HY4free requests emit bounded diagnostic metadata without prompt or session text");
+        capped["model"]="deepseek-v4.1-flash";
+        await Send("/v1/chat/completions",capped);
+        Check(console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"Long requests for other models emit the same diagnostics");
         console.Settings.Update("""{"logs":{"hy4CacheDiagnostics":false}}""",console.Settings.View().Revision);
         await Send("/v1/chat/completions",capped);
-        Check(!console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"Cache diagnostics can be disabled through configuration");
+        Check(!console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"The existing opt-out is honored");
+        console.Settings.Update("""{"logs":{"hy4CacheDiagnostics":false,"cacheDiagnostics":true}}""",console.Settings.View().Revision);
+        await Send("/v1/chat/completions",capped);
+        Check(console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"The global setting takes precedence over the legacy setting");
+        console.Settings.Update("""{"logs":{"cacheDiagnostics":false}}""",console.Settings.View().Revision);
+        await Send("/v1/chat/completions",capped);
+        Check(!console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"The global switch disables diagnostics for every model");
         await app.StopAsync();
     }
 }

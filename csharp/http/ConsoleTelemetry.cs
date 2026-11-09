@@ -70,7 +70,7 @@ public sealed partial class ConsoleTelemetry
         foreach(var r in staged)rows.Enqueue(r);revision++;Storage="imported";
     }
     internal ConsoleTrace Begin(string protocol,string trace)=>new(this,protocol,trace);
-    internal bool TrackHy4Cache=>settings.Logs.Hy4CacheDiagnostics;
+    internal bool TrackCache=>settings.Logs.CacheDiagnostics;
     internal void Complete(ConsoleRow row,ConsoleAttempt[] attempts,string streamDetails="")
     {
         Validate(row);lock(sync)
@@ -169,8 +169,8 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
     {
         cacheDiagnostics=null;
         reportedCacheRead=null;
-        if(!owner.TrackHy4Cache || body.Length<CacheDiagnostics.MinimumBodyBytes)return;
-        try{cacheDiagnostics=CacheDiagnostics.Read(body,caller,session,account,credentialIdentity,route);}
+        if(!owner.TrackCache || body.Length<CacheDiagnostics.MinimumBodyBytes)return;
+        try{cacheDiagnostics=CacheDiagnostics.Read(body,caller,model,session,account,credentialIdentity,route);}
         catch(JsonException){/* Diagnostics do not participate in request validation. */}
     }
     internal void Headers(){headers=Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;}
