@@ -37,23 +37,40 @@ public static class OpenWire
         internal JsonObject Root{get;}=root;
         internal JsonElement Original=>document.RootElement;
         internal ReadOnlyMemory<byte> Raw{get;}=raw;
-        internal bool HasDuplicates{get;}=hasDuplicates;
-        internal bool HasCanonicalStrings()=>CanonicalElements(document.RootElement);
+        internal bool HasReusableWire()=>!hasDuplicates&&CanonicalLength(document.RootElement)==Raw.Length;
         public void Dispose()=>document.Dispose();
     }
-    static bool CanonicalElements(JsonElement element)
+    // The parsed tokens give the compact wire length without scanning the
+    // whole request again to find whitespace outside strings.
+    static int CanonicalLength(JsonElement element)
     {
+        int length=2,separator=0;
         switch(element.ValueKind)
         {
             case JsonValueKind.Object:
                 foreach(var p in element.EnumerateObject())
-                    if(!CanonicalString(JsonMarshal.GetRawUtf8PropertyName(p))||!CanonicalElements(p.Value))return false;
-                return true;
+                {
+                    var name=JsonMarshal.GetRawUtf8PropertyName(p);
+                    if(!CanonicalString(name))return -1;
+                    int valueLength=CanonicalLength(p.Value);
+                    if(valueLength<0)return -1;
+                    length+=separator+name.Length+3+valueLength; // name quotes and colon
+                    separator=1;
+                }
+                return length;
             case JsonValueKind.Array:
-                foreach(var item in element.EnumerateArray())if(!CanonicalElements(item))return false;
-                return true;
-            case JsonValueKind.String:return CanonicalString(JsonMarshal.GetRawUtf8Value(element)[1..^1]);
-            default:return true;
+                foreach(var item in element.EnumerateArray())
+                {
+                    int valueLength=CanonicalLength(item);
+                    if(valueLength<0)return -1;
+                    length+=separator+valueLength;
+                    separator=1;
+                }
+                return length;
+            case JsonValueKind.String:
+                var raw=JsonMarshal.GetRawUtf8Value(element);
+                return CanonicalString(raw[1..^1])?raw.Length:-1;
+            default:return JsonMarshal.GetRawUtf8Value(element).Length;
         }
     }
     // The request adapters consume this tree synchronously. Only encoded bytes
@@ -71,18 +88,6 @@ public static class OpenWire
         }
         catch(JsonException){document?.Dispose();throw new OpenAiFailure("invalid_json","无效的 JSON 请求体");}
         catch{document?.Dispose();throw;}
-    }
-    internal static bool IsMinified(ReadOnlySpan<byte> bytes)
-    {
-        if(bytes.IsEmpty||bytes[0]!=(byte)'{')return false;
-        bool quoted=false,escaped=false;
-        foreach(byte b in bytes)
-        {
-            if(quoted){if(escaped)escaped=false;else if(b==(byte)'\\')escaped=true;else if(b==(byte)'"')quoted=false;continue;}
-            if(b==(byte)'"'){quoted=true;continue;}
-            if(b is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')return false;
-        }
-        return !quoted&&!escaped;
     }
     internal static bool IsString(JsonValue value)
     {
@@ -125,6 +130,8 @@ public static class OpenWire
     }
     static JsonNode? Deduplicate(JsonElement e,bool own=true) => e.ValueKind switch
     {
+        // The borrowed path uses the parser that rejects duplicate properties.
+        JsonValueKind.Object when !own => new JsonObject(e.EnumerateObject().Select(p => new KeyValuePair<string, JsonNode?>(p.Name, Deduplicate(p.Value,false)))),
         JsonValueKind.Object => new JsonObject(e.EnumerateObject().GroupBy(p => p.Name).Select(g => g.Last()).Select(p => new KeyValuePair<string, JsonNode?>(p.Name, Deduplicate(p.Value,own)))),
         JsonValueKind.Array => new JsonArray(e.EnumerateArray().Select(v=>Deduplicate(v,own)).ToArray()),
         JsonValueKind.Null => null,

@@ -54,6 +54,21 @@ internal static class EncodingTests
             if(!normalized.AsSpan().SequenceEqual(converted.Body))throw new Exception("Chat fast path changed canonical string escaping");
             checks++;
         }
+        const string compact = """{"model":"m","stream":true,"messages":[{"role":"user","content":" x \"quote\" \\ \n 中文 "}],"extra":{"中文":[{},[],null,false,true,-1.25e+2]}}""";
+        foreach (string source in new[] { compact, " \r\n" + compact, compact + "\t", compact.Replace("[{},[]", "[{}, []") })
+        {
+            byte[] input = Encoding.UTF8.GetBytes(source);
+            byte[] actual = ChatRequestAdapter.Prepare(input, null, consumeInput: true).Body;
+            if (ReferenceEquals(input, actual) != (source == compact) ||
+                !actual.AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(compact)))
+                throw new Exception("Compact request reuse changed structural whitespace or scalar bytes");
+            checks++;
+        }
+        byte[] duplicate = """{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"extra":{"a":1,"b":2,"\u0061":3,"nested":[{"k":0,"k":4}]}}"""u8.ToArray();
+        byte[] deduplicated = ChatRequestAdapter.Prepare(duplicate, null, consumeInput: true).Body;
+        if (!deduplicated.AsSpan().SequenceEqual("""{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"extra":{"a":3,"b":2,"nested":[{"k":4}]}}"""u8))
+            throw new Exception("Nested duplicate keys must retain last value and first key position");
+        checks++;
         foreach(string text in new[]{" ","\\u0020","\\u00a0","\\n\\t","\\b","abc","中文"})
         {
             byte[] request=Encoding.UTF8.GetBytes("{\"model\":\"m\",\"instructions\":\"system\",\"input\":\""+text+"\"}");

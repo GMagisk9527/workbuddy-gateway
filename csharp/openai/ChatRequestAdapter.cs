@@ -27,7 +27,7 @@ public static class ChatRequestAdapter
         byte[]? prepared=prepareBody?.Invoke(root);
         bool compatible=prepareBody is not null||(compatibility?.Invoke(root)??false);
         if(prepared is not null)return new(model,stream,prepared,ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
-        if(stream&&explicitStream&&explicitModel&&!document.HasDuplicates&&document.HasCanonicalStrings()&&OpenWire.IsMinified(document.Raw.Span))
+        if(stream&&explicitStream&&explicitModel&&document.HasReusableWire())
         {
             if(consumeInput&&MemoryMarshal.TryGetArray(document.Raw,out ArraySegment<byte> raw)&&raw.Offset==0&&raw.Count==raw.Array!.Length)
                 return new(model,true,raw.Array,ClientProtocol.Chat,new Dictionary<string,ResponseTool>(),new()){OutboundCompatible=compatible};
