@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace HttpMigration;
 
-internal sealed record LogOptions(long MaxFileBytes=8L<<20,long MaxTotalBytes=64L<<20,int MaxFiles=16,int SampleFirst=20,int SampleEvery=100)
+internal sealed record LogOptions(long MaxFileBytes=8L<<20,long MaxTotalBytes=64L<<20,int MaxFiles=16,int SampleFirst=20,int SampleEvery=100,bool Hy4CacheDiagnostics=true)
 {
     internal void Validate(){if(MaxFileBytes is <1 or >1L<<30||MaxTotalBytes<MaxFileBytes||MaxTotalBytes>1L<<40||MaxFiles is <1 or >10000||SampleFirst is <1 or >100000||SampleEvery is <1 or >100000)throw new ArgumentException("Invalid log budget");}
 }
@@ -15,7 +15,8 @@ public sealed partial class ConsoleSettings
     {
         var defaults=new LogOptions();if(!root.TryGetProperty("logs",out var logs))return defaults;
         long Value(string name,long fallback){if(!logs.TryGetProperty(name,out var n))return fallback;long v=n.GetInt64();return v==0?fallback:v;}
-        var next=new LogOptions(Value("maxFileBytes",defaults.MaxFileBytes),Value("maxTotalBytes",defaults.MaxTotalBytes),checked((int)Value("maxFiles",defaults.MaxFiles)),checked((int)Value("sampleFirst",defaults.SampleFirst)),checked((int)Value("sampleEvery",defaults.SampleEvery)));next.Validate();return next;
+        bool cacheDiagnostics=logs.TryGetProperty("hy4CacheDiagnostics",out var value)?value.GetBoolean():defaults.Hy4CacheDiagnostics;
+        var next=new LogOptions(Value("maxFileBytes",defaults.MaxFileBytes),Value("maxTotalBytes",defaults.MaxTotalBytes),checked((int)Value("maxFiles",defaults.MaxFiles)),checked((int)Value("sampleFirst",defaults.SampleFirst)),checked((int)Value("sampleEvery",defaults.SampleEvery)),cacheDiagnostics);next.Validate();return next;
     }
 }
 // This store accepts only already-redacted gateway metadata. It never receives

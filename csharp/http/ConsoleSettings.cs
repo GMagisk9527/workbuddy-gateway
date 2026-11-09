@@ -53,7 +53,7 @@ public sealed partial class ConsoleSettings:IDisposable
         if(r.TryGetProperty("models",out var m))
         {Fields(m,"blocklist","allowlist","accounts");if(m.TryGetProperty("blocklist",out var list))ids=ValidateModelList(list);if(m.TryGetProperty("allowlist",out var allowed))ValidateModelList(allowed);}
         if(r.TryGetProperty("logs",out var l))
-        {Fields(l,"retentionDays","maxFileBytes","maxTotalBytes","maxFiles","sampleFirst","sampleEvery");if(l.TryGetProperty("retentionDays",out var retention))days=retention.GetInt32();}
+        {Fields(l,"retentionDays","maxFileBytes","maxTotalBytes","maxFiles","sampleFirst","sampleEvery","hy4CacheDiagnostics");if(l.TryGetProperty("retentionDays",out var retention))days=retention.GetInt32();}
         if(days is <0 or >36500)throw new ArgumentException("配置范围错误");
         ValidatePolicies(r);ValidateRuntime(r);return(ids,days);
     }

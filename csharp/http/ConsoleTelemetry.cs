@@ -70,6 +70,7 @@ public sealed partial class ConsoleTelemetry
         foreach(var r in staged)rows.Enqueue(r);revision++;Storage="imported";
     }
     internal ConsoleTrace Begin(string protocol,string trace)=>new(this,protocol,trace);
+    internal bool TrackHy4Cache=>settings.Logs.Hy4CacheDiagnostics;
     internal void Complete(ConsoleRow row,ConsoleAttempt[] attempts,string streamDetails="")
     {
         Validate(row);lock(sync)
@@ -151,6 +152,8 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
     int? sentOutputTokens;
     DeadlineWriteStream? downstream;
     double? lastUpstreamReadMs;
+    CacheDiagnostics? cacheDiagnostics;
+    long? reportedCacheRead;
     internal void Model(string value)=>model=value;
     internal void Attempt(string id){account=id;attemptStart=Stopwatch.GetTimestamp();attemptNumber++;headers=null;lastUpstreamReadMs=null;}
     internal void TrackStream(DeadlineWriteStream? response, long? requested, int? sent)
@@ -162,6 +165,14 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
         sentOutputTokens=sent;
     }
     internal void UpstreamRead()=>lastUpstreamReadMs=Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;
+    internal void TrackCache(byte[] body,string caller,string? session,string account,string? credentialIdentity,string route)
+    {
+        cacheDiagnostics=null;
+        reportedCacheRead=null;
+        if(!owner.TrackHy4Cache || body.Length<CacheDiagnostics.MinimumBodyBytes)return;
+        try{cacheDiagnostics=CacheDiagnostics.Read(body,caller,session,account,credentialIdentity,route);}
+        catch(JsonException){/* Diagnostics do not participate in request validation. */}
+    }
     internal void Headers(){headers=Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds;}
     internal void First(){ttft??=Stopwatch.GetElapsedTime(start).TotalMilliseconds;}
     internal void Result(StreamingMigration.StreamOutcome outcome,string failure){if(outcome!=StreamingMigration.StreamOutcome.Complete){complete=false;code=failure.Length<=128&&!failure.Any(char.IsControl)?failure:"stream_failed";}}
@@ -171,7 +182,9 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
         if(attempts.Count<16)attempts.Add(new(attemptNumber,attemptNumber<=1?"initial":"retry",status,code,success?"complete":"failed",code,Stopwatch.GetElapsedTime(start,attemptStart==0?start:attemptStart).TotalMilliseconds,headers,attemptStart==0?0:Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds));
         try
         {
-            if(raw is null||raw.Length>65536)return;var observed=CreditRules.Observe(raw);
+            if(raw is null||raw.Length>65536)return;
+            if(cacheDiagnostics is not null&&success)reportedCacheRead=SessionAffinity.CachedTokens(raw);
+            var observed=CreditRules.Observe(raw);
             if(observed.Kind is SettlementKind.Charged or SettlementKind.Zero){double sum=(credit??0)+observed.Credit;credit=double.IsFinite(sum)&&sum<=1e12?sum:null;}
             using var doc=JsonDocument.Parse(raw);var r=doc.RootElement;if(r.TryGetProperty("prompt_tokens",out _)&&r.TryGetProperty("completion_tokens",out _)){input=Math.Min((input??0)+Math.Min(observed.Input,500000000000),500000000000);output=Math.Min((output??0)+Math.Min(observed.Output,500000000000),500000000000);cached=Math.Min((cached??0)+Math.Min(observed.Cached,1000000000000),1000000000000);total=input+output;}
         }
@@ -184,6 +197,8 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
         string streamDetails=trackStream&&!succeeded&&attemptStart!=0
             ?FormattableString.Invariant($" upstreamMs={Stopwatch.GetElapsedTime(attemptStart).TotalMilliseconds:F1} lastUpstreamReadMs={lastUpstreamReadMs:F1} downstreamBytes={downstream?.BytesWritten} requestedOutputTokens={requestedOutputTokens} sentOutputTokens={sentOutputTokens}")
             :"";
+        if(succeeded && cacheDiagnostics is {} diagnostic)
+            streamDetails+=FormattableString.Invariant($" cacheDiag=1 cacheSession={diagnostic.Session} cacheTools={diagnostic.Tools} cacheSystem={diagnostic.SystemPrompt} cacheHistory={diagnostic.History} cacheAccount={diagnostic.Account} cacheRoute={diagnostic.Route} cacheInputTokens={input} cacheReadTokens={reportedCacheRead} cacheTtftMs={ttft:F1}");
         try{owner.Complete(new(account,model,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),status,succeeded,total,input,output,cached,credit,Stopwatch.GetElapsedTime(start).TotalMilliseconds,ttft,protocol,trace,status==499?"cancelled":code,"v2"),attempts.ToArray(),streamDetails);}
         catch(Exception e)when(e is IOException or InvalidDataException or ArgumentException or InvalidOperationException or OverflowException){owner.Audit("invalid_statistics_skipped");}
     }

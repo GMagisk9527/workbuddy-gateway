@@ -277,10 +277,20 @@ public static class LocalGateway
             {
             using var outboundMemory=resources.Acquire();
             keyLease?.CheckModel(prepared.Model);
+            AccountId? preferred=null;
             if (options.Accounts is { } pool)
             {
                 options.Catalog?.RefreshPricing();
-                try { var preferred=affinity.Lookup(affinityKey);var preferredIdentity=preferred is null?null:options.Credentials?.AffinityIdentity(preferred);accountLease = affinityKey is null ? await pool.AcquireAsync(prepared.Model,attempted:excluded,cancellation:c.RequestAborted) : await pool.AcquireAffinityAsync(prepared.Model, preferred:preferred, attempted: excluded, cancellation: c.RequestAborted,cacheGrace:affinity.CacheGrace(affinityKey,preferred,preferredIdentity,prepared.UpstreamBody.Length,pool.Options.CacheGrace));selectedIdentity=options.Credentials?.AffinityIdentity(accountLease.Account.Id); }
+                try
+                {
+                    preferred=affinity.Lookup(affinityKey);
+                    var preferredIdentity=preferred is null?null:options.Credentials?.AffinityIdentity(preferred);
+                    accountLease=affinityKey is null
+                        ?await pool.AcquireAsync(prepared.Model,attempted:excluded,cancellation:c.RequestAborted)
+                        :await pool.AcquireAffinityAsync(prepared.Model,preferred:preferred,attempted:excluded,cancellation:c.RequestAborted,
+                            cacheGrace:affinity.CacheGrace(affinityKey,preferred,preferredIdentity,prepared.UpstreamBody.Length,pool.Options.CacheGrace));
+                    selectedIdentity=options.Credentials?.AffinityIdentity(accountLease.Account.Id);
+                }
                 catch(SchedulingFailure e) when(excluded.Count>0 && e.Code=="no_eligible_account") { await Error(c,403,"upstream_error","没有可回退的账号","11140"); return; }
             }
             if (options.Credentials is { } credentials && accountLease is not null)
@@ -310,6 +320,12 @@ public static class LocalGateway
                 (upstreamBody,requestedOutputTokens,sentOutputTokens)=(capped.Body,capped.Requested,capped.Effective);
             }
             else upstreamBody=options.Catalog?.PrepareOutput(prepared.UpstreamBody,prepared.Model,site,outboundMemory.Reserve,options.MaxRequestBytes)??prepared.UpstreamBody;
+            if(isHy4Free && keyLease?.Identity is {} caller && accountLease is not null)
+            {
+                var account=accountLease.Account.Id;
+                string route=affinityKey is null?"no_key":preferred is null?"unbound":preferred==account?"preferred":"fallback";
+                trace?.TrackCache(upstreamBody,caller.Id,conversation?.SessionDigest,account.Value,selectedIdentity,route);
+            }
             bool trackStream=isHy4Free&&prepared.Stream;
             if(trackStream)trace?.TrackStream(c.Response.Body as DeadlineWriteStream,requestedOutputTokens,sentOutputTokens);
             message.Content = new ByteArrayContent(upstreamBody); message.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");

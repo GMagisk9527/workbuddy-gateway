@@ -85,6 +85,23 @@ internal static class ConversationTests
         Check(SessionAffinity.CachedTokens("{\"prompt_cache_hit_tokens\":0,\"input_tokens_details\":{\"cached_tokens\":\"32768\"}}")==32768,"Cache accounting accepts the same fallback fields as protocol/ledger readers");
         foreach(string raw in new[]{"{}","{\"cached_tokens\":-1}","{\"cached_tokens\":\"bad\"}","{\"cached_tokens\":{}}"})
             Check(SessionAffinity.CachedTokens(raw) is null,"Unknown or invalid usage is not cache evidence");
+
+        const string prefix="""{"tools":[{"name":"read"}],"messages":[{"role":"system","content":"sys"},{"role":"user","content":"one"},{"role":"assistant","content":"two"}]}""";
+        CacheDiagnostics Measure(string body, string caller="caller", string account="account") =>
+            CacheDiagnostics.Read(Encoding.UTF8.GetBytes(body),caller,"session",account,"credential","preferred");
+        var baseline=Measure(prefix);
+        var appended=Measure(prefix[..^2]+""",{"role":"user","content":"three"}]}""");
+        Check(baseline==appended,"Appending turns keeps diagnostic prefix tags stable");
+        var changedTool=Measure(prefix.Replace("read","write",StringComparison.Ordinal));
+        var changedSystem=Measure(prefix.Replace("\"sys\"","\"new system\"",StringComparison.Ordinal));
+        Check(changedTool.Tools!=baseline.Tools && changedTool.SystemPrompt==baseline.SystemPrompt && changedTool.History==baseline.History &&
+            changedSystem.SystemPrompt!=baseline.SystemPrompt && changedSystem.Tools==baseline.Tools && changedSystem.History==baseline.History,
+            "Tool and system changes are distinguishable");
+        var switched=Measure(prefix,account:"another-account");
+        var otherCaller=Measure(prefix,caller:"other-caller");
+        Check(switched.Account!=baseline.Account && switched.Session==baseline.Session &&
+            otherCaller.Session!=baseline.Session && otherCaller.History!=baseline.History,
+            "Account changes are visible without linking request fingerprints across callers");
     }
     static async Task TransportRetry()
     {
@@ -163,9 +180,17 @@ internal static class ConversationTests
             !diagnostic.Contains("synthetic-private-text"),"A partial upstream error logs timing, bytes and budgets without text");
         fake.FailAfterOutput=false;
         console.Settings.Update("""{"output":{"hy4freeMaxTokens":0}}""",console.Settings.View().Revision);
+        capped["messages"]![0]!["content"]="synthetic-private-text"+new string('x',20<<10);
         var uncapped=await Send("/v1/chat/completions",capped);
         Check(uncapped.Body["max_completion_tokens"]?.GetValue<int>()==4096 &&
             !uncapped.Body.ContainsKey("max_tokens"),"A zero budget restores legacy forwarding");
+        string cacheLine=console.Telemetry.Logs(1).Single();
+        Check(cacheLine.Contains("cacheDiag=1") && cacheLine.Contains("cacheReadTokens=80") &&
+            !cacheLine.Contains("synthetic-private-text") && !cacheLine.Contains("synthetic-dsh-parent"),
+            "Long HY4free requests emit bounded diagnostic metadata without prompt or session text");
+        console.Settings.Update("""{"logs":{"hy4CacheDiagnostics":false}}""",console.Settings.View().Revision);
+        await Send("/v1/chat/completions",capped);
+        Check(!console.Telemetry.Logs(1).Single().Contains("cacheDiag=1"),"Cache diagnostics can be disabled through configuration");
         await app.StopAsync();
     }
 }
