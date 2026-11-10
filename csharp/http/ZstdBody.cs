@@ -16,6 +16,8 @@ internal static class ZstdBody
     [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern nuint ZSTD_initDStream(IntPtr context);
     [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern nuint ZSTD_DCtx_setParameter(IntPtr context, int parameter, int value);
     [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern nuint ZSTD_decompressStream(IntPtr context, ref Buffer output, ref Buffer input);
+    [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern ulong ZSTD_getFrameContentSize(IntPtr source, nuint size);
+    [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern nuint ZSTD_findFrameCompressedSize(IntPtr source, nuint size);
     [DllImport("wbg_zstd", CallingConvention = CallingConvention.Cdecl)] static extern uint ZSTD_isError(nuint code);
     static void Validate(nuint code) { if (ZSTD_isError(code) != 0) throw new InvalidDataException("Invalid zstd request"); }
     public static byte[] Decode(byte[] source, int limit, Action<int>? reserve = null)
@@ -27,11 +29,53 @@ internal static class ZstdBody
     static byte[] DecodeNative(byte[] source, int limit, Action<int>? reserve)
     {
         IntPtr context = ZSTD_createDStream(); if (context == IntPtr.Zero) throw new InvalidDataException("Cannot create zstd decoder");
-        var block = new byte[16384]; var inputPin = GCHandle.Alloc(source, GCHandleType.Pinned); var outputPin = GCHandle.Alloc(block, GCHandleType.Pinned);
+        var inputPin = GCHandle.Alloc(source, GCHandleType.Pinned);
         try
         {
             Validate(ZSTD_initDStream(context)); Validate(ZSTD_DCtx_setParameter(context, 100, 25));
             var input = new Buffer { Data = inputPin.AddrOfPinnedObject(), Size = (nuint)source.Length };
+            ulong decodedSize = ZSTD_getFrameContentSize(input.Data, input.Size);
+            // Unknown sizes and concatenated frames use the incremental decoder.
+            if (decodedSize > 0 && decodedSize <= (ulong)limit &&
+                ZSTD_findFrameCompressedSize(input.Data, input.Size) == input.Size)
+            {
+                reserve?.Invoke((int)decodedSize);
+                return DecodeSingleFrame(context, ref input, (int)decodedSize);
+            }
+            return DecodeFrames(context, ref input, limit, reserve);
+        }
+        finally { inputPin.Free(); ZSTD_freeDStream(context); }
+    }
+    static byte[] DecodeSingleFrame(IntPtr context, ref Buffer input, int decodedSize)
+    {
+        byte[] decoded = GC.AllocateUninitializedArray<byte>(decodedSize);
+        var pin = GCHandle.Alloc(decoded, GCHandleType.Pinned);
+        try
+        {
+            var output = new Buffer { Data = pin.AddrOfPinnedObject(), Size = (nuint)decodedSize };
+            for (int steps = 0; steps < 65536; steps++)
+            {
+                nuint previousInput = input.Position, previousOutput = output.Position;
+                nuint needed = ZSTD_decompressStream(context, ref output, ref input);
+                Validate(needed);
+                if (needed == 0)
+                {
+                    if (input.Position == input.Size && output.Position == output.Size) return decoded;
+                    throw new InvalidDataException("Invalid zstd frame size");
+                }
+                if (input.Position == previousInput && output.Position == previousOutput)
+                    throw new InvalidDataException("Truncated zstd request");
+            }
+            throw new InvalidDataException("Too many zstd decoder steps");
+        }
+        finally { pin.Free(); }
+    }
+    static byte[] DecodeFrames(IntPtr context, ref Buffer input, int limit, Action<int>? reserve)
+    {
+        var block = new byte[16384];
+        var outputPin = GCHandle.Alloc(block, GCHandleType.Pinned);
+        try
+        {
             using var decoded = new MemoryStream(); nuint needed = 1; int steps = 0;
             while (input.Position < input.Size || needed != 0)
             {
@@ -45,6 +89,6 @@ internal static class ZstdBody
             }
             throw new InvalidDataException("Empty zstd request");
         }
-        finally { inputPin.Free(); outputPin.Free(); ZSTD_freeDStream(context); }
+        finally { outputPin.Free(); }
     }
 }

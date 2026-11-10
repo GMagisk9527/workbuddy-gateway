@@ -30,10 +30,11 @@ public sealed partial class ConsoleSettings:IDisposable
     internal static void CheckLink(string path){try{if((File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new IOException("Console links are not supported");}catch(FileNotFoundException){}catch(DirectoryNotFoundException){}}
     internal static byte[] Read(string path,int limit)
     {CheckLink(path);using var f=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read);if(f.Length>limit)throw new InvalidDataException("Console file budget");byte[] b=new byte[(int)f.Length];f.ReadExactly(b);return b;}
-    internal static void Atomic(string path,byte[] data)
+    internal static void Atomic(string path,byte[] data) => Atomic(path, file => file.Write(data), FileOptions.WriteThrough);
+    internal static void Atomic(string path,Action<FileStream> write,FileOptions options)
     {
         CheckLink(path);string temp=path+".tmp";CheckLink(temp);
-        try{using(var f=new FileStream(temp,FileMode.Create,FileAccess.Write,FileShare.None,4096,FileOptions.WriteThrough)){f.Write(data);f.Flush(true);}File.Move(temp,path,true);}
+        try{using(var f=new FileStream(temp,FileMode.Create,FileAccess.Write,FileShare.None,4096,options)){write(f);f.Flush(true);}File.Move(temp,path,true);}
         finally{if(File.Exists(temp))File.Delete(temp);}
     }
     static string Hash(byte[] b)=>Convert.ToHexStringLower(SHA256.HashData(b));

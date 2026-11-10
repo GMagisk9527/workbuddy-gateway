@@ -498,14 +498,36 @@ public static class LocalGateway
     }
     internal static async Task<byte[]> ReadBounded(Stream source, int limit, CancellationToken cancellation, Action<int>? reserve = null)
     {
-        using var buffer = new MemoryStream(); byte[] chunk = new byte[Math.Min(limit + 1, 16384)];
+        const int blockSize = 16 << 10;
+        int total = 0, filled = 0;
+        byte[] block = new byte[(int)Math.Min((long)limit + 1, blockSize)];
+        List<byte[]>? fullBlocks = null;
         while (true)
         {
-            int n = await source.ReadAsync(chunk.AsMemory(0, (int)Math.Min(chunk.Length, (long)limit - buffer.Length + 1)), cancellation);
-            if (n == 0) return buffer.ToArray();
-            if (n > limit - buffer.Length) throw new RequestFailure("数据超过大小限制", 413, "request_too_large");
-            reserve?.Invoke(n); buffer.Write(chunk, 0, n);
+            int n = await source.ReadAsync(block.AsMemory(filled), cancellation);
+            if (n == 0) break;
+            if (n > limit - total) throw new RequestFailure("数据超过大小限制", 413, "request_too_large");
+            reserve?.Invoke(n);
+            total += n;
+            filled += n;
+            if (filled == block.Length)
+            {
+                (fullBlocks ??= []).Add(block);
+                block = new byte[(int)Math.Min((long)limit - total + 1, blockSize)];
+                filled = 0;
+            }
         }
+        if (fullBlocks is null) return block.AsSpan(0, filled).ToArray();
+
+        byte[] result = GC.AllocateUninitializedArray<byte>(total);
+        int offset = 0;
+        foreach (var fullBlock in fullBlocks)
+        {
+            fullBlock.CopyTo(result, offset);
+            offset += fullBlock.Length;
+        }
+        block.AsSpan(0, filled).CopyTo(result.AsSpan(offset));
+        return result;
     }
     static async Task Error(HttpContext c, int status, string type, string message, string? code = null)
     {

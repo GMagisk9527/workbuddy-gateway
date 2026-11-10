@@ -10,11 +10,21 @@ internal static class AdminPage
     {
         ["index.html"]=Read("index.html"),["style.css"]=Read("style.css"),["app.js"]=Read("app.js"),["qrcodegen.js"]=Read("qrcodegen.js")
     };
-    static readonly string Version=Convert.ToHexStringLower(SHA256.HashData(Assets["app.js"].Concat(Assets["style.css"]).Concat(Assets["qrcodegen.js"]).ToArray()))[..12];
+    static readonly string Version=AssetVersion();
+    static string AssetVersion()
+    {
+        using var hash=IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Assets["app.js"]);
+        hash.AppendData(Assets["style.css"]);
+        hash.AppendData(Assets["qrcodegen.js"]);
+        return Convert.ToHexStringLower(hash.GetHashAndReset())[..12];
+    }
     static byte[] Read(string name)
     {
         using var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream("AdminAssets."+name)??throw new InvalidOperationException("Missing console asset");
-        using var output=new MemoryStream();stream.CopyTo(output);return output.ToArray();
+        byte[] output=GC.AllocateUninitializedArray<byte>(checked((int)stream.Length));
+        stream.ReadExactly(output);
+        return output;
     }
     internal static IResult Show(HttpContext c)
     {

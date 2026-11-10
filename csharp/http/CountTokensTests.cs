@@ -21,15 +21,30 @@ internal static class CountTokensTests
         await app.StartAsync();using var client=new HttpClient(new SocketsHttpHandler{UseProxy=false}){BaseAddress=new(LocalGateway.Address(app)),Timeout=TimeSpan.FromSeconds(10)};
         var resources=app.Services.GetRequiredService<PreparationAdmission>();var gate=app.Services.GetRequiredService<SemaphoreSlim>();
         const string good="{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"你好abc\"}]}";
+        static byte[] RawFrame(ReadOnlySpan<byte> bytes,bool hasSize=true)
+        {
+            int block=(bytes.Length<<3)|1;
+            return [0x28,0xb5,0x2f,0xfd,hasSize?(byte)0x20:(byte)0,
+                hasSize?(byte)bytes.Length:(byte)0,(byte)block,(byte)(block>>8),(byte)(block>>16),..bytes];
+        }
         async Task Send(string body,int status,int? count=null,string auth="valid",string? coding=null,HttpMethod? method=null)
         {
             byte[] bytes=Encoding.UTF8.GetBytes(body);
             if(coding=="gzip"){using var ms=new MemoryStream();using(var zip=new GZipStream(ms,CompressionLevel.Fastest,true))zip.Write(bytes);bytes=ms.ToArray();}
-            if(coding=="zstd-raw")
+            if(coding is "zstd-raw" or "zstd-split" or "zstd-unknown" or "zstd-truncated" or "zstd-size-mismatch" or "zstd-expanded-limit")
             {
-                // Valid single-segment zstd frame with one uncompressed block (<256 bytes).
-                int header=(bytes.Length<<3)|1;
-                bytes=new byte[]{0x28,0xb5,0x2f,0xfd,0x20,(byte)bytes.Length,(byte)header,(byte)(header>>8),(byte)(header>>16)}.Concat(bytes).ToArray();coding="zstd";
+                int split=bytes.Length/2;
+                bytes=coding switch
+                {
+                    "zstd-split" => [..RawFrame(bytes.AsSpan(0,split)),..RawFrame(bytes.AsSpan(split))],
+                    "zstd-unknown" => RawFrame(bytes,hasSize:false),
+                    "zstd-truncated" => RawFrame(bytes)[..^1],
+                    // One RLE block expands to 2200 bytes, above the 2048-byte test limit.
+                    "zstd-expanded-limit" => [0x28,0xb5,0x2f,0xfd,0x60,0x98,0x07,0xc3,0x44,0x00,(byte)'a'],
+                    _ => RawFrame(bytes)
+                };
+                if(coding=="zstd-size-mismatch")bytes[5]++;
+                coding="zstd";
             }
             using var req=new HttpRequestMessage(method??HttpMethod.Post,"/v1/messages/count_tokens"){Content=new ByteArrayContent(bytes)};
             if(auth!="none")req.Headers.Add("x-api-key",auth=="valid"?token:auth);
@@ -43,6 +58,11 @@ internal static class CountTokensTests
         }
         await Send(good,200,3);await Send(good,200,3,coding:"gzip");
         await Send(good,200,3,coding:"zstd-raw");
+        await Send(good,200,3,coding:"zstd-split");
+        await Send(good,200,3,coding:"zstd-unknown");
+        await Send(good,400,coding:"zstd-truncated");
+        await Send(good,400,coding:"zstd-size-mismatch");
+        await Send(good,413,coding:"zstd-expanded-limit");
         await Send("{\"model\":\"m\",\"messages\":[]}",200,0);
         await Send(good,401,auth:"none");await Send(good,401,auth:"invalid");await Send(good,405,method:HttpMethod.Get);
         await Send(good.Replace("\"m\"","\"forbidden\""),403);

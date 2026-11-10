@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
@@ -22,10 +23,8 @@ public sealed partial class ConsoleTelemetry
     readonly bool logInitializationFailed;
     public bool LogWriteFailed=>logInitializationFailed||(requestLogs?.WriteFailed??false);
     public bool WriteFailed{get;private set;}public string Storage{get;private set;}="memory";
-    sealed record HistoryDocument(int Schema, long StartedAt, ConsoleAccount[] Accounts, ConsoleRow[] Requests);
-
     [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-    [JsonSerializable(typeof(HistoryDocument))]
+    [JsonSerializable(typeof(ConsoleAccount))]
     [JsonSerializable(typeof(ConsoleAccount[]))]
     [JsonSerializable(typeof(ConsoleRow[]))]
     [JsonSerializable(typeof(ConsoleRow))]
@@ -87,6 +86,10 @@ public sealed partial class ConsoleTelemetry
     public void Audit(string code)
     {if(code.Length>80||code.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c!='_'))return;lock(sync){var now=DateTimeOffset.UtcNow;string line=now.ToString("O")+" admin="+code;AddLog(now.ToUnixTimeMilliseconds(),line);requestLogs?.Append(line,now);}}
     public ConsoleRow[] Rows(){lock(sync)return rows.ToArray();}
+    internal ConsoleRow[] RowsSince(long cutoff)
+    {
+        lock(sync) return rows.Where(row => row.At >= cutoff).ToArray();
+    }
     public object? Trace(string id){lock(sync)return traces.LastOrDefault(t=>t.Trace==id&&t.At>=DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds()).Data;}
     public string[] Logs(int count){lock(sync){count=Math.Clamp(count,1,1000);if(requestLogs is not null){var disk=requestLogs.Tail(count);if(!requestLogs.WriteFailed)return disk;}long cutoff=LogCutoff(settings.RetentionDays,DateTimeOffset.UtcNow);return logs.Where(l=>l.At>=cutoff).TakeLast(count).Select(l=>l.Line).ToArray();}}
     static long LogCutoff(int days,DateTimeOffset now)=>days==0?0:new DateTimeOffset(now.LocalDateTime.Date.AddDays(-(days-1))).ToUnixTimeMilliseconds();
@@ -107,9 +110,44 @@ public sealed partial class ConsoleTelemetry
         lock(disk)
         {
             long version;ConsoleRow[] snapshot;ConsoleAccount[] summaries;lock(sync){if(saved==revision)return true;version=revision;snapshot=rows.ToArray();var referenced=snapshot.Select(r=>r.Account).ToHashSet(StringComparer.Ordinal);summaries=accounts.Values.OrderByDescending(a=>referenced.Contains(a.Id)).ThenBy(a=>a.Id,StringComparer.Ordinal).Take(Limit).ToArray();}
-            try{byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(new HistoryDocument(1, StartedAt, summaries, snapshot), HistoryJson.Default.HistoryDocument);if(bytes.Length>FileLimit)throw new InvalidDataException();ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),bytes);lock(sync){saved=version;WriteFailed=false;Storage="file";}return true;}
+            try{ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),file=>WriteHistory(file,summaries,snapshot),FileOptions.SequentialScan);lock(sync){saved=version;WriteFailed=false;Storage="file";}return true;}
             catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException){WriteFailed=true;return false;}
         }
+    }
+    void WriteHistory(FileStream file,ConsoleAccount[] summaries,ConsoleRow[] snapshot)
+    {
+        const int flushThreshold=32<<10;
+        var buffer=new ArrayBufferWriter<byte>(2*flushThreshold);
+        using var writer=new Utf8JsonWriter(buffer);
+        void FlushIfNeeded(bool final=false)
+        {
+            if (writer.BytesCommitted+writer.BytesPending>FileLimit)
+                throw new InvalidDataException("History exceeds its file budget");
+            if (!final && writer.BytesPending+buffer.WrittenCount<flushThreshold) return;
+            writer.Flush();
+            file.Write(buffer.WrittenSpan);
+            buffer.ResetWrittenCount();
+        }
+
+        writer.WriteStartObject();
+        writer.WriteNumber("schema",1);
+        writer.WriteNumber("startedAt",StartedAt);
+        writer.WriteStartArray("accounts");
+        foreach (var account in summaries)
+        {
+            JsonSerializer.Serialize(writer,account,HistoryJson.Default.ConsoleAccount);
+            FlushIfNeeded();
+        }
+        writer.WriteEndArray();
+        writer.WriteStartArray("requests");
+        foreach (var row in snapshot)
+        {
+            JsonSerializer.Serialize(writer,row,HistoryJson.Default.ConsoleRow);
+            FlushIfNeeded();
+        }
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        FlushIfNeeded(final:true);
     }
     public object Stats(IQueryCollection query)
     {
@@ -128,14 +166,14 @@ public sealed partial class ConsoleTelemetry
         var latency=selected.GroupBy(r=>r.Model).OrderByDescending(g=>g.Count()).Take(8).Select(g=>new Dictionary<string, object?> { ["model"] = g.Key, ["avgLatencyMs"] = points.Select(p=>Average(p.Where(r=>r.Model==g.Key).Select(r=>(double?)r.LatencyMs))).ToArray(), ["avgTtftMs"] = points.Select(p=>Average(p.Where(r=>r.Model==g.Key&&r.TtftMetric=="v2").Select(r=>r.TtftMs))).ToArray() }).ToArray();
         return new Dictionary<string, object?> { ["period"] = period, ["start"] = start.ToString("yyyy-MM-dd"), ["end"] = end.ToString("yyyy-MM-dd"), ["serverTime"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), ["account"] = account, ["accounts"] = choices.Select(a=>new Dictionary<string, object?> { ["id"] = a.Id, ["file"] = a.File, ["edition"] = a.Edition }).ToArray(), ["summary"] = Aggregate(selected), ["buckets"] = buckets, ["models"] = models, ["modelLatency"] = latency, ["ttftMetric"] = "first_token_v2", ["storage"] = new Dictionary<string, object?> { ["mode"] = Storage, ["problem"] = WriteFailed?"统计保存失败，现有数据保留":"", ["maxRequests"] = Limit }, ["startedAt"] = StartedAt };
     }
-    static double? Average(IEnumerable<double?> values){var a=values.Where(v=>v.HasValue).Select(v=>v!.Value).ToArray();return a.Length==0?null:a.Average();}
+    static double? Average(IEnumerable<double?> values) => values.Average();
     internal static Dictionary<string,object?> Aggregate(ConsoleRow[] rows)=>new()
     {
         ["requests"]=rows.Length,["success"]=rows.Count(r=>r.Complete),["failed"]=rows.Count(r=>!r.Complete),["tokens"]=rows.Sum(r=>r.TotalTokens??0),["inputTokens"]=rows.Sum(r=>r.InputTokens??0),["outputTokens"]=rows.Sum(r=>r.OutputTokens??0),["cachedTokens"]=rows.Sum(r=>r.CachedTokens??0),["credits"]=rows.Sum(r=>r.Credit??0),["tokenSamples"]=rows.Count(r=>r.TotalTokens.HasValue),["creditSamples"]=rows.Count(r=>r.Credit.HasValue),["ttftSamples"]=rows.Count(r=>r.TtftMetric=="v2"&&r.TtftMs.HasValue),["avgLatencyMs"]=rows.Length==0?null:rows.Average(r=>r.LatencyMs),["avgTtftMs"]=Average(rows.Where(r=>r.TtftMetric=="v2").Select(r=>r.TtftMs)),["ttftMetric"]="first_token_v2"
     };
     public object Performance(string? trace)
     {
-        if(!string.IsNullOrEmpty(trace))return Trace(trace)??throw new KeyNotFoundException();var recent=Rows().Where(r=>r.At>=DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds()).ToArray();
+        if(!string.IsNullOrEmpty(trace))return Trace(trace)??throw new KeyNotFoundException();var recent=RowsSince(DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds());
         object Phase(string name,string label,double[] values)=>new Dictionary<string, object?> { ["name"] = name, ["label"] = label, ["samples"] = values.Length, ["failed"] = 0, ["averageMs"] = values.Length==0?(double?)null:values.Average(), ["p95Ms"] = Percentile(values,.95), ["p99Ms"] = Percentile(values,.99) };
         var protocols=new[]{"all","messages","chat_completions","responses"}.Select(protocol=>{var data=recent.Where(r=>protocol=="all"||r.Protocol==protocol).ToArray();return new Dictionary<string, object?> { ["protocol"] = protocol, ["requests"] = data.Length, ["failed"] = data.Count(r=>!r.Complete), ["canceled"] = data.Count(r=>r.Code=="cancelled"), ["incompleteStreams"] = data.Count(r=>!r.Complete), ["phases"] = new[]{Phase("total","总耗时",data.Select(r=>r.LatencyMs).ToArray()),Phase("first_token","有效首Token",data.Where(r=>r.TtftMs.HasValue).Select(r=>r.TtftMs!.Value).ToArray())} };});
         return new Dictionary<string, object?> { ["asOf"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["startedAt"] = StartedAt/1000, ["protocols"] = protocols.ToArray() };
