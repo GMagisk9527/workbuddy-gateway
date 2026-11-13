@@ -18,8 +18,6 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     [JsonSerializable(typeof(LedgerEntry))]
     partial class LedgerJson : JsonSerializerContext {}
     readonly object gate = new();
-    readonly object ioGate = new();
-    readonly object waitGate = new();
     readonly ILedgerFiles files;
     readonly TimeProvider clock;
     readonly Guid owner = Guid.NewGuid();
@@ -27,44 +25,34 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     readonly Dictionary<string, string> pending = [];
     readonly HashSet<string> resolved = [];
     readonly Queue<string> resolvedOrder = [];
-    readonly Queue<LedgerEntry> pendingWrites = [];
-    readonly HashSet<string> submitted = [];
-    Thread? flusher;
     DiskState state = new(1);
     long seq;
-    long appliedSeq;
     int writes;
-    bool stopping, flushActive, disposed;
-    volatile bool failed;
     // Compaction rewrites snapshot/state and truncates the WAL under the gate.
     // A larger batch keeps the occasional multi-file fsync off the hot path;
     // replaying a few thousand WAL rows on restart remains bounded and cheap.
     const int CompactEvery = 4096;
-    bool blocked;
+    bool blocked, disposed;
 
     public CreditLedger(ILedgerFiles files, IEnumerable<string>? knownKeys = null, TimeProvider? clock = null)
     {
         this.files = files; this.clock = clock ?? TimeProvider.System;
         try { Load((knownKeys ?? []).ToHashSet(StringComparer.Ordinal)); } catch { files.Dispose(); throw; }
-        flusher = new Thread(FlushLoop) { IsBackground = true, Name = "ledger-flusher" };
-        flusher.Start();
     }
     public static CreditLedger Open(string directory, IEnumerable<string>? knownKeys = null, TimeProvider? clock = null) => new(new LedgerFiles(directory), knownKeys, clock);
     void EnsureOpen() { if (disposed) throw new ObjectDisposedException(nameof(CreditLedger)); }
-    void RequireHealthy() { EnsureOpen(); if (blocked || failed || state.Incomplete) throw new KeyFailure(503, "ledger_unavailable", "记账存储不可用，已暂停请求"); }
-    public LedgerHealth Health { get { lock (gate) return new(!disposed && !blocked && !failed && !state.Incomplete, state.Incomplete, appliedSeq, pending.Count); } }
+    void RequireHealthy() { EnsureOpen(); if (blocked || state.Incomplete) throw new KeyFailure(503, "ledger_unavailable", "记账存储不可用，已暂停请求"); }
+    public LedgerHealth Health { get { lock (gate) return new(!disposed && !blocked && !state.Incomplete, state.Incomplete, seq, pending.Count); } }
     static T Read<T>(byte[] raw, JsonTypeInfo<T> type)
     {
         try { return JsonSerializer.Deserialize(raw, type) ?? throw new InvalidDataException("Invalid ledger document"); }
         catch (JsonException e) { throw new InvalidDataException("Invalid ledger JSON", e); }
     }
-    void StateToDisk() { lock (ioGate) files.Replace(StateName, JsonSerializer.SerializeToUtf8Bytes(state, LedgerJson.Default.DiskState)); }
+    void StateToDisk() => files.Replace(StateName, JsonSerializer.SerializeToUtf8Bytes(state, LedgerJson.Default.DiskState));
     void Fault()
     {
-        failed = true; blocked = true; state = state with { Incomplete = true };
+        blocked = true; state = state with { Incomplete = true };
         try { StateToDisk(); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* A durable unmatched begin remains before any upstream send. */ }
-        lock (gate) Monitor.PulseAll(gate);
-        lock (waitGate) Monitor.PulseAll(waitGate);
     }
     void Remember(string? attempt)
     {
@@ -130,11 +118,11 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
         if (pending.Count > 0) state = state with { Incomplete = true };
         if (walRaw is null && !state.Incomplete) files.Replace(WalName, []);
         if (addNewline && !state.Incomplete) files.Replace(WalName, Encoding.UTF8.GetBytes(raw + "\n"));
-        StateToDisk(); blocked = state.Incomplete; appliedSeq = seq;
+        StateToDisk(); blocked = state.Incomplete;
     }
     CreditUsage Current(string key) => CreditRules.Roll(usage.GetValueOrDefault(key) ?? new(), clock.GetUtcNow());
     CreditUsage? NextUsage(LedgerEntry entry) => entry.Kind is "begin" or "cancel" ? null : CreditRules.Apply(Current(entry.Key), entry, clock.GetUtcNow());
-    void Apply(LedgerEntry entry)
+    void Apply(LedgerEntry entry, CreditUsage? prepared = null)
     {
         if (entry.Kind == "begin")
         {
@@ -149,61 +137,51 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
         }
         if (entry.Kind == "cancel") return;
         if (entry.Kind == "recovery" && entry.Key.Length == 0) { state = state with { Incomplete = true }; return; }
-        usage[entry.Key] = NextUsage(entry)!;
+        usage[entry.Key] = prepared ?? NextUsage(entry)!;
     }
-    // One flusher thread fsyncs all rows submitted since the previous batch and
-    // then applies them in sequence order. Callers still block until their own
-    // row is durable, so Begin keeps its "durable before upstream" contract.
-    void Submit(LedgerEntry template, LedgerAttempt? attempt, out long target)
+    void Append(LedgerEntry entry)
     {
-        target = 0;
-        lock (gate)
+        RequireHealthy(); Validate(entry);
+        try
         {
-            RequireHealthy();
-            if (attempt is not null)
-            {
-                if (attempt.Owner != owner) throw new ArgumentException("Attempt belongs to another ledger");
-                if (resolved.Contains(attempt.Id) || submitted.Contains(attempt.Id)) { target = -1; return; }
-                if (!pending.TryGetValue(attempt.Id, out var key) || key != attempt.Key) throw new InvalidOperationException("Unknown ledger attempt");
-            }
-            var entry = template with { Seq = checked(seq + 1) };
-            Validate(entry);
+            var next = NextUsage(entry);
             byte[] row = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(entry, LedgerJson.Default.LedgerEntry) + "\n");
-            try { lock (ioGate) { if (files.Append(row) != row.Length) throw new IOException("Short WAL write"); } }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or OverflowException)
-            { Fault(); throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求"); }
-            seq = entry.Seq; pendingWrites.Enqueue(entry);
-            if (attempt is not null) submitted.Add(attempt.Id);
-            if (!flushActive) { flushActive = true; Monitor.PulseAll(gate); }
-            target = entry.Seq;
+            if (files.Append(row) != row.Length) throw new IOException("Short WAL write");
+            files.Sync(); Apply(entry, next); seq = entry.Seq; writes++;
         }
-        lock (waitGate)
-        {
-            while (appliedSeq < target)
-            {
-                if (failed || blocked) throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求");
-                Monitor.Wait(waitGate);
-            }
-        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or OverflowException)
+        { Fault(); throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求"); }
     }
     public LedgerAttempt Begin(string key)
     {
-        string id = Guid.NewGuid().ToString("N");
-        Submit(new(0, key, id, "begin", At: clock.GetUtcNow().ToUnixTimeMilliseconds()), null, out _);
-        return new(owner, id, key);
+        lock (gate)
+        {
+            RequireHealthy(); string id = Guid.NewGuid().ToString("N");
+            Append(new(checked(seq + 1), key, id, "begin", At: clock.GetUtcNow().ToUnixTimeMilliseconds())); return new(owner, id, key);
+        }
+    }
+    bool Finished(LedgerAttempt attempt)
+    {
+        if (attempt.Owner != owner) throw new ArgumentException("Attempt belongs to another ledger");
+        if (resolved.Contains(attempt.Id)) return true;
+        if (!pending.TryGetValue(attempt.Id, out var key) || key != attempt.Key) throw new InvalidOperationException("Unknown ledger attempt");
+        return false;
     }
     public SettlementKind Complete(LedgerAttempt attempt, string? rawUsage, int status)
     {
-        var observed = CreditRules.Observe(rawUsage); var window = CreditRules.Window(clock.GetUtcNow());
-        Submit(new(0, attempt.Key, attempt.Id, Credit: observed.Credit, Known: observed.Kind == SettlementKind.Charged,
-            Zero: observed.Kind == SettlementKind.Zero, Unknown: observed.Kind == SettlementKind.Unknown, At: clock.GetUtcNow().ToUnixTimeMilliseconds(), DayKey: window.Day, MonthKey: window.Month,
-            Input: observed.Input, Output: observed.Output, Cached: observed.Cached, Status: status), attempt, out var target);
-        return target < 0 ? SettlementKind.Duplicate : observed.Kind;
+        lock (gate)
+        {
+            EnsureOpen(); if (Finished(attempt)) return SettlementKind.Duplicate;
+            var observed = CreditRules.Observe(rawUsage); var window = CreditRules.Window(clock.GetUtcNow());
+            Append(new(checked(seq + 1), attempt.Key, attempt.Id, Credit: observed.Credit, Known: observed.Kind == SettlementKind.Charged,
+                Zero: observed.Kind == SettlementKind.Zero, Unknown: observed.Kind == SettlementKind.Unknown, At: clock.GetUtcNow().ToUnixTimeMilliseconds(), DayKey: window.Day, MonthKey: window.Month,
+                Input: observed.Input, Output: observed.Output, Cached: observed.Cached, Status: status));
+            if (writes >= CompactEvery) Compact(); return observed.Kind;
+        }
     }
     public SettlementKind CancelUncharged(LedgerAttempt attempt)
     {
-        Submit(new(0, attempt.Key, attempt.Id, "cancel", At: clock.GetUtcNow().ToUnixTimeMilliseconds()), attempt, out var target);
-        return target < 0 ? SettlementKind.Duplicate : SettlementKind.Cancelled;
+        lock (gate) { EnsureOpen(); if (Finished(attempt)) return SettlementKind.Duplicate; Append(new(checked(seq + 1), attempt.Key, attempt.Id, "cancel", At: clock.GetUtcNow().ToUnixTimeMilliseconds())); return SettlementKind.Cancelled; }
     }
     public CreditUsage GetUsage(string key) { lock (gate) { EnsureOpen(); return Current(key); } }
     public Dictionary<string, CreditUsage> AllUsage() { lock (gate) { EnsureOpen(); return usage.Keys.ToDictionary(k => k, Current, StringComparer.Ordinal); } }
@@ -211,93 +189,29 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     {
         lock (gate)
         {
-            RequireHealthy(); DrainLocked(); if (!policy.Limited) return; var u = Current(policy.Id);
+            RequireHealthy(); if (!policy.Limited) return; var u = Current(policy.Id);
             if (policy.QuotaTotal > 0 && u.Total >= policy.QuotaTotal || policy.QuotaDaily > 0 && u.Daily >= policy.QuotaDaily || policy.QuotaMonthly > 0 && u.Monthly >= policy.QuotaMonthly || u.Unknown >= 10)
                 throw new KeyFailure(429, "credit_quota_exhausted", u.Unknown >= 10 ? "上游长期未返回计费字段，该 Key 已进入安全状态" : "该 API Key 的积分额度已用尽");
         }
     }
-    void DrainLocked()
-    {
-        while (appliedSeq < seq || pendingWrites.Count > 0)
-        {
-            if (failed || blocked) throw new KeyFailure(503, "ledger_unavailable", "记账存储不可用，已暂停请求");
-            if (!flushActive) { flushActive = true; Monitor.PulseAll(gate); }
-            Monitor.Wait(gate);
-        }
-    }
     public void Reset(string key)
     {
-        Submit(new(0, key, Kind: "reset", At: clock.GetUtcNow().ToUnixTimeMilliseconds()), null, out _);
-        Compact();
-    }
-    void FlushLoop()
-    {
-        while (true)
-        {
-            long target;
-            lock (gate)
-            {
-                while (!stopping && !flushActive) Monitor.Wait(gate);
-                if (stopping) return;
-                flushActive = false;
-                target = pendingWrites.Count > 0 ? pendingWrites.Last().Seq : seq;
-            }
-            bool ok = true;
-            try { lock (ioGate) files.Sync(); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or OverflowException) { ok = false; }
-            lock (gate)
-            {
-                if (ok)
-                {
-                    while (pendingWrites.Count > 0 && pendingWrites.Peek().Seq <= target)
-                    {
-                        var entry = pendingWrites.Dequeue();
-                        try { Apply(entry); }
-                        catch (InvalidDataException) { ok = false; failed = true; Fault(); break; }
-                        appliedSeq = entry.Seq; writes++;
-                        if (entry.Attempt is { Length: > 0 } attempt) submitted.Remove(attempt);
-                    }
-                }
-                else { failed = true; Fault(); }
-                lock (waitGate) Monitor.PulseAll(waitGate);
-                if (ok && writes >= CompactEvery && pendingWrites.Count == 0)
-                {
-                    try { CompactLocked(); }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { failed = true; Fault(); }
-                    catch (KeyFailure) { failed = true; }
-                }
-                if (pendingWrites.Count > 0) flushActive = true;
-                Monitor.PulseAll(gate);
-            }
-        }
-    }
-    void CompactLocked()
-    {
-        RequireHealthy();
-        try
-        {
-            var snap = new DiskSnapshot(1, appliedSeq, usage.Keys.ToDictionary(k => k, Current, StringComparer.Ordinal), PendingAttempts: new(pending), ResolvedAttempts: resolvedOrder.ToArray());
-            lock (ioGate)
-            {
-                files.Replace(SnapshotName, JsonSerializer.SerializeToUtf8Bytes(snap, LedgerJson.Default.DiskSnapshot));
-                state = state with { SnapshotRequired = true }; StateToDisk();
-                files.Sync(); files.Replace(WalName, []);
-            }
-            writes = 0;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Fault(); throw new KeyFailure(503, "ledger_unavailable", "账本压缩失败，已暂停请求"); }
+        lock (gate) { Append(new(checked(seq + 1), key, Kind: "reset", At: clock.GetUtcNow().ToUnixTimeMilliseconds())); Compact(); }
     }
     public void Compact()
     {
         lock (gate)
         {
-            RequireHealthy(); DrainLocked(); CompactLocked();
+            RequireHealthy();
+            try
+            {
+                var snap = new DiskSnapshot(1, seq, AllUsage(), PendingAttempts: new(pending), ResolvedAttempts: resolvedOrder.ToArray());
+                files.Replace(SnapshotName, JsonSerializer.SerializeToUtf8Bytes(snap, LedgerJson.Default.DiskSnapshot));
+                state = state with { SnapshotRequired = true }; StateToDisk();
+                files.Sync(); files.Replace(WalName, []); writes = 0;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Fault(); throw new KeyFailure(503, "ledger_unavailable", "账本压缩失败，已暂停请求"); }
         }
     }
-    public void Dispose()
-    {
-        lock (gate) { if (disposed) return; disposed = true; stopping = true; Monitor.PulseAll(gate); }
-        try { flusher?.Join(TimeSpan.FromSeconds(30)); } catch (ThreadStateException) { }
-        lock (ioGate) files.Dispose();
-    }
+    public void Dispose() { lock (gate) { if (disposed) return; disposed = true; files.Dispose(); } }
 }
