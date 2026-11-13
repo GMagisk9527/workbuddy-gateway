@@ -25,18 +25,23 @@ public static partial class ModelObservations
         if (raw is null || raw.Length > 65536) return ModelCost.Unknown;
         try
         {
-            using var doc = JsonDocument.Parse(raw); var r = doc.RootElement;
-            if (Number(Field(r, "credit")) is not double credit || !double.IsFinite(credit) || credit < 0) return ModelCost.Unknown;
-            if (credit > 0) return ModelCost.Paid;
-            long? total = Tokens(Field(r, "total_tokens"));
-            if (total is null)
-            {
-                long? input = Tokens(Field(r, "prompt_tokens")), output = Tokens(Field(r, "completion_tokens"));
-                if (input is not null || output is not null) total = input.GetValueOrDefault() > long.MaxValue - output.GetValueOrDefault() ? long.MaxValue : input.GetValueOrDefault() + output.GetValueOrDefault();
-            }
-            return total >= 100 ? ModelCost.Free : ModelCost.Unknown;
+            using var doc = JsonDocument.Parse(raw);
+            return Cost(doc.RootElement);
         }
         catch (JsonException) { return ModelCost.Unknown; }
+    }
+    // Callers that already parsed the usage document avoid a second parse.
+    public static ModelCost Cost(JsonElement r)
+    {
+        if (Number(Field(r, "credit")) is not double credit || !double.IsFinite(credit) || credit < 0) return ModelCost.Unknown;
+        if (credit > 0) return ModelCost.Paid;
+        long? total = Tokens(Field(r, "total_tokens"));
+        if (total is null)
+        {
+            long? input = Tokens(Field(r, "prompt_tokens")), output = Tokens(Field(r, "completion_tokens"));
+            if (input is not null || output is not null) total = input.GetValueOrDefault() > long.MaxValue - output.GetValueOrDefault() ? long.MaxValue : input.GetValueOrDefault() + output.GetValueOrDefault();
+        }
+        return total >= 100 ? ModelCost.Free : ModelCost.Unknown;
     }
     public static RejectionObservation Failure(int status, string? code, string? raw, DateTimeOffset now)
     {

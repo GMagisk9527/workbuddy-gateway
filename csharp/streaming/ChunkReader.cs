@@ -62,48 +62,62 @@ public static class ChunkReader
         try
         {
             using var doc = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 10000 });
-            var root = doc.RootElement;
-            if (root.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) throw new ConversionFailure("invalid_json");
-            var error = Field(root, "error");
-            var obj = error.ValueKind == JsonValueKind.Object && (Code(Field(error, "code")) == "11128" || Field(root, "code").ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) ? error : root;
-            string code = Code(Field(obj, "code"));
-            ConversionFailure Failure(string failure) => new(failure) { RawUsageJson = Field(root,"usage").ValueKind==JsonValueKind.Object?Field(root,"usage").GetRawText():null };
-            if (code is "11128" or "11140" or "6004" or "14018" or "429") throw Failure(code);
-            if (error.ValueKind == JsonValueKind.Object)
-            {
-                string failure = Code(Field(error, "code"));
-                if (failure == "") failure = Text(Field(error, "code"));
-                if (failure.Length == 0 || failure.Length > 128 || failure.Any(char.IsControl)) failure = "upstream_error";
-                throw Failure(failure);
-            }
-            var u = Field(root, "usage");
-            UsageObservation? usage = null;
-            if (u.ValueKind == JsonValueKind.Object)
-            {
-                long cached = 0;
-                foreach (string key in new[] { "prompt_cache_hit_tokens", "cache_read_input_tokens", "cached_tokens" })
-                    if (Token(Field(u, key)) is long n) { cached = n; if (n > 0) break; }
-                if (cached == 0)
-                    foreach (string key in new[] { "prompt_tokens_details", "input_tokens_details" })
-                        if (Token(Field(Field(u, key), "cached_tokens")) is long n) { cached = n; if (n > 0) break; }
-                long input = Integer(Field(u, "prompt_tokens"));
-                cached = Math.Min(cached, input);
-                usage = new(new(input - cached, Integer(Field(u, "completion_tokens")), cached, Math.Max(0, Integer(Field(u, "cache_creation_input_tokens")))), u.GetRawText());
-            }
-            return new(Text(Field(root, "model")), Items(Field(root, "choices")).Where(x => x.ValueKind == JsonValueKind.Object).Select(c =>
-            {
-                var d = Field(c, "delta");
-                var tools = Items(Field(d, "tool_calls")).Where(x => x.ValueKind == JsonValueKind.Object).Select(t =>
-                {
-                    var fn = Field(t, "function");
-                    return new ToolFragment((int)Integer(Field(t, "index")), Text(Field(t, "id")), Text(Field(fn, "name")), Text(Field(fn, "arguments")), Field(fn, "name").ValueKind == JsonValueKind.String);
-                }).ToImmutableArray();
-                var legacy = Field(d, "function_call");
-                return new Choice(Text(Field(d, "reasoning_content")), Text(Field(d, "content")), Text(Field(d, "refusal")), tools, Text(Field(c, "finish_reason")),
-                    Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0){Index=(int)Integer(Field(c,"index"))};
-            }).ToImmutableArray(), usage);
+            return Parse(doc.RootElement);
         }
         catch (JsonException) { throw new ConversionFailure("invalid_json"); }
+    }
+    // The SSE reader hands over validated UTF-8; parse once and derive the
+    // typed chunk from the same document instead of transcoding to UTF-16.
+    public static ChatChunk Parse(ReadOnlyMemory<byte> payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 10000 });
+            return Parse(doc.RootElement);
+        }
+        catch (JsonException) { throw new ConversionFailure("invalid_json"); }
+    }
+    public static ChatChunk Parse(JsonElement root)
+    {
+        if (root.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) throw new ConversionFailure("invalid_json");
+        var error = Field(root, "error");
+        var obj = error.ValueKind == JsonValueKind.Object && (Code(Field(error, "code")) == "11128" || Field(root, "code").ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) ? error : root;
+        string code = Code(Field(obj, "code"));
+        ConversionFailure Failure(string failure) => new(failure) { RawUsageJson = Field(root, "usage").ValueKind == JsonValueKind.Object ? Field(root, "usage").GetRawText() : null };
+        if (code is "11128" or "11140" or "6004" or "14018" or "429") throw Failure(code);
+        if (error.ValueKind == JsonValueKind.Object)
+        {
+            string failure = Code(Field(error, "code"));
+            if (failure == "") failure = Text(Field(error, "code"));
+            if (failure.Length == 0 || failure.Length > 128 || failure.Any(char.IsControl)) failure = "upstream_error";
+            throw Failure(failure);
+        }
+        var u = Field(root, "usage");
+        UsageObservation? usage = null;
+        if (u.ValueKind == JsonValueKind.Object)
+        {
+            long cached = 0;
+            foreach (string key in new[] { "prompt_cache_hit_tokens", "cache_read_input_tokens", "cached_tokens" })
+                if (Token(Field(u, key)) is long n) { cached = n; if (n > 0) break; }
+            if (cached == 0)
+                foreach (string key in new[] { "prompt_tokens_details", "input_tokens_details" })
+                    if (Token(Field(Field(u, key), "cached_tokens")) is long n) { cached = n; if (n > 0) break; }
+            long input = Integer(Field(u, "prompt_tokens"));
+            cached = Math.Min(cached, input);
+            usage = new(new(input - cached, Integer(Field(u, "completion_tokens")), cached, Math.Max(0, Integer(Field(u, "cache_creation_input_tokens")))), u.GetRawText());
+        }
+        return new(Text(Field(root, "model")), Items(Field(root, "choices")).Where(x => x.ValueKind == JsonValueKind.Object).Select(c =>
+        {
+            var d = Field(c, "delta");
+            var tools = Items(Field(d, "tool_calls")).Where(x => x.ValueKind == JsonValueKind.Object).Select(t =>
+            {
+                var fn = Field(t, "function");
+                return new ToolFragment((int)Integer(Field(t, "index")), Text(Field(t, "id")), Text(Field(fn, "name")), Text(Field(fn, "arguments")), Field(fn, "name").ValueKind == JsonValueKind.String);
+            }).ToImmutableArray();
+            var legacy = Field(d, "function_call");
+            return new Choice(Text(Field(d, "reasoning_content")), Text(Field(d, "content")), Text(Field(d, "refusal")), tools, Text(Field(c, "finish_reason")),
+                Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0){Index=(int)Integer(Field(c,"index"))};
+        }).ToImmutableArray(), usage);
     }
     static string Code(JsonElement e) => e.ValueKind == JsonValueKind.String && uint.TryParse(Text(e), NumberStyles.None, CultureInfo.InvariantCulture, out uint v) ? v.ToString(CultureInfo.InvariantCulture) :
         e.ValueKind == JsonValueKind.Number && e.TryGetDouble(out double n) && n is >= 0 and <= 999999999 && n == Math.Truncate(n) ? n.ToString("0", CultureInfo.InvariantCulture) : "";

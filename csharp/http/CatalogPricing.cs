@@ -14,7 +14,8 @@ public sealed partial class ModelCatalog
     readonly Dictionary<(AccountSite Site,string Model),RateObservation> observations=[];
     AccountPool? schedulingPool;
     long revision,persistedRevision;
-    string publishedRevision="";
+    bool pricingDirty;long nextBoundary,lastPublishAt;
+    const long PricingDebounceMs=1000;
     internal long Revision {get{lock(publish)return revision;}}
     internal bool NeedsSave {get{lock(publish)return revision!=persistedRevision;}}
     internal void MarkSaved(long version){lock(publish)persistedRevision=Math.Max(persistedRevision,version);}
@@ -30,11 +31,12 @@ public sealed partial class ModelCatalog
     {
         var entries=sample.Probe?probeObservations:observations;var key=(sample.Site,DisplayId(sample.Site,sample.Model));
         if(entries.TryGetValue(key,out var previous)&&previous.At>sample.At||entries.Count>=1000&&!entries.ContainsKey(key))return;
-        entries[key]=sample with{Model=key.Item2};revision++;
+        entries[key]=sample with{Model=key.Item2};revision++;pricingDirty=true;
     }
+    // Cheap snapshot for display/tests: no promotion or observation scan.
     internal string RateRevision
     {
-        get{lock(publish){long now=clock.GetUtcNow().ToUnixTimeMilliseconds();long boundary=state.Cn.Concat(state.Intl).SelectMany(r=>r.Promotions??[]).SelectMany(p=>new[]{p.From,p.Until}).Concat(observations.Values.Concat(probeObservations.Values).Select(e=>e.FreeUntil)).Where(x=>x>0&&x<=now).DefaultIfEmpty().Max();return revision.ToString(CultureInfo.InvariantCulture)+":"+boundary.ToString(CultureInfo.InvariantCulture);}}
+        get{lock(publish)return revision.ToString(CultureInfo.InvariantCulture)+":"+nextBoundary.ToString(CultureInfo.InvariantCulture);}
     }
     Row? Find(AccountSite site,string id)=>(site==AccountSite.Cn?state.Cn:state.Intl).FirstOrDefault(r=>r.Id==DisplayId(site,id));
     (double? Value,long Changed) CatalogRate(Row? row,long now)
@@ -81,29 +83,34 @@ public sealed partial class ModelCatalog
         var recovered=pool.Snapshots();
         lock(publish)
         {
-            schedulingPool=pool;publishedRevision="";
+            schedulingPool=pool;
             foreach(var a in recovered.Where(a=>!a.Disabled))foreach(var (model,s) in a.Models??new Dictionary<string,AccountModelState>())
                 if(s.Cost!=ModelCost.Unknown&&s.ObservedAt>default(DateTimeOffset)&&!observations.ContainsKey((a.Site,DisplayId(a.Site,model))))
                     StoreObservation(new(a.Site,model,s.Cost,s.ObservedAt.ToUnixTimeMilliseconds(),Restored:true,FreeUntil:FreeUntil(a.Site,model,s.ObservedAt.ToUnixTimeMilliseconds())));
-            PublishPricing();
+            PublishPricing(force:true);
         }
     }
     long FreeUntil(AccountSite site,string id,long at)=>Find(site,id)?.Promotions?.Where(p=>p.Enabled&&p.Until>at).Select(p=>p.Until).DefaultIfEmpty().Min()??0;
     public void ObserveProbeCost(AccountSite site,string model,ModelCost cost,long at=0,long freeUntil=0)
     {
         if(cost==ModelCost.Unknown)return;
-        lock(publish){long stamp=checked(at*1000);StoreObservation(new(site,model,cost,stamp,true,freeUntil>0?freeUntil*1000:cost==ModelCost.Free?FreeUntil(site,model,stamp):0));PublishPricing();}
+        lock(publish){long stamp=checked(at*1000);StoreObservation(new(site,model,cost,stamp,true,freeUntil>0?freeUntil*1000:cost==ModelCost.Free?FreeUntil(site,model,stamp):0));}
     }
     internal long ProbeFreeUntil(AccountSite site,string id,long at){lock(publish)return FreeUntil(site,id,at*1000)/1000;}
     internal void ObserveUsage(AccountSite site,string model,string? raw)
     {
-        var cost=ModelObservations.Cost(raw);if(cost==ModelCost.Unknown)return;
-        using var doc=JsonDocument.Parse(raw!);var root=doc.RootElement;
-        double? credit=root.TryGetProperty("credit",out var c)&&Number(c,out var n)?n:null;
-        long tokens=0;
-        if(root.TryGetProperty("total_tokens",out var total)&&Number(total,out var t))tokens=t>=long.MaxValue?long.MaxValue:(long)t;
-        else foreach(string key in new[]{"prompt_tokens","completion_tokens"})if(root.TryGetProperty(key,out var e)&&Number(e,out var v))tokens=v>=long.MaxValue-tokens?long.MaxValue:tokens+(long)v;
-        lock(publish){long at=clock.GetUtcNow().ToUnixTimeMilliseconds();StoreObservation(new(site,model,cost,at,FreeUntil:cost==ModelCost.Free?FreeUntil(site,model,at):0,Credit:credit,Tokens:tokens));PublishPricing();}
+        if(raw is null||raw.Length>65536)return;
+        try
+        {
+            using var doc=JsonDocument.Parse(raw);var root=doc.RootElement;
+            var cost=ModelObservations.Cost(root);if(cost==ModelCost.Unknown)return;
+            double? credit=root.TryGetProperty("credit",out var c)&&Number(c,out var n)?n:null;
+            long tokens=0;
+            if(root.TryGetProperty("total_tokens",out var total)&&Number(total,out var t))tokens=t>=long.MaxValue?long.MaxValue:(long)t;
+            else foreach(string key in new[]{"prompt_tokens","completion_tokens"})if(root.TryGetProperty(key,out var e)&&Number(e,out var v))tokens=v>=long.MaxValue-tokens?long.MaxValue:tokens+(long)v;
+            lock(publish){long at=clock.GetUtcNow().ToUnixTimeMilliseconds();StoreObservation(new(site,model,cost,at,FreeUntil:cost==ModelCost.Free?FreeUntil(site,model,at):0,Credit:credit,Tokens:tokens));}
+        }
+        catch(JsonException){/* Usage evidence never changes settlement. */}
     }
     IEnumerable<(AccountSite Site,string Id)> RateKeys()=>state.Cn.Select(r=>(AccountSite.Cn,r.Id)).Concat(state.Intl.Select(r=>(AccountSite.Intl,r.Id))).Concat(observations.Keys).Concat(probeObservations.Keys).Distinct();
     public object PriceDetails()
@@ -127,18 +134,54 @@ public sealed partial class ModelCatalog
         }
     }
     static object? Evidence(RateObservation? e)=>e is null?null:new Dictionary<string,object?>{["updatedAt"]=e.At/1000,["class"]=e.Cost.ToString().ToLowerInvariant(),["credit"]=e.Credit,["tokens"]=e.Tokens,["freeUntil"]=e.FreeUntil/1000,["restored"]=e.Restored};
-    public void RefreshPricing(){lock(publish)PublishPricing();}
-    void PublishPricing()
+    // Observations only mark the policy stale. The per-request refresh coalesces
+    // them into at most one rebuild per second, and an expired promotion boundary
+    // publishes immediately even when no new observation arrived.
+    public void RefreshPricing()
     {
-        if(schedulingPool is null||publishedRevision==RateRevision)return;
-        var rules=new Dictionary<string,ModelPolicy>();long now=clock.GetUtcNow().ToUnixTimeMilliseconds();
+        lock(publish)
+        {
+            if(schedulingPool is null)return;
+            long now=clock.GetUtcNow().ToUnixTimeMilliseconds();
+            bool boundary=nextBoundary>0&&now>=nextBoundary;
+            if(!pricingDirty&&!boundary)return;
+            if(pricingDirty&&!boundary&&now-lastPublishAt<PricingDebounceMs)return;
+            PublishPricing();
+        }
+    }
+    void PublishPricing(bool force=false)
+    {
+        if(schedulingPool is null)return;
+        long now=clock.GetUtcNow().ToUnixTimeMilliseconds();
+        if(!force)
+        {
+            bool boundary=nextBoundary>0&&now>=nextBoundary;
+            if(!pricingDirty&&!boundary)return;
+        }
+        var rules=new Dictionary<string,ModelPolicy>();
         foreach(string id in RateKeys().Select(k=>k.Id).Distinct())
         {
             var free=new HashSet<AccountSite>();var paid=new HashSet<AccountSite>();
             foreach(var site in new[]{AccountSite.Cn,AccountSite.Intl}){var cost=Resolve(site,id,now).Cost;if(cost==ModelCost.Free)free.Add(site);if(cost==ModelCost.Paid)paid.Add(site);}
             rules[id]=new(FreeSites:free,PaidSites:paid);
         }
-        schedulingPool.SetCatalogPolicies(rules);publishedRevision=RateRevision;
+        schedulingPool.SetCatalogPolicies(rules);
+        pricingDirty=false;lastPublishAt=now;nextBoundary=NextBoundary(now);
+    }
+    long NextBoundary(long now)
+    {
+        long next=0;
+        void Consider(long at){if(at>now&&(next==0||at<next))next=at;}
+        foreach(var row in state.Cn)ConsiderRow(row);
+        foreach(var row in state.Intl)ConsiderRow(row);
+        foreach(var sample in observations.Values)Consider(sample.FreeUntil);
+        foreach(var sample in probeObservations.Values)Consider(sample.FreeUntil);
+        return next;
+        void ConsiderRow(Row row)
+        {
+            if(row.Promotions is not{Length:>0} promotions)return;
+            foreach(var promotion in promotions){Consider(promotion.From);Consider(promotion.Until);}
+        }
     }
     public string[] ModelIds()=>Volatile.Read(ref state).Cn.Concat(Volatile.Read(ref state).Intl).Select(r=>r.Id).Distinct().Where(Allows).ToArray();
     public bool NeedsProbe(AccountSite site,string id,bool requested)
