@@ -38,7 +38,9 @@ public sealed class LedgerFiles : ILedgerFiles
         string path = PathOf(name), temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, Options = FileOptions.WriteThrough };
+            // Durability comes from Flush(true); WriteThrough would make the
+            // same write synchronous twice (O_SYNC on Unix) for no extra safety.
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
             if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
             using (var file = new FileStream(temp, options)) { file.Write(bytes); file.Flush(true); }
             File.Move(temp, path, true);
@@ -49,7 +51,8 @@ public sealed class LedgerFiles : ILedgerFiles
     {
         if (wal is null)
         {
-            var options = new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.Write, Share = FileShare.Read, Options = FileOptions.WriteThrough };
+            // Buffered write; Sync() below still fsyncs before any state is applied.
+            var options = new FileStreamOptions { Mode = FileMode.OpenOrCreate, Access = FileAccess.Write, Share = FileShare.Read };
             if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
             wal = new FileStream(PathOf(CreditLedger.WalName), options); wal.Seek(0, SeekOrigin.End);
         }
