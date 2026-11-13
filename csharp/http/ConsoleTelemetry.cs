@@ -18,7 +18,8 @@ public sealed partial class ConsoleTelemetry
     const int Limit=20000,FileLimit=16<<20,SnapshotEvery=4096;
     readonly object sync=new(),disk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
     readonly List<HistoryLogEntry> historyPending=[];
-    long logSeq,savedLogSeq;
+    long logSeq,savedLogSeq,repairLength=-1;
+    internal Func<string,Stream>? HistoryLogStreamFactory;
     readonly Queue<(long At,string Trace,object Data)> traces=new();volatile Dictionary<string,ConsoleAccount> accounts=new(StringComparer.Ordinal);
     public void RefreshAccounts(IEnumerable<ConsoleAccount> current)
     {lock(sync){var next=new Dictionary<string,ConsoleAccount>(accounts,StringComparer.Ordinal);foreach(var item in current){ValidateAccount(item);if(next.GetValueOrDefault(item.Id)!=item){next[item.Id]=item;revision++;}}accounts=next;}}
@@ -173,21 +174,45 @@ public sealed partial class ConsoleTelemetry
         if(settings.DirectoryPath is not{} directory||Storage=="invalid")return false;
         lock(disk)
         {
-            List<HistoryLogEntry> batch;
-            lock(sync){if(historyPending.Count==0)return true;batch=[..historyPending];historyPending.Clear();}
+            string path=Path.Combine(directory,"history.jsonl");
             try
             {
-                string path=Path.Combine(directory,"history.jsonl");ConsoleSettings.CheckLink(path);
-                using var log=new FileStream(path,FileMode.Append,FileAccess.Write,FileShare.Read,65536,FileOptions.SequentialScan);
-                foreach(var entry in batch){byte[] line=JsonSerializer.SerializeToUtf8Bytes(entry,HistoryJson.Default.HistoryLogEntry);log.Write(line);log.WriteByte((byte)'\n');}
-                log.Flush(false);WriteFailed=false;return true;
+                ConsoleSettings.CheckLink(path);
+                if(repairLength>=0)
+                {
+                    if(!TryTruncate(path,repairLength)){WriteFailed=true;return false;}
+                    repairLength=-1;
+                }
+                List<HistoryLogEntry> batch;
+                lock(sync){if(historyPending.Count==0)return true;batch=[..historyPending];historyPending.Clear();}
+                long start=-1;
+                try
+                {
+                    using var log=HistoryLogStreamFactory?.Invoke(path)??new FileStream(path,FileMode.OpenOrCreate,FileAccess.Write,FileShare.Read,65536,FileOptions.SequentialScan);
+                    log.Seek(0,SeekOrigin.End);start=log.Length;
+                    foreach(var entry in batch){byte[] line=JsonSerializer.SerializeToUtf8Bytes(entry,HistoryJson.Default.HistoryLogEntry);log.Write(line);log.WriteByte((byte)'\n');}
+                    if(log is FileStream fileStream)fileStream.Flush(false);else log.Flush();
+                    WriteFailed=false;return true;
+                }
+                catch(Exception e) when(e is IOException or UnauthorizedAccessException or JsonException)
+                {
+                    if(start>=0&&TryTruncate(path,start))repairLength=-1;else if(start>=0)repairLength=start;
+                    lock(sync){historyPending.InsertRange(0,batch);while(historyPending.Count>8192)historyPending.RemoveAt(0);}
+                    WriteFailed=true;return false;
+                }
             }
-            catch(Exception e) when(e is IOException or UnauthorizedAccessException or JsonException)
-            {
-                lock(sync){historyPending.InsertRange(0,batch);while(historyPending.Count>8192)historyPending.RemoveAt(0);}
-                WriteFailed=true;return false;
-            }
+            catch(Exception e) when(e is IOException or UnauthorizedAccessException)
+            {WriteFailed=true;return false;}
         }
+    }
+    static bool TryTruncate(string path,long length)
+    {
+        try
+        {
+            using var file=new FileStream(path,FileMode.OpenOrCreate,FileAccess.Write,FileShare.Read);
+            file.SetLength(length);file.Flush(true);return true;
+        }
+        catch(Exception e) when(e is IOException or UnauthorizedAccessException){return false;}
     }
     public bool Save()
     {
