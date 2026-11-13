@@ -36,7 +36,7 @@ public static class OpenAiPump
             try
             {
                 if (request.Stream && responses is not null) foreach (var e in responses.Start()) await Send(Frame(e, true));
-                while (await reader.NextPayloadAsync(cancellation) is { } payload)
+                while (await reader.NextPayloadBytesAsync(cancellation) is { } payload)
                 {
                     bool hadOutput=state.ReceivedOutput;var (raw, chunk) = state.Feed(payload);
                     if(!hadOutput&&state.ReceivedOutput)firstOutput?.Invoke();

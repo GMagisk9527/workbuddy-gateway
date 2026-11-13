@@ -13,7 +13,7 @@ internal static class RestrictionProbe
         {
             for(int i=0;i<64;i++)
             {
-                string? payload=await reader.NextPayloadAsync(cancellation);
+                byte[]? payload=await reader.NextPayloadBytesAsync(cancellation);
                 if(payload is null) break;
                 // Rejection frames may themselves contain measured usage.
                 try { using var d=System.Text.Json.JsonDocument.Parse(payload); if(d.RootElement.ValueKind==System.Text.Json.JsonValueKind.Object && d.RootElement.TryGetProperty("usage",out var u) && u.ValueKind==System.Text.Json.JsonValueKind.Object) { usage=u.GetRawText(); observeUsage?.Invoke(usage); } } catch(System.Text.Json.JsonException) { }
