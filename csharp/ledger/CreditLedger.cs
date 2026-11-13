@@ -29,12 +29,11 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     readonly Queue<string> resolvedOrder = [];
     readonly Queue<LedgerEntry> pendingWrites = [];
     readonly HashSet<string> submitted = [];
-    Thread? flusher;
     DiskState state = new(1);
     long seq;
     long appliedSeq;
     int writes;
-    bool stopping, flushActive, disposed;
+    bool flushActive, disposed;
     volatile bool failed;
     // Compaction rewrites snapshot/state and truncates the WAL under the gate.
     // A larger batch keeps the occasional multi-file fsync off the hot path;
@@ -46,8 +45,6 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     {
         this.files = files; this.clock = clock ?? TimeProvider.System;
         try { Load((knownKeys ?? []).ToHashSet(StringComparer.Ordinal)); } catch { files.Dispose(); throw; }
-        flusher = new Thread(FlushLoop) { IsBackground = true, Name = "ledger-flusher" };
-        flusher.Start();
     }
     public static CreditLedger Open(string directory, IEnumerable<string>? knownKeys = null, TimeProvider? clock = null) => new(new LedgerFiles(directory), knownKeys, clock);
     void EnsureOpen() { if (disposed) throw new ObjectDisposedException(nameof(CreditLedger)); }
@@ -151,12 +148,12 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
         if (entry.Kind == "recovery" && entry.Key.Length == 0) { state = state with { Incomplete = true }; return; }
         usage[entry.Key] = NextUsage(entry)!;
     }
-    // One flusher thread fsyncs all rows submitted since the previous batch and
-    // then applies them in sequence order. Callers still block until their own
+    // Concurrent submitters elect one leader to fsync all rows written so far,
+    // then apply them in sequence order. Callers still block until their own
     // row is durable, so Begin keeps its "durable before upstream" contract.
     void Submit(LedgerEntry template, LedgerAttempt? attempt, out long target)
     {
-        target = 0;
+        target = 0; bool leader = false;
         lock (gate)
         {
             RequireHealthy();
@@ -174,15 +171,56 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
             { Fault(); throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求"); }
             seq = entry.Seq; pendingWrites.Enqueue(entry);
             if (attempt is not null) submitted.Add(attempt.Id);
-            if (!flushActive) { flushActive = true; Monitor.PulseAll(gate); }
             target = entry.Seq;
+            if (!flushActive) { flushActive = true; leader = true; }
         }
-        lock (waitGate)
+        if (leader) Lead(target);
+        while (true)
         {
-            while (appliedSeq < target)
+            lock (waitGate)
             {
+                if (appliedSeq >= target) return;
                 if (failed || blocked) throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求");
-                Monitor.Wait(waitGate);
+                Monitor.Wait(waitGate, 20);
+                if (appliedSeq >= target) return;
+                if (failed || blocked) throw new KeyFailure(503, "ledger_unavailable", "账本写入失败，未发布结算，已暂停请求");
+            }
+            long next = 0; bool take = false;
+            lock (gate)
+            {
+                if (!flushActive && appliedSeq < target)
+                { flushActive = true; take = true; next = pendingWrites.Count > 0 ? pendingWrites.Last().Seq : seq; }
+            }
+            if (take) Lead(next);
+        }
+    }
+    void Lead(long target)
+    {
+        bool ok = true;
+        try { lock (ioGate) files.Sync(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or OverflowException) { ok = false; }
+        lock (gate)
+        {
+            if (ok)
+            {
+                while (pendingWrites.Count > 0 && pendingWrites.Peek().Seq <= target)
+                {
+                    var entry = pendingWrites.Dequeue();
+                    try { Apply(entry); }
+                    catch (InvalidDataException) { ok = false; failed = true; Fault(); break; }
+                    appliedSeq = entry.Seq; writes++;
+                    if (entry.Attempt is { Length: > 0 } attempt) submitted.Remove(attempt);
+                }
+            }
+            else { failed = true; Fault(); }
+            flushActive = false;
+            lock (waitGate) Monitor.PulseAll(waitGate);
+            Monitor.PulseAll(gate);
+            if (ok && writes >= CompactEvery && pendingWrites.Count == 0)
+            {
+                try { CompactLocked(); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { failed = true; Fault(); }
+                catch (KeyFailure) { failed = true; }
             }
         }
     }
@@ -221,55 +259,13 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
         while (appliedSeq < seq || pendingWrites.Count > 0)
         {
             if (failed || blocked) throw new KeyFailure(503, "ledger_unavailable", "记账存储不可用，已暂停请求");
-            if (!flushActive) { flushActive = true; Monitor.PulseAll(gate); }
-            Monitor.Wait(gate);
+            Monitor.Wait(gate, 50);
         }
     }
     public void Reset(string key)
     {
         Submit(new(0, key, Kind: "reset", At: clock.GetUtcNow().ToUnixTimeMilliseconds()), null, out _);
         Compact();
-    }
-    void FlushLoop()
-    {
-        while (true)
-        {
-            long target;
-            lock (gate)
-            {
-                while (!stopping && !flushActive) Monitor.Wait(gate);
-                if (stopping) return;
-                flushActive = false;
-                target = pendingWrites.Count > 0 ? pendingWrites.Last().Seq : seq;
-            }
-            bool ok = true;
-            try { lock (ioGate) files.Sync(); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException or OverflowException) { ok = false; }
-            lock (gate)
-            {
-                if (ok)
-                {
-                    while (pendingWrites.Count > 0 && pendingWrites.Peek().Seq <= target)
-                    {
-                        var entry = pendingWrites.Dequeue();
-                        try { Apply(entry); }
-                        catch (InvalidDataException) { ok = false; failed = true; Fault(); break; }
-                        appliedSeq = entry.Seq; writes++;
-                        if (entry.Attempt is { Length: > 0 } attempt) submitted.Remove(attempt);
-                    }
-                }
-                else { failed = true; Fault(); }
-                lock (waitGate) Monitor.PulseAll(waitGate);
-                if (ok && writes >= CompactEvery && pendingWrites.Count == 0)
-                {
-                    try { CompactLocked(); }
-                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { failed = true; Fault(); }
-                    catch (KeyFailure) { failed = true; }
-                }
-                if (pendingWrites.Count > 0) flushActive = true;
-                Monitor.PulseAll(gate);
-            }
-        }
     }
     void CompactLocked()
     {
@@ -296,8 +292,7 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     }
     public void Dispose()
     {
-        lock (gate) { if (disposed) return; disposed = true; stopping = true; Monitor.PulseAll(gate); }
-        try { flusher?.Join(TimeSpan.FromSeconds(30)); } catch (ThreadStateException) { }
+        lock (gate) { if (disposed) return; disposed = true; Monitor.PulseAll(gate); }
         lock (ioGate) files.Dispose();
     }
 }
