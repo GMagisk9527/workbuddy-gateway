@@ -19,7 +19,7 @@ public sealed partial class ConsoleTelemetry
     readonly object sync=new(),disk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
     readonly List<HistoryLogEntry> historyPending=[];
     long logSeq,savedLogSeq,repairLength=-1;
-    internal Func<string,Stream>? HistoryLogStreamFactory;
+    internal Func<string,Stream>? HistoryLogStreamFactory = null;
     readonly Queue<(long At,string Trace,object Data)> traces=new();volatile Dictionary<string,ConsoleAccount> accounts=new(StringComparer.Ordinal);
     public void RefreshAccounts(IEnumerable<ConsoleAccount> current)
     {lock(sync){var next=new Dictionary<string,ConsoleAccount>(accounts,StringComparer.Ordinal);foreach(var item in current){ValidateAccount(item);if(next.GetValueOrDefault(item.Id)!=item){next[item.Id]=item;revision++;}}accounts=next;}}
