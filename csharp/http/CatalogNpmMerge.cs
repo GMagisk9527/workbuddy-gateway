@@ -23,7 +23,7 @@ public sealed partial class ModelCatalog
             if(rows.Length>500)throw new ArgumentException("Merged catalog budget");
             foreach(var row in rows)Normalize(row);
             Stamp(rows,current);
-            Volatile.Write(ref state,site==AccountSite.Cn?state with{Cn=rows,CnLive=liveSucceeded}:state with{Intl=rows,IntlLive=liveSucceeded});revision++;PublishPricing(force:true);
+            Volatile.Write(ref state,site==AccountSite.Cn?state with{Cn=rows,CnLive=liveSucceeded}:state with{Intl=rows,IntlLive=liveSucceeded});revision++;PublishPricing();
         }
     }
 }

@@ -137,9 +137,6 @@ public static class OpenWire
         JsonValueKind.Null => null,
         _ => JsonValue.Create(own?e.Clone():e)
     };
-    // Materialize a node from an already parsed document without parsing the
-    // payload a second time (SSE chunks reuse the same JsonDocument).
-    internal static JsonNode? ToNode(JsonElement element)=>Deduplicate(element);
     public static string Model(JsonObject root)
     {
         var n = root["model"]; string model = !root.ContainsKey("model") || Text(n) == "" && n is JsonValue v && v.TryGetValue<string>(out _) ? "hy4-preview" : Text(n);

@@ -28,10 +28,6 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
     DiskState state = new(1);
     long seq;
     int writes;
-    // Compaction rewrites snapshot/state and truncates the WAL under the gate.
-    // A larger batch keeps the occasional multi-file fsync off the hot path;
-    // replaying a few thousand WAL rows on restart remains bounded and cheap.
-    const int CompactEvery = 4096;
     bool blocked, disposed;
 
     public CreditLedger(ILedgerFiles files, IEnumerable<string>? knownKeys = null, TimeProvider? clock = null)
@@ -176,7 +172,7 @@ public sealed partial class CreditLedger : IKeyAccounting, IDisposable
             Append(new(checked(seq + 1), attempt.Key, attempt.Id, Credit: observed.Credit, Known: observed.Kind == SettlementKind.Charged,
                 Zero: observed.Kind == SettlementKind.Zero, Unknown: observed.Kind == SettlementKind.Unknown, At: clock.GetUtcNow().ToUnixTimeMilliseconds(), DayKey: window.Day, MonthKey: window.Month,
                 Input: observed.Input, Output: observed.Output, Cached: observed.Cached, Status: status));
-            if (writes >= CompactEvery) Compact(); return observed.Kind;
+            if (writes >= 256) Compact(); return observed.Kind;
         }
     }
     public SettlementKind CancelUncharged(LedgerAttempt attempt)

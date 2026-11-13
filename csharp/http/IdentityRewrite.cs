@@ -321,16 +321,14 @@ internal static class IdentityRewrite
 {
     // Anthropic text blocks have independent opening prefixes. Apply the text
     // policy before the typed mapper concatenates them; retain all non-text blocks.
-    internal static InputRequest BeforeMap(InputRequest input,JsonElement root,IdentityOptions? options,bool omitLeadingSystemBlock)
+    internal static InputRequest BeforeMap(InputRequest input,JsonElement root,IdentityOptions? options)
     {
         var settings=IdentitySettings.Build(options);
         if(!settings.Enabled)return input;
         string? system=input.SystemText;
         if(root.TryGetProperty("system",out var rawSystem)&&rawSystem.ValueKind is JsonValueKind.String or JsonValueKind.Array)
         {
-            var rawContent = OutboundPreparation.V.From(rawSystem);
-            if (omitLeadingSystemBlock) rawContent.Arr.RemoveAt(0);
-            var message=OutboundPreparation.V.Object(("role",OutboundPreparation.V.Text("system")),("content",rawContent));
+            var message=OutboundPreparation.V.Object(("role",OutboundPreparation.V.Text("system")),("content",OutboundPreparation.V.From(rawSystem)));
             if(Apply([message],settings))
             {
                 var content=message.Get("content")!;

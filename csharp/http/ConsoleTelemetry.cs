@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using LedgerMigration;
@@ -11,14 +10,11 @@ namespace HttpMigration;
 public sealed record ConsoleRow(string Account,string Model,long At,int Status,bool Complete,long? TotalTokens,long? InputTokens,long? OutputTokens,long? CachedTokens,double? Credit,double LatencyMs,double? TtftMs,string Protocol="",string Trace="",string Code="",string TtftMetric="");
 public sealed record ConsoleAttempt(int Attempt,string Kind,int StatusCode,string BusinessCode,string Outcome,string FailureClass,double StartedMs,double? HeadersMs,double DurationMs);
 public sealed record ConsoleAccount(string Id,string File,string Edition);
-internal sealed record HistoryLogEntry(long Seq,ConsoleRow Row);
 
 public sealed partial class ConsoleTelemetry
 {
-    const int Limit=20000,FileLimit=16<<20,SnapshotEvery=4096;
+    const int Limit=20000,FileLimit=16<<20;
     readonly object sync=new(),disk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
-    readonly List<HistoryLogEntry> historyPending=[];
-    long logSeq,savedLogSeq;
     readonly Queue<(long At,string Trace,object Data)> traces=new();volatile Dictionary<string,ConsoleAccount> accounts=new(StringComparer.Ordinal);
     public void RefreshAccounts(IEnumerable<ConsoleAccount> current)
     {lock(sync){var next=new Dictionary<string,ConsoleAccount>(accounts,StringComparer.Ordinal);foreach(var item in current){ValidateAccount(item);if(next.GetValueOrDefault(item.Id)!=item){next[item.Id]=item;revision++;}}accounts=next;}}
@@ -32,7 +28,6 @@ public sealed partial class ConsoleTelemetry
     [JsonSerializable(typeof(ConsoleAccount[]))]
     [JsonSerializable(typeof(ConsoleRow[]))]
     [JsonSerializable(typeof(ConsoleRow))]
-    [JsonSerializable(typeof(HistoryLogEntry))]
     partial class HistoryJson : JsonSerializerContext { }
     public ConsoleTelemetry(ConsoleSettings settings,IEnumerable<ConsoleAccount> accounts,IReadOnlyDictionary<string,string>? legacyIdentities=null)
     {
@@ -40,46 +35,22 @@ public sealed partial class ConsoleTelemetry
         if(settings.DirectoryPath is not{} directory)return;
         try{requestLogs=new(directory,settings);}
         catch(Exception e)when(e is IOException or UnauthorizedAccessException or InvalidDataException){logInitializationFailed=true;}
-        string path=Path.Combine(directory,"history.json"),logPath=Path.Combine(directory,"history.jsonl");
+        string path=Path.Combine(directory,"history.json");
         try
         {
-            long snapshotSeq=0;bool snapshotLoaded=false;
             if(File.Exists(path))
             {
                 using var doc=JsonDocument.Parse(ConsoleSettings.Read(path,FileLimit));if(doc.RootElement.GetProperty("schema").GetInt32()!=1)throw new InvalidDataException();
-                if(doc.RootElement.TryGetProperty("logSeq",out var savedSeq)&&savedSeq.TryGetInt64(out long saved))snapshotSeq=saved;
                 var source=JsonSerializer.Deserialize(doc.RootElement.GetProperty("requests"), HistoryJson.Default.ConsoleRowArray)??[];if(source.Length>Limit)throw new InvalidDataException();foreach(var r in source)Validate(r);
                 var historical=doc.RootElement.TryGetProperty("accounts",out var savedAccounts)?JsonSerializer.Deserialize(savedAccounts, HistoryJson.Default.ConsoleAccountArray)??[]:[];
                 if(historical.Length>Limit)throw new InvalidDataException();var ids=new HashSet<string>(StringComparer.Ordinal);
                 foreach(var a in historical){ValidateAccount(a);if(!ids.Add(a.Id))throw new InvalidDataException();}
-                foreach(var a in historical)this.accounts.TryAdd(a.Id,a);foreach(var r in source)rows.Enqueue(r);Storage="file";snapshotLoaded=true;
+                foreach(var a in historical)this.accounts.TryAdd(a.Id,a);foreach(var r in source)rows.Enqueue(r);Storage="file";
             }
             else if(File.Exists(Path.Combine(directory,"history-seed.json")))ImportSeed(ConsoleSettings.Read(Path.Combine(directory,"history-seed.json"),64<<20),legacyIdentities??new Dictionary<string,string>());
-            else if(!File.Exists(logPath))Storage="file";
-            logSeq=savedLogSeq=snapshotSeq;
-            if(File.Exists(logPath))LoadHistoryLog(logPath,snapshotSeq);
-            else if(!snapshotLoaded&&Storage=="file")Storage="file";
+            else Storage="file";
         }
         catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException){Storage="invalid";WriteFailed=true;}
-    }
-    void LoadHistoryLog(string path,long snapshotSeq)
-    {
-        byte[] raw=ConsoleSettings.Read(path,64<<20);
-        string text=new UTF8Encoding(false,true).GetString(raw);
-        string[] lines=text.Split('\n');long highest=snapshotSeq;
-        for(int i=0;i<lines.Length;i++)
-        {
-            string line=lines[i].Trim();if(line.Length==0)continue;
-            HistoryLogEntry? entry=null;
-            try{entry=JsonSerializer.Deserialize(line,HistoryJson.Default.HistoryLogEntry);}
-            catch(JsonException) when(i==lines.Length-1){break;} // torn append
-            catch(JsonException){throw new InvalidDataException("Invalid history log");}
-            if(entry is null||entry.Seq<=highest)continue;
-            Validate(entry.Row);
-            while(rows.Count>=Limit)rows.Dequeue();
-            rows.Enqueue(entry.Row);highest=entry.Seq;
-        }
-        logSeq=savedLogSeq=highest;Storage="file";
     }
     static void Validate(ConsoleRow r)
     {
@@ -104,8 +75,6 @@ public sealed partial class ConsoleTelemetry
         Validate(row);lock(sync)
         {
             while(rows.Count>=Limit)rows.Dequeue();rows.Enqueue(row);revision++;
-            long seq=++logSeq;historyPending.Add(new(seq,row));
-            if(historyPending.Count>8192)historyPending.RemoveAt(0);
             string line=$"{DateTimeOffset.FromUnixTimeMilliseconds(row.At):O} trace={row.Trace} protocol={row.Protocol} model={row.Model} status={row.Status} result={(row.Complete?"complete":"failed")} code={row.Code} durationMs={row.LatencyMs:F1}";
             line+=streamDetails;
             AddLog(row.At,line);requestLogs?.Append(line,DateTimeOffset.FromUnixTimeMilliseconds(row.At));
@@ -135,53 +104,17 @@ public sealed partial class ConsoleTelemetry
             logs.Clear();logBytes=0;foreach(var entry in keep)AddLog(entry.At,entry.Line);return n;
         }
     }
-    internal bool NeedsSnapshot{get{lock(sync)return logSeq-savedLogSeq>=SnapshotEvery;}}
-    public bool FlushHistory()
-    {
-        if(settings.DirectoryPath is not{} directory||Storage=="invalid")return false;
-        lock(disk)
-        {
-            List<HistoryLogEntry> batch;
-            lock(sync){if(historyPending.Count==0)return true;batch=[..historyPending];historyPending.Clear();}
-            try
-            {
-                string path=Path.Combine(directory,"history.jsonl");ConsoleSettings.CheckLink(path);
-                using var log=new FileStream(path,FileMode.Append,FileAccess.Write,FileShare.Read,65536,FileOptions.SequentialScan);
-                foreach(var entry in batch){byte[] line=JsonSerializer.SerializeToUtf8Bytes(entry,HistoryJson.Default.HistoryLogEntry);log.Write(line);log.WriteByte((byte)'\n');}
-                log.Flush(false);WriteFailed=false;return true;
-            }
-            catch(Exception e) when(e is IOException or UnauthorizedAccessException or JsonException)
-            {
-                lock(sync){historyPending.InsertRange(0,batch);while(historyPending.Count>8192)historyPending.RemoveAt(0);}
-                WriteFailed=true;return false;
-            }
-        }
-    }
     public bool Save()
     {
         if(settings.DirectoryPath is not{} directory||Storage=="invalid")return false;
         lock(disk)
         {
-            if(!FlushHistory())return false;
-            long version;ConsoleRow[] snapshot;ConsoleAccount[] summaries;long seq;
-            lock(sync)
-            {
-                if(saved==revision&&savedLogSeq==logSeq)return true;
-                version=revision;snapshot=rows.ToArray();seq=logSeq;
-                var referenced=snapshot.Select(r=>r.Account).ToHashSet(StringComparer.Ordinal);
-                summaries=accounts.Values.OrderByDescending(a=>referenced.Contains(a.Id)).ThenBy(a=>a.Id,StringComparer.Ordinal).Take(Limit).ToArray();
-            }
-            try
-            {
-                ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),file=>WriteHistory(file,summaries,snapshot,seq),FileOptions.SequentialScan);
-                string logPath=Path.Combine(directory,"history.jsonl");ConsoleSettings.CheckLink(logPath);
-                using(var log=new FileStream(logPath,FileMode.Create,FileAccess.Write,FileShare.Read)){log.Flush(true);}
-                lock(sync){saved=version;savedLogSeq=seq;WriteFailed=false;Storage="file";}return true;
-            }
+            long version;ConsoleRow[] snapshot;ConsoleAccount[] summaries;lock(sync){if(saved==revision)return true;version=revision;snapshot=rows.ToArray();var referenced=snapshot.Select(r=>r.Account).ToHashSet(StringComparer.Ordinal);summaries=accounts.Values.OrderByDescending(a=>referenced.Contains(a.Id)).ThenBy(a=>a.Id,StringComparer.Ordinal).Take(Limit).ToArray();}
+            try{ConsoleSettings.Atomic(Path.Combine(directory,"history.json"),file=>WriteHistory(file,summaries,snapshot),FileOptions.SequentialScan);lock(sync){saved=version;WriteFailed=false;Storage="file";}return true;}
             catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException){WriteFailed=true;return false;}
         }
     }
-    void WriteHistory(FileStream file,ConsoleAccount[] summaries,ConsoleRow[] snapshot,long logSeq)
+    void WriteHistory(FileStream file,ConsoleAccount[] summaries,ConsoleRow[] snapshot)
     {
         const int flushThreshold=32<<10;
         var buffer=new ArrayBufferWriter<byte>(2*flushThreshold);
@@ -199,7 +132,6 @@ public sealed partial class ConsoleTelemetry
         writer.WriteStartObject();
         writer.WriteNumber("schema",1);
         writer.WriteNumber("startedAt",StartedAt);
-        writer.WriteNumber("logSeq",logSeq);
         writer.WriteStartArray("accounts");
         foreach (var account in summaries)
         {
@@ -312,9 +244,8 @@ internal sealed class ConsoleTrace(ConsoleTelemetry owner,string protocol,string
 
 internal sealed class ConsoleHistoryWorker(ConsoleTelemetry telemetry,ScheduledTaskJournal? tasks=null,ModelCatalog? catalog=null,CatalogCache? cache=null):BackgroundService,IHostedLifecycleService
 {
-    void Flush(){telemetry.FlushHistory();if(telemetry.NeedsSnapshot)telemetry.Save();tasks?.Save();if(cache is not null&&catalog?.NeedsSave==true)cache.TrySave(catalog);}
     void Save(){telemetry.Save();tasks?.Save();if(cache is not null&&catalog?.NeedsSave==true)cache.TrySave(catalog);}
-    protected override async Task ExecuteAsync(CancellationToken token){using var timer=new PeriodicTimer(TimeSpan.FromSeconds(5));while(await timer.WaitForNextTickAsync(token))await Task.Run(Flush,CancellationToken.None);}
+    protected override async Task ExecuteAsync(CancellationToken token){using var timer=new PeriodicTimer(TimeSpan.FromSeconds(5));while(await timer.WaitForNextTickAsync(token))await Task.Run(Save,CancellationToken.None);}
     public Task StartingAsync(CancellationToken token)=>Task.CompletedTask;public Task StartedAsync(CancellationToken token)=>Task.CompletedTask;public Task StoppingAsync(CancellationToken token)=>Task.CompletedTask;
     public Task StoppedAsync(CancellationToken token){Save();return Task.CompletedTask;}
 }

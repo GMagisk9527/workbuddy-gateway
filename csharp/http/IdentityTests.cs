@@ -157,34 +157,6 @@ internal static class IdentityTests
         byte[] anthropicCode=JsonSerializer.SerializeToUtf8Bytes(new{model="m",system=new[]{new{type="text",text="`open"},new{type="text",text="Claude Code\nclose`"}},messages=new[]{new{role="user",content="hello"}}});
         Check(SystemContent(Encoding.UTF8.GetString(MessagesRequestAdapter.Prepare(anthropicCode,Program.TestKey,prompts:new(Identity:named)).UpstreamBody))=="`open\nClaude Code\nclose`","Anthropic pre-merge processing protects cross-block code spans");
 
-        const string attribution = "x-anthropic-billing-header: cc_version=2.1.322.native; cc_entrypoint=cli; cch=36ee5;";
-        PreparedMessages ConvertAttribution(params string[] system) => MessagesRequestAdapter.Prepare(
-            JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                model = "m",
-                system = system.Select(text => new { type = "text", text }),
-                messages = new[] { new { role = "user", content = attribution } },
-                tools = new[] { new { name = "inspect", description = attribution, input_schema = new { type = "object" } } }
-            }), Program.TestKey, prompts: new(Identity: named));
-
-        var clean = ConvertAttribution(ccSentence);
-        var withAttribution = ConvertAttribution(attribution, ccSentence);
-        Check(withAttribution.UpstreamBody.SequenceEqual(clean.UpstreamBody),
-            "Messages drops the leading client attribution block before prompt normalization");
-        Check(ConvertAttribution(attribution.Replace("36ee5", "00000", StringComparison.Ordinal) + " cc_workload=terminal;", ccSentence)
-            .UpstreamBody.SequenceEqual(clean.UpstreamBody), "Client attribution nonce and workload do not change the outgoing prefix");
-        Check(ConvertAttribution(attribution).UpstreamBody.SequenceEqual(ConvertAttribution().UpstreamBody),
-            "A lone attribution block does not create an empty system message");
-        Check(Content(Encoding.UTF8.GetString(withAttribution.UpstreamBody), 1) == attribution,
-            "User messages preserve attribution-like text");
-        using (var attributionDoc = JsonDocument.Parse(withAttribution.UpstreamBody))
-            Check(attributionDoc.RootElement.GetProperty("tools")[0].GetProperty("function").GetProperty("description").GetString() == attribution,
-                "Tool descriptions preserve attribution-like text");
-        Check(SystemContent(Encoding.UTF8.GetString(ConvertAttribution("Keep these rules.", attribution).UpstreamBody)) == "Keep these rules.\n" + attribution,
-            "Attribution-like text in a later system block is retained");
-        Check(SystemContent(Encoding.UTF8.GetString(ConvertAttribution(attribution + "\nKeep these rules.").UpstreamBody)) == attribution + "\nKeep these rules.",
-            "A block containing real instructions is retained");
-
         using (var restoreDoc=JsonDocument.Parse(SysJson("You are an AI agent powered by DeepSeek Harness. Continue.")))
         {
             var restorePlan=ResponseIdentityFactory.Create(restoreDoc.RootElement,new IdentityOptions(Target:"WorkBuddy",ResponseRestore:true));

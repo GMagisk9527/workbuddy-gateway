@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using StreamingMigration;
 using static OpenAiProtocols.OpenWire;
@@ -32,19 +31,12 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     {
         int bytes = Encoding.UTF8.GetByteCount(value); if (bytes > limit - retained) throw new ConversionFailure("output_budget_exceeded");budget?.Add(bytes); retained += bytes;
     }
-    public (JsonObject Raw, ChatChunk Chunk) Feed(string payload)=>Feed(Encoding.UTF8.GetBytes(payload));
-    public (JsonObject Raw, ChatChunk Chunk) Feed(ReadOnlyMemory<byte> payload)
+    public (JsonObject Raw, ChatChunk Chunk) Feed(string payload)
     {
         Changes.Clear();
-        JsonDocument document;
-        try { document=JsonDocument.Parse(payload,new JsonDocumentOptions{MaxDepth=10000}); }
-        catch(JsonException){ throw new OpenAiFailure("invalid_json","无效的 JSON 请求体"); }
-        using(document)
-        {
-        var root=document.RootElement;
-        var raw = root.ValueKind==JsonValueKind.Null ? new JsonObject() : (JsonObject)ToNode(root)!;
+        var raw = payload.Trim() == "null" ? new JsonObject() : Parse(Encoding.UTF8.GetBytes(payload));
         if (raw["usage"] is JsonObject evidence) { Reserve(evidence.ToJsonString()); Usage = (JsonObject)evidence.DeepClone(); }
-        var parsed = ChunkReader.Parse(root); ReceivedOutput |= parsed.HasOutput;
+        var parsed = ChunkReader.Parse(payload); ReceivedOutput |= parsed.HasOutput;
         if (responseRestore is { Active: true })
         { ResponseIdentityWire.Apply(raw, responseRestore, restorers); parsed = ChunkReader.Parse(raw.ToJsonString()); }
         if (Text(raw["id"]) != "") Id = Text(raw["id"]);
@@ -81,7 +73,6 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
             }
         }
         return (raw, parsed);
-        }
     }
     public void Validate()
     {

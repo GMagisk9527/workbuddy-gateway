@@ -118,7 +118,7 @@ public sealed partial class ModelCatalog
         var next=new State(Site("cn"),Site("intl"));
         var evidence=root.TryGetProperty("observations",out var saved)?JsonSerializer.Deserialize(saved,CatalogJson.Default.RateObservationArray)??[]:[];
         ValidateObservations(evidence);
-        lock(publish){Volatile.Write(ref state,next);foreach(var e in evidence)StoreObservation(e);revision++;persistedRevision=revision;PublishPricing(force:true);} // Invalid reloads never publish a half catalog.
+        lock(publish){Volatile.Write(ref state,next);foreach(var e in evidence)StoreObservation(e);revision++;persistedRevision=revision;PublishPricing();} // Invalid reloads never publish a half catalog.
     }
     static void Normalize(Row r)
     {
@@ -151,7 +151,7 @@ public sealed partial class ModelCatalog
             var s=Volatile.Read(ref state);
             Stamp(rows,site==AccountSite.Cn?s.Cn:s.Intl);
             Volatile.Write(ref state,site==AccountSite.Cn?s with{Cn=rows.ToArray(),CnLive=true}:s with{Intl=rows.ToArray(),IntlLive=true});
-            revision++;PublishPricing(force:true);
+            revision++;PublishPricing();
         }
     }
     static Capability Cap(Row r)=>new(r.MaxInputTokens>0?r.MaxInputTokens:r.MaxAllowedSize,r.MaxOutputTokens,r.ContextDefaultLength,r.ContextLengths??[]);
