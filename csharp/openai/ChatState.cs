@@ -14,7 +14,7 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     }
     readonly Dictionary<int, Tool> tools = [];
     readonly Dictionary<(int Choice, string Channel), ResponseIdentityRestorer> restorers = [];
-    public sealed record ToolChange(int Choice, int Index, string Id, string Name, string Arguments, string Accumulated);
+    public sealed record ToolChange(int Choice, int Index, string Id, string Name, string Arguments, int AccumulatedLength);
     public List<ToolChange> Changes { get; } = [];
     public List<Tool> Calls { get; } = [];
     public StringBuilder Content { get; } = new();
@@ -78,12 +78,16 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
                     Reserve(arguments); tool.Arguments.Append(arguments);
                     if ((tool.Id == "" || tool.Name == "") && tool.Arguments.Length > 1 << 20) throw new ConversionFailure("pending_tool_limit");
                 }
-                Changes.Add(new(choiceIndex, index, tool.Id, tool.Name, fragment["function"] is JsonObject function ? Text(function["arguments"]) : "", tool.Arguments.ToString()));
+                // Only the first Responses delta needs the accumulated prefix.
+                // Capture its boundary, including when this tool appears again
+                // in the same chunk, without copying every preceding fragment.
+                Changes.Add(new(choiceIndex, index, tool.Id, tool.Name, fragment["function"] is JsonObject function ? Text(function["arguments"]) : "", tool.Arguments.Length));
             }
         }
         return (raw, parsed);
         }
     }
+    internal string ArgumentsThrough(ToolChange change) => tools[change.Index].Arguments.ToString(0, change.AccumulatedLength);
     public void Validate()
     {
         if (FinishReason == "") throw new ConversionFailure("stream_closed_without_finish");

@@ -142,6 +142,7 @@ internal static class StreamTests
             var request = ResponsesRequestAdapter.Prepare(Encoding.UTF8.GetBytes("{\"model\":\"m\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"a\",\"output\":[{\"type\":\"input_text\",\"text\":\"ok\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AA==\"}]}]}"), Program.Key);
             var body = JsonNode.Parse(request.Body)!; Check(body["messages"]!.AsArray().Count == 2 && OpenWire.Text(body["messages"]![0]!["content"]) == "ok" && OpenWire.Text(body["messages"]![1]!["role"]) == "user", "image promotion"); return Task.CompletedTask;
         });
+        tests.AddRange(await ToolArgumentTests.Run());
         return tests;
     }
 }
