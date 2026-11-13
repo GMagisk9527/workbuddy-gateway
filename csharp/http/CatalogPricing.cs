@@ -99,13 +99,18 @@ public sealed partial class ModelCatalog
     internal long ProbeFreeUntil(AccountSite site,string id,long at){lock(publish)return FreeUntil(site,id,at*1000)/1000;}
     internal void ObserveUsage(AccountSite site,string model,string? raw)
     {
-        var cost=ModelObservations.Cost(raw);if(cost==ModelCost.Unknown)return;
-        using var doc=JsonDocument.Parse(raw!);var root=doc.RootElement;
-        double? credit=root.TryGetProperty("credit",out var c)&&Number(c,out var n)?n:null;
-        long tokens=0;
-        if(root.TryGetProperty("total_tokens",out var total)&&Number(total,out var t))tokens=t>=long.MaxValue?long.MaxValue:(long)t;
-        else foreach(string key in new[]{"prompt_tokens","completion_tokens"})if(root.TryGetProperty(key,out var e)&&Number(e,out var v))tokens=v>=long.MaxValue-tokens?long.MaxValue:tokens+(long)v;
-        lock(publish){long at=clock.GetUtcNow().ToUnixTimeMilliseconds();StoreObservation(new(site,model,cost,at,FreeUntil:cost==ModelCost.Free?FreeUntil(site,model,at):0,Credit:credit,Tokens:tokens));}
+        if(raw is null||raw.Length>65536)return;
+        try
+        {
+            using var doc=JsonDocument.Parse(raw);var root=doc.RootElement;
+            var cost=ModelObservations.Cost(root);if(cost==ModelCost.Unknown)return;
+            double? credit=root.TryGetProperty("credit",out var c)&&Number(c,out var n)?n:null;
+            long tokens=0;
+            if(root.TryGetProperty("total_tokens",out var total)&&Number(total,out var t))tokens=t>=long.MaxValue?long.MaxValue:(long)t;
+            else foreach(string key in new[]{"prompt_tokens","completion_tokens"})if(root.TryGetProperty(key,out var e)&&Number(e,out var v))tokens=v>=long.MaxValue-tokens?long.MaxValue:tokens+(long)v;
+            lock(publish){long at=clock.GetUtcNow().ToUnixTimeMilliseconds();StoreObservation(new(site,model,cost,at,FreeUntil:cost==ModelCost.Free?FreeUntil(site,model,at):0,Credit:credit,Tokens:tokens));}
+        }
+        catch(JsonException){/* Usage evidence never changes settlement. */}
     }
     IEnumerable<(AccountSite Site,string Id)> RateKeys()=>state.Cn.Select(r=>(AccountSite.Cn,r.Id)).Concat(state.Intl.Select(r=>(AccountSite.Intl,r.Id))).Concat(observations.Keys).Concat(probeObservations.Keys).Distinct();
     public object PriceDetails()
