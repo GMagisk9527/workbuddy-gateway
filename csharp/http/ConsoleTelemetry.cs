@@ -16,10 +16,12 @@ internal sealed record HistoryLogEntry(long Seq,ConsoleRow Row);
 public sealed partial class ConsoleTelemetry
 {
     const int Limit=20000,FileLimit=16<<20,SnapshotEvery=4096;
-    readonly object sync=new(),disk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
+    // Lock order: requestLogDisk -> sync. Never hold sync during request-log I/O.
+    readonly object sync=new(),disk=new(),requestLogDisk=new();readonly Queue<ConsoleRow> rows=new();readonly Queue<(long At,string Line)> logs=new();
     readonly List<HistoryLogEntry> historyPending=[];
     long logSeq,savedLogSeq,repairLength=-1;
     internal Func<string,Stream>? HistoryLogStreamFactory = null;
+    internal Action<string>? BeforeRequestLogIo = null;
     readonly Queue<(long At,string Trace,object Data)> traces=new();volatile Dictionary<string,ConsoleAccount> accounts=new(StringComparer.Ordinal);
     public void RefreshAccounts(IEnumerable<ConsoleAccount> current)
     {lock(sync){var next=new Dictionary<string,ConsoleAccount>(accounts,StringComparer.Ordinal);foreach(var item in current){ValidateAccount(item);if(next.GetValueOrDefault(item.Id)!=item){next[item.Id]=item;revision++;}}accounts=next;}}
@@ -134,38 +136,70 @@ public sealed partial class ConsoleTelemetry
     internal bool TrackCache=>settings.Logs.CacheDiagnostics;
     internal void Complete(ConsoleRow row,ConsoleAttempt[] attempts,string streamDetails="")
     {
-        Validate(row);lock(sync)
+        Validate(row);
+        string line=$"{DateTimeOffset.FromUnixTimeMilliseconds(row.At):O} trace={row.Trace} protocol={row.Protocol} model={row.Model} status={row.Status} result={(row.Complete?"complete":"failed")} code={row.Code} durationMs={row.LatencyMs:F1}"+streamDetails;
+        lock(requestLogDisk)
         {
-            while(rows.Count>=Limit)rows.Dequeue();rows.Enqueue(row);revision++;
-            long seq=++logSeq;historyPending.Add(new(seq,row));
-            if(historyPending.Count>8192)historyPending.RemoveAt(0);
-            string line=$"{DateTimeOffset.FromUnixTimeMilliseconds(row.At):O} trace={row.Trace} protocol={row.Protocol} model={row.Model} status={row.Status} result={(row.Complete?"complete":"failed")} code={row.Code} durationMs={row.LatencyMs:F1}";
-            line+=streamDetails;
-            AddLog(row.At,line);requestLogs?.Append(line,DateTimeOffset.FromUnixTimeMilliseconds(row.At));
-            while(traces.Count>=128)traces.Dequeue();traces.Enqueue((row.At,row.Trace,new Dictionary<string, object?> { ["trace"] = row.Trace, ["status"] = row.Status, ["attemptTrail"] = attempts, ["counters"] = new Dictionary<string, object?> { ["failed"] = row.Complete?0:1, ["canceled"] = row.Code=="cancelled"?1:0, ["incompleteStreams"] = row.Complete?0:1 }, ["attemptsDropped"] = 0 }));
+            lock(sync)
+            {
+                while(rows.Count>=Limit)rows.Dequeue();rows.Enqueue(row);revision++;
+                long seq=++logSeq;historyPending.Add(new(seq,row));
+                if(historyPending.Count>8192)historyPending.RemoveAt(0);
+                AddLog(row.At,line);
+                while(traces.Count>=128)traces.Dequeue();traces.Enqueue((row.At,row.Trace,new Dictionary<string, object?> { ["trace"] = row.Trace, ["status"] = row.Status, ["attemptTrail"] = attempts, ["counters"] = new Dictionary<string, object?> { ["failed"] = row.Complete?0:1, ["canceled"] = row.Code=="cancelled"?1:0, ["incompleteStreams"] = row.Complete?0:1 }, ["attemptsDropped"] = 0 }));
+            }
+            BeforeRequestLogIo?.Invoke("append");requestLogs?.Append(line,DateTimeOffset.FromUnixTimeMilliseconds(row.At));
         }
     }
     void RemoveLog(){logBytes-=System.Text.Encoding.UTF8.GetByteCount(logs.Dequeue().Line);}
     void AddLog(long at,string line){int size=System.Text.Encoding.UTF8.GetByteCount(line);while(logs.Count>=1000||logBytes+size>1048576)RemoveLog();logs.Enqueue((at,line));logBytes+=size;}
     public void Audit(string code)
-    {if(code.Length>80||code.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c!='_'))return;lock(sync){var now=DateTimeOffset.UtcNow;string line=now.ToString("O")+" admin="+code;AddLog(now.ToUnixTimeMilliseconds(),line);requestLogs?.Append(line,now);}}
+    {
+        if(code.Length>80||code.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c!='_'))return;
+        lock(requestLogDisk)
+        {
+            var now=DateTimeOffset.UtcNow;string line=now.ToString("O")+" admin="+code;
+            lock(sync)AddLog(now.ToUnixTimeMilliseconds(),line);
+            BeforeRequestLogIo?.Invoke("append");requestLogs?.Append(line,now);
+        }
+    }
     public ConsoleRow[] Rows(){lock(sync)return rows.ToArray();}
     internal ConsoleRow[] RowsSince(long cutoff)
     {
         lock(sync) return rows.Where(row => row.At >= cutoff).ToArray();
     }
     public object? Trace(string id){lock(sync)return traces.LastOrDefault(t=>t.Trace==id&&t.At>=DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds()).Data;}
-    public string[] Logs(int count){lock(sync){count=Math.Clamp(count,1,1000);if(requestLogs is not null){var disk=requestLogs.Tail(count);if(!requestLogs.WriteFailed)return disk;}long cutoff=LogCutoff(settings.RetentionDays,DateTimeOffset.UtcNow);return logs.Where(l=>l.At>=cutoff).TakeLast(count).Select(l=>l.Line).ToArray();}}
+    public string[] Logs(int count)
+    {
+        count=Math.Clamp(count,1,1000);
+        lock(requestLogDisk)
+        {
+            if(requestLogs is not null)
+            {
+                BeforeRequestLogIo?.Invoke("tail");var persisted=requestLogs.Tail(count);
+                if(!requestLogs.WriteFailed)return persisted;
+            }
+            lock(sync)
+            {
+                long cutoff=LogCutoff(settings.RetentionDays,DateTimeOffset.UtcNow);
+                return logs.Where(l=>l.At>=cutoff).TakeLast(count).Select(l=>l.Line).ToArray();
+            }
+        }
+    }
     static long LogCutoff(int days,DateTimeOffset now)=>days==0?0:new DateTimeOffset(now.LocalDateTime.Date.AddDays(-(days-1))).ToUnixTimeMilliseconds();
     public int Cleanup(DateTimeOffset? now=null)
     {
-        lock(sync)
+        lock(requestLogDisk)
         {
-            var time=now??DateTimeOffset.UtcNow;requestLogs?.Cleanup(time);
-            int days=settings.RetentionDays;if(days==0)return 0;long cutoff=LogCutoff(days,time);
-            // Completion order need not match timestamps; filter the entire bounded queue.
-            var keep=logs.Where(l=>l.At>=cutoff).ToArray();int n=logs.Count-keep.Length;
-            logs.Clear();logBytes=0;foreach(var entry in keep)AddLog(entry.At,entry.Line);return n;
+            var time=now??DateTimeOffset.UtcNow;
+            BeforeRequestLogIo?.Invoke("cleanup");requestLogs?.Cleanup(time);
+            lock(sync)
+            {
+                int days=settings.RetentionDays;if(days==0)return 0;long cutoff=LogCutoff(days,time);
+                // Completion order need not match timestamps; filter the entire bounded queue.
+                var keep=logs.Where(l=>l.At>=cutoff).ToArray();int n=logs.Count-keep.Length;
+                logs.Clear();logBytes=0;foreach(var entry in keep)AddLog(entry.At,entry.Line);return n;
+            }
         }
     }
     internal bool NeedsSnapshot{get{lock(sync)return logSeq-savedLogSeq>=SnapshotEvery;}}

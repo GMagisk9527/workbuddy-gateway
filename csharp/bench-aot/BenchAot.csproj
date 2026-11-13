@@ -16,5 +16,6 @@
   <ItemGroup Condition="'$(PublishAot)' == 'true'">
     <Compile Include="../streaming/Events.cs" Link="Events.cs" />
     <Compile Include="../streaming/EventWriter.cs" Link="EventWriter.cs" />
+    <Compile Include="../streaming/SseFrameBuffer.cs" Link="SseFrameBuffer.cs" />
   </ItemGroup>
 </Project>

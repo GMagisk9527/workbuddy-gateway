@@ -49,6 +49,6 @@ internal static class RequestLogTests
             var telemetry=new ConsoleTelemetry(persisted,[]);telemetry.Audit("synthetic_audit");
             Check(telemetry.LogWriteFailed&&telemetry.Logs(10).Single().Contains("synthetic_audit")&&telemetry.Save()&&File.ReadAllText(keep)=="keep","Unavailable/unowned log storage preserves service, memory logs and statistics without overwriting foreign data");
         }
-        return checks;
+        return checks+RequestLogConcurrencyTests.Run(Path.Combine(root,"concurrency"));
     }
 }

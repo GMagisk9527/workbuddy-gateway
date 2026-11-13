@@ -15,6 +15,41 @@ internal static class SelfTests
     {
         var passed = new List<string>();
         async Task Run(string name, Func<Task> action) { await action(); passed.Add(name); }
+        await Run("borrowed Messages frames remain intact through delayed write and flush",async()=>
+        {
+            using var output=new DelayedOutput();int settlements=0;
+            var result=await StreamPump.RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(Text+Text+Finish)),output,new(),beforeTerminal:_=>
+            {settlements++;Check(!Encoding.UTF8.GetString(output.ToArray()).Contains("message_stop",StringComparison.Ordinal),"settlement before success");});
+            string wire=Encoding.UTF8.GetString(output.ToArray());
+            Check(result.Outcome==StreamOutcome.Complete&&settlements==1&&output.Writes==output.Flushes,"await each complete frame");
+            var deltas=wire.Split('\n').Where(l=>l.StartsWith("data: {",StringComparison.Ordinal)).Select(l=>JsonDocument.Parse(l[6..])).ToArray();
+            try
+            {
+                Check(string.Concat(deltas.Where(d=>d.RootElement.GetProperty("type").GetString()=="content_block_delta").Select(d=>d.RootElement.GetProperty("delta").GetProperty("text").GetString()))=="hellohello","ordered deltas");
+                Check(deltas[^1].RootElement.GetProperty("type").GetString()=="message_stop","terminal marker");
+            }
+            finally{foreach(var doc in deltas)doc.Dispose();}
+        });
+        await Run("Messages writer reuses small frames and discards large scratch",()=>
+        {
+            var writer=new EventBufferWriter();var delta=new TextDelta(0,new string('x',1024));
+            writer.Write(delta);long before=GC.GetAllocatedBytesForCurrentThread();
+            for(int i=0;i<1024;i++)Check(writer.Write(delta).Length>1024,"complete borrowed frame");
+            Check(GC.GetAllocatedBytesForCurrentThread()-before<4096,"No per-frame byte-array allocation");
+            writer.Write(new TextDelta(0,new string('x',128<<10)));
+            var small=writer.Write(delta);
+            Check(System.Runtime.InteropServices.MemoryMarshal.TryGetArray(small,out var segment)&&segment.Array!.Length<=64<<10,"Large scratch is not retained for subsequent frames");
+            var owned=new EventWriter();byte[] first=owned.Write(delta);owned.Write(new MessageStop());
+            Check(first.AsSpan().SequenceEqual(writer.Write(delta).Span),"Owned-array facade remains stable");
+            return Task.CompletedTask;
+        });
+        await Run("Messages errors remain writable when shared scratch is exhausted",async()=>
+        {
+            using var output=new MemoryStream();
+            var result=await StreamPump.RunAsync(new MemoryStream(Encoding.UTF8.GetBytes(Text+Finish)),output,new(Budget:new DenyScratch()));
+            string wire=Encoding.UTF8.GetString(output.ToArray());
+            Check(result.Code=="output_budget_exceeded"&&wire.StartsWith("event: error\n",StringComparison.Ordinal)&&!wire.Contains("message_stop",StringComparison.Ordinal),"Budget error remains visible");
+        });
         await Run("UTF-8 payloads preserve legacy framing and Unicode trimming at every byte boundary", async () =>
         {
             const string wire = "\ufeff: heartbeat\r\nid: 1\r\nevent: message\r\ndata: data: \u2003{\"text\":\"中文 😀\",\u00a0\r\ndata\r\ndata: \"n\":1}\u3000\r\n\r\n  {\"bare\":true} \n\ndata: [DONE]\n\ndata: ignored\n\n";
@@ -228,6 +263,24 @@ internal static class SelfTests
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         { if (!flushFailure) throw new IOException("Injected write failure"); return base.WriteAsync(buffer, cancellationToken); }
         public override Task FlushAsync(CancellationToken cancellationToken) => throw new IOException("Injected flush failure");
+    }
+    sealed class DenyScratch : IRetainedOutputBudget
+    {
+        public void Add(long bytes){}public void Remove(long bytes){}
+        public void Scratch(long bytes)=>throw new ConversionFailure("output_budget_exceeded");
+    }
+    sealed class DelayedOutput : MemoryStream
+    {
+        ReadOnlyMemory<byte> borrowed;byte[] snapshot=[];
+        internal int Writes,Flushes;
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer,CancellationToken cancellationToken=default)
+        {
+            borrowed=buffer;snapshot=buffer.ToArray();await Task.Yield();
+            Check(buffer.Span.SequenceEqual(snapshot),"Buffer intact until write completes");
+            await base.WriteAsync(buffer,cancellationToken);Writes++;
+        }
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {await Task.Yield();Check(borrowed.Span.SequenceEqual(snapshot),"Buffer intact until flush completes");Flushes++;}
     }
     sealed class SignallingOutput : MemoryStream
     {

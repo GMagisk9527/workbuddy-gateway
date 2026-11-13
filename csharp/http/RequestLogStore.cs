@@ -35,7 +35,8 @@ internal sealed class RequestLogStore
     readonly List<LogFile> files=[];
     FileStream? current;string? currentName;long currentLength;DateTime currentDate;
     long total;bool loaded;
-    internal bool WriteFailed{get;private set;}internal long Rejected{get;private set;}
+    volatile bool writeFailed;
+    internal bool WriteFailed{get=>writeFailed;private set=>writeFailed=value;}internal long Rejected{get;private set;}
     internal RequestLogStore(string parent,ConsoleSettings settings)
     {
         this.settings=settings;directory=Path.Combine(parent,"request-logs");ConsoleSettings.CheckLink(directory);Directory.CreateDirectory(directory);

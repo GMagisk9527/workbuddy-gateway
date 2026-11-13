@@ -186,6 +186,10 @@ public static class OpenWire
         using(var writer=new Utf8JsonWriter(output,new(){Encoder=JavaScriptEncoder.UnsafeRelaxedJsonEscaping,MaxDepth=256}))write(writer);
         return output.Finish();
     }
+    // The SSE pump owns and reuses both writer and frame buffer per request.
+    // Keep precisely the same JSON escaping/unknown-field handling as Encode.
+    internal static void EncodeFrame(Utf8JsonWriter writer,JsonNode? node)
+    { WriteNode(writer,node);writer.Flush(); }
     // Only take this path for large, already canonical UTF-8 request values.
     // It avoids MemoryStream growth and its final full-body copy. Streaming
     // output retains the existing incremental shared-budget behavior.

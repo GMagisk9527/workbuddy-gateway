@@ -12,7 +12,7 @@ public static class StreamPump
         await using (upstream)
         {
             var state = new MessageStreamState(options.Model, options.WantThinking, options.Hidden, options.RetainedLimit,budget:options.Budget);
-            var reader = new SseReader(upstream); var writer = new EventWriter();
+            var reader = new SseReader(upstream); var writer = new EventBufferWriter(options.Budget is null ? null : options.Budget.Scratch);
             var restorers = new Dictionary<(int Choice, string Channel), ResponseIdentityRestorer>();
             bool receivedOutput = false, notified = false; string? failureUsage=null;
             StreamResult Result(StreamOutcome outcome, string code) => new(outcome, code, state.Usage, failureUsage??state.RawUsageJson, receivedOutput);
@@ -24,7 +24,7 @@ public static class StreamPump
                 foreach (var e in events)
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    try {var frame=e.Accept(writer);if(e is not StreamError)options.Budget?.Scratch(frame.Length);await downstream.WriteAsync(frame, cancellation); await downstream.FlushAsync(cancellation); }
+                    try {var frame=e.Accept(writer);await downstream.WriteAsync(frame, cancellation); await downstream.FlushAsync(cancellation); }
                     catch (OperationCanceledException) { throw; }
                     catch (IOException) { downstreamFailed = true; throw; }
                     catch (ObjectDisposedException) { downstreamFailed = true; throw; }
