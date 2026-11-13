@@ -93,6 +93,21 @@ internal static class HttpTests
             }
             Check(f.Ledger!.GetUsage(f.KeyId!) is { Total: 12, Requests: 6 } && f.Ledger.Health.PendingAttempts == 0, "one WAL settlement per call");
         });
+        await Test("interleaved fragmented tools preserve all protocols and settle once", async () =>
+        {
+            await using var f = await Fixture.Create(c =>
+            {
+                c.Response.ContentType = "text/event-stream";
+                return c.Response.WriteAsync(ToolArgumentTests.Interleaved());
+            }, bridge: false);
+            foreach (var path in Paths) foreach (bool stream in new[] { false, true })
+            {
+                using var response = await f.Post(path, Body(path, stream));
+                Check(response.IsSuccessStatusCode, "fragmented tool HTTP response succeeds");
+                ToolArgumentTests.Verify(path, stream, await response.Content.ReadAsStringAsync());
+            }
+            Check(f.Calls.Count == 6 && f.Ledger!.GetUsage(f.KeyId!) is { Total: 12, Requests: 6 } && f.Ledger.Health.PendingAttempts == 0, "one upstream send and WAL settlement per fragmented tool request");
+        });
         await Test("upstream error finish fails every protocol while retaining measured usage", async () =>
         {
             const string failed = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"error\"}]}\n\n";

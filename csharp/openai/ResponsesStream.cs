@@ -65,7 +65,7 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
                     identity = (next++, Text(item["id"])); tools.Add(change.Index, identity); opened = true;
                     output.Add(Event("response.output_item.added", new() { ["output_index"] = identity.Index, ["item"] = item }));
                 }
-                string delta = opened ? change.Accumulated : change.Arguments;
+                string delta = opened ? state.ArgumentsThrough(change) : change.Arguments;
                 if (!custom && delta != "") output.Add(Event("response.function_call_arguments.delta", new() { ["item_id"] = identity.Id, ["output_index"] = identity.Index, ["delta"] = delta }));
             }
         }
