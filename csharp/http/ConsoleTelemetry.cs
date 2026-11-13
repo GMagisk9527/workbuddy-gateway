@@ -62,24 +62,56 @@ public sealed partial class ConsoleTelemetry
         }
         catch(Exception e) when(e is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or KeyNotFoundException){Storage="invalid";WriteFailed=true;}
     }
+    static ReadOnlySpan<byte> TrimLine(ReadOnlySpan<byte> value)
+    {
+        int start=0,end=value.Length;
+        while(start<end&&value[start]<=(byte)' ')start++;
+        while(end>start&&value[end-1]<=(byte)' ')end--;
+        return value[start..end];
+    }
     void LoadHistoryLog(string path,long snapshotSeq)
     {
         byte[] raw=ConsoleSettings.Read(path,64<<20);
-        string text=new UTF8Encoding(false,true).GetString(raw);
-        string[] lines=text.Split('\n');long highest=snapshotSeq;
-        for(int i=0;i<lines.Length;i++)
+        long highest=snapshotSeq;int offset=0,lastGood=0;bool repair=false,addNewline=false;
+        while(offset<raw.Length)
         {
-            string line=lines[i].Trim();if(line.Length==0)continue;
-            HistoryLogEntry? entry=null;
-            try{entry=JsonSerializer.Deserialize(line,HistoryJson.Default.HistoryLogEntry);}
-            catch(JsonException) when(i==lines.Length-1){break;} // torn append
-            catch(JsonException){throw new InvalidDataException("Invalid history log");}
-            if(entry is null||entry.Seq<=highest)continue;
-            Validate(entry.Row);
-            while(rows.Count>=Limit)rows.Dequeue();
-            rows.Enqueue(entry.Row);highest=entry.Seq;
+            var span=raw.AsSpan(offset);int newline=span.IndexOf((byte)'\n');
+            int lineEnd=newline<0?raw.Length:offset+newline;
+            var line=TrimLine(raw.AsSpan(offset,lineEnd-offset));
+            if(line.Length>0)
+            {
+                HistoryLogEntry? entry;
+                try{entry=JsonSerializer.Deserialize(line,HistoryJson.Default.HistoryLogEntry);}
+                catch(JsonException)
+                {
+                    if(newline<0){repair=true;break;} // torn append; drop it before the next write
+                    throw new InvalidDataException("Invalid history log");
+                }
+                if(entry is not null)
+                {
+                    Validate(entry.Row);
+                    if(entry.Seq>highest)
+                    {
+                        while(rows.Count>=Limit)rows.Dequeue();
+                        rows.Enqueue(entry.Row);highest=entry.Seq;
+                    }
+                }
+            }
+            if(newline<0){lastGood=raw.Length;if(line.Length>0){repair=true;addNewline=true;}break;}
+            offset=lineEnd+1;lastGood=offset;
         }
-        logSeq=savedLogSeq=highest;Storage="file";
+        if(repair)
+        {
+            try
+            {
+                using var log=new FileStream(path,FileMode.Open,FileAccess.Write,FileShare.Read);
+                log.SetLength(lastGood);
+                if(addNewline){log.Seek(0,SeekOrigin.End);log.WriteByte((byte)'\n');}
+                log.Flush(true);
+            }
+            catch(IOException e){throw new InvalidDataException("History log repair failed",e);}
+        }
+        logSeq=highest;savedLogSeq=snapshotSeq;Storage="file";
     }
     static void Validate(ConsoleRow r)
     {

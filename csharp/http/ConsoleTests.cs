@@ -100,7 +100,19 @@ internal static class ConsoleTests
         var stats=JsonSerializer.SerializeToElement(imported.Stats(new QueryCollection()));Check(stats.GetProperty("summary").GetProperty("ttftSamples").GetInt32()==0,"Unknown legacy TTFT never reclassified");Check(imported.Save(),"Seed persisted");
         var appended=new ConsoleTelemetry(settings,[]);appended.Complete(new("a","hy3",now,200,true,null,null,null,null,null,1,null,"messages","log-only"),[]);Check(appended.FlushHistory(),"Append log flushed");
         var replayed=new ConsoleTelemetry(settings,[]);Check(replayed.Rows().Any(r=>r.Trace=="log-only"),"Append-only history survives restart without a snapshot");
-        File.AppendAllText(Path.Combine(root,"history.jsonl"),"{\"seq\":99999,\"row\":{");var torn=new ConsoleTelemetry(settings,[]);Check(torn.Storage!="invalid"&&torn.Rows().Any(r=>r.Trace=="log-only"),"Torn tail line is ignored on load");
+        File.AppendAllText(Path.Combine(root,"history.jsonl"),"{\"seq\":99999,\"row\":{");var torn=new ConsoleTelemetry(settings,[]);Check(torn.Storage!="invalid"&&torn.Rows().Any(r=>r.Trace=="log-only"),"Torn tail ignored on load");
+        torn.Complete(new("a","hy3",now+1,200,true,null,null,null,null,null,1,null,"messages","after-torn"),[]);Check(torn.FlushHistory(),"Append after torn repair");
+        var afterTorn=new ConsoleTelemetry(settings,[]);Check(afterTorn.Storage!="invalid"&&afterTorn.Rows().Any(r=>r.Trace=="after-torn"),"Append after torn repair survives restart");
+        string seqRoot=Path.Combine(root,"seq-accounting");using(var seqSettings=new ConsoleSettings(new(),seqRoot))
+        {
+            for(int round=0;round<3;round++)
+            {
+                var seq=new ConsoleTelemetry(seqSettings,[]);
+                for(int i=0;i<1500;i++)seq.Complete(new("a","hy3",now+i,200,true,null,null,null,null,null,1,null,"messages",$"seq-{round}-{i}"),[]);
+                Check(seq.FlushHistory(),"Append round flushed");
+            }
+            var recovered=new ConsoleTelemetry(seqSettings,[]);Check(recovered.NeedsSnapshot,"Recovery preserves rows pending a snapshot");
+        }
         string history=Path.Combine(root,"history.json");File.WriteAllText(history,"{\"schema\":1,\"requests\":[{\"account\":\"a\",\"model\":\"m\",\"at\":"+now+",\"latencyMs\":1},{}]}");string bad=File.ReadAllText(history);
         var corrupt=new ConsoleTelemetry(settings,[]);Check(corrupt.Storage=="invalid"&&corrupt.Rows().Length==0&&!corrupt.Save()&&File.ReadAllText(history)==bad,"Corrupt history never partially loads or overwrites");
         var memory=new ConsoleTelemetry(settings,[]);for(int i=0;i<20100;i++)memory.Complete(new("a","m",now,200,true,null,null,null,null,null,1,null),[]);Check(memory.Rows().Length==20000&&memory.Logs(2000).Length==1000,"History and logs bounded");

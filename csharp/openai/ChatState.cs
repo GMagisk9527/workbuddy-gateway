@@ -42,9 +42,10 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
         using(document)
         {
         var root=document.RootElement;
+        if(root.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) throw new OpenAiFailure("invalid_request","请求体必须是 JSON 对象");
+        var parsed = ChunkReader.Parse(root); ReceivedOutput |= parsed.HasOutput;
         var raw = root.ValueKind==JsonValueKind.Null ? new JsonObject() : (JsonObject)ToNode(root)!;
         if (raw["usage"] is JsonObject evidence) { Reserve(evidence.ToJsonString()); Usage = (JsonObject)evidence.DeepClone(); }
-        var parsed = ChunkReader.Parse(root); ReceivedOutput |= parsed.HasOutput;
         if (responseRestore is { Active: true })
         { ResponseIdentityWire.Apply(raw, responseRestore, restorers); parsed = ChunkReader.Parse(raw.ToJsonString()); }
         if (Text(raw["id"]) != "") Id = Text(raw["id"]);
