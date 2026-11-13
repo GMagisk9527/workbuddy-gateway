@@ -1,4 +1,6 @@
 using System.Text;
+using System.Buffers;
+using System.Text.Unicode;
 
 namespace StreamingMigration;
 
@@ -8,24 +10,24 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
 {
     readonly byte[] buffer = new byte[8192];
     readonly MemoryStream line = new();
-    readonly List<string> data = [];
+    readonly MemoryStream data = new();
     int offset, available, frameBytes;
-    bool skipLf, first = true, done, hadLine;
+    bool skipLf, first = true, done, hadLine, hasData;
     IOException? readError;
-    string DecodeLine(ReadOnlySpan<byte> bytes)
+    ReadOnlyMemory<byte> FirstLine(ReadOnlyMemory<byte> bytes)
     {
-        string value = Encoding.UTF8.GetString(bytes);
-        if (first) { first = false; if (value.StartsWith('\ufeff')) value = value[1..]; }
-        return value;
+        if (first) { first = false; if (bytes.Span.StartsWith("\ufeff"u8)) bytes = bytes[3..]; }
+        return bytes;
     }
-    string TakeLine()
+    ReadOnlyMemory<byte> TakeLine()
     {
-        string value = DecodeLine(line.GetBuffer().AsSpan(0, (int)line.Length));
+        var value = FirstLine(line.GetBuffer().AsMemory(0, (int)line.Length));
         line.SetLength(0);
         return value;
     }
-    string? ScanLine()
+    ReadOnlyMemory<byte>? ScanLine()
     {
+        int start = offset;
         var bytes = buffer.AsSpan(offset, available - offset);
         int delimiter = bytes.IndexOfAny((byte)'\r', (byte)'\n');
         int consumed = delimiter < 0 ? bytes.Length : delimiter + 1;
@@ -40,31 +42,57 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
         }
         skipLf = bytes[delimiter] == '\r';
         var content = bytes[..delimiter];
-        if (line.Length == 0) return DecodeLine(content);
+        if (line.Length == 0) return FirstLine(buffer.AsMemory(start, delimiter));
         line.Write(content);
         return TakeLine();
     }
-    void Reset() { frameBytes = 0; hadLine = false; data.Clear(); }
-    // Returns a data payload, null for metadata/comment-only events.
-    string? ProcessLine(string value, bool eof)
+    void Reset() { frameBytes = 0; hadLine = hasData = false; data.SetLength(0); }
+    // Match string.Trim, including Unicode whitespace accepted by the legacy
+    // reader. Invalid UTF-8 is repaired only when handing over a payload.
+    static ReadOnlyMemory<byte> Trim(ReadOnlyMemory<byte> value)
     {
-        string trimmed = value.Trim();
-        if (!hadLine && (trimmed.StartsWith('{') || trimmed == "[DONE]")) { Reset(); return trimmed; }
-        if (!hadLine && trimmed.StartsWith(':')) { Reset(); return null; }
-        if (value.Length == 0 && !eof) { string? payload = data.Count > 0 ? string.Join('\n', data) : null; Reset(); return payload; }
-        hadLine = true;
-        if (trimmed.StartsWith("data:", StringComparison.Ordinal))
+        int start = 0, end = value.Length;
+        while (start < end)
         {
-            string v = trimmed[5..]; data.Add(v.StartsWith(' ') ? v[1..] : v);
+            byte b = value.Span[start];
+            if (b < 128) { if (b is not (32 or >= 9 and <= 13)) break; start++; }
+            else if (Rune.DecodeFromUtf8(value.Span[start..end], out var rune, out int size) == OperationStatus.Done && Rune.IsWhiteSpace(rune)) start += size;
+            else break;
         }
-        else if (trimmed == "data") data.Add("");
-        if (eof && data.Count != 0) throw new ConversionFailure("incomplete_event");
+        while (start < end)
+        {
+            byte b = value.Span[end - 1];
+            if (b < 128) { if (b is not (32 or >= 9 and <= 13)) break; end--; }
+            else if (Rune.DecodeLastFromUtf8(value.Span[start..end], out var rune, out int size) == OperationStatus.Done && Rune.IsWhiteSpace(rune)) end -= size;
+            else break;
+        }
+        return value[start..end];
+    }
+    void AddData(ReadOnlyMemory<byte> value)
+    {
+        if (hasData) data.WriteByte((byte)'\n');
+        data.Write(value.Span); hasData = true;
+    }
+    // Returns a data payload, null for metadata/comment-only events.
+    ReadOnlyMemory<byte>? ProcessLine(ReadOnlyMemory<byte> value, bool eof)
+    {
+        var trimmed = Trim(value);
+        if (!hadLine && (trimmed.Span.StartsWith("{"u8) || trimmed.Span.SequenceEqual("[DONE]"u8))) { Reset(); return trimmed; }
+        if (!hadLine && trimmed.Span.StartsWith(":"u8)) { Reset(); return null; }
+        if (value.Length == 0 && !eof) { ReadOnlyMemory<byte>? payload = hasData ? data.GetBuffer().AsMemory(0, (int)data.Length) : null; Reset(); return payload; }
+        hadLine = true;
+        if (trimmed.Span.StartsWith("data:"u8))
+        {
+            var v = trimmed[5..]; AddData(v.Span.StartsWith(" "u8) ? v[1..] : v);
+        }
+        else if (trimmed.Span.SequenceEqual("data"u8)) AddData(ReadOnlyMemory<byte>.Empty);
+        if (eof && hasData) throw new ConversionFailure("incomplete_event");
         return null;
     }
     public async ValueTask<ChatChunk?> NextAsync(CancellationToken cancellation)
     {
-        var payload = await NextPayloadAsync(cancellation);
-        return payload is null ? null : ChunkReader.Parse(payload);
+        var payload = await NextPayloadUtf8Async(cancellation);
+        return payload is null ? null : ChunkReader.Parse(payload.Value);
     }
     public async ValueTask ThrowIfFailedFinishAsync(ChatChunk chunk, CancellationToken cancellation)
     {
@@ -79,7 +107,7 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
             trailer.CancelAfter(TimeSpan.FromMilliseconds(500));
             try
             {
-                if (await NextPayloadAsync(trailer.Token) is { } payload)
+                if (await NextPayloadUtf8Async(trailer.Token) is { } payload)
                 {
                     var next = ChunkReader.Parse(payload);
                     if (next.Choices.IsEmpty) usage = next.Usage?.RawJson;
@@ -92,6 +120,13 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
     }
     public async ValueTask<string?> NextPayloadAsync(CancellationToken cancellation)
     {
+        var payload = await NextPayloadUtf8Async(cancellation);
+        return payload is null ? null : Encoding.UTF8.GetString(payload.Value.Span);
+    }
+    // Borrowed memory: valid until the next reader call. Consumers must parse
+    // synchronously or copy it before advancing the reader; never retain it.
+    public async ValueTask<ReadOnlyMemory<byte>?> NextPayloadUtf8Async(CancellationToken cancellation)
+    {
         if (done) { if (readError is not null) throw readError; return null; }
         while (true)
         {
@@ -102,12 +137,12 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
                 try { available = await source.ReadAsync(buffer, cancellation); }
                 catch (IOException e) { readError = e; available = 0; }
             }
-            string? payload = null;
+            ReadOnlyMemory<byte>? payload = null;
             if (available == 0)
             {
                 done = true;
                 if (line.Length > 0) payload = ProcessLine(TakeLine(), true);
-                if (data.Count > 0) throw new ConversionFailure("incomplete_event");
+                if (hasData) throw new ConversionFailure("incomplete_event");
                 if (payload is null) { if (readError is not null) throw readError; return null; }
             }
             else
@@ -126,12 +161,15 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
                 }
                 if (ScanLine() is { } value) payload = ProcessLine(value, false);
             }
-            if (payload is null || payload.Trim().Length == 0) continue;
-            payload = payload.Trim();
+            if (payload is null) continue;
+            var result = Trim(payload.Value);
+            if (result.Length == 0) continue;
             // Match stripDataPrefixBytes for repeated prefixes in existing upstreams.
-            while (payload.StartsWith("data:", StringComparison.Ordinal)) payload = payload[5..].Trim();
-            if (payload == "[DONE]") { done = true; readError = null; return null; }
-            return payload;
+            while (result.Span.StartsWith("data:"u8)) result = Trim(result[5..]);
+            if (result.Span.SequenceEqual("[DONE]"u8)) { done = true; readError = null; return null; }
+            // Encoding.UTF8 previously replaced malformed input. Keep that
+            // behavior on the rare invalid path without transcoding normal SSE.
+            return Utf8.IsValid(result.Span) ? result : Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(result.Span));
         }
     }
 }

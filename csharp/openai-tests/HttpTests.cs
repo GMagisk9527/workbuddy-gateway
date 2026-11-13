@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using OpenAiProtocols;
 using HttpMigration;
 using KeySecurity;
 using LedgerMigration;
@@ -107,6 +108,47 @@ internal static class HttpTests
                 ToolArgumentTests.Verify(path, stream, await response.Content.ReadAsStringAsync());
             }
             Check(f.Calls.Count == 6 && f.Ledger!.GetUsage(f.KeyId!) is { Total: 12, Requests: 6 } && f.Ledger.Health.PendingAttempts == 0, "one upstream send and WAL settlement per fragmented tool request");
+        });
+        await Test("fragmented UTF-8 HTTP streams preserve content, late errors and exactly-once WAL", async () =>
+        {
+            bool reject = false; const string expected = "中文 😀 code: x < 2\n";
+            await using var f = await Fixture.Create(async c =>
+            {
+                c.Response.ContentType = "text/event-stream";
+                string wire = "\ufeff: heartbeat\r\nevent: message\r\ndata: {\"choices\":[{\"delta\":\r\ndata: {\"content\":\"中文 😀 code: x < 2\\n\"}}]}\r\n\r\n" + Finish
+                    + (reject ? "data: {\"error\":{\"code\":11128}}\n\n" : "data: [DONE]\n\n");
+                byte[] bytes = Encoding.UTF8.GetBytes(wire);
+                for (int i = 0; i < bytes.Length; i++)
+                { await c.Response.Body.WriteAsync(bytes.AsMemory(i, 1)); await c.Response.Body.FlushAsync(); }
+            }, bridge: false);
+            foreach (bool failed in new[] { false, true }) foreach (var path in Paths) foreach (bool stream in new[] { false, true })
+            {
+                reject = failed;
+                using var response = await f.Post(path, Body(path, stream)); string output = await response.Content.ReadAsStringAsync();
+                if (failed)
+                    Check(output.Contains("11128", StringComparison.Ordinal) && !output.Contains("[DONE]", StringComparison.Ordinal) && !output.Contains("response.completed", StringComparison.Ordinal) && !output.Contains("message_stop", StringComparison.Ordinal), "late failure is not swallowed by any protocol");
+                else
+                {
+                    string actual;
+                    if (!stream)
+                    {
+                        var complete = JsonNode.Parse(output)!;
+                        actual = path switch { "/v1/responses" => OpenWire.Text(complete["output"]![0]!["content"]![0]!["text"]), "/v1/messages" => OpenWire.Text(complete["content"]![0]!["text"]), _ => OpenWire.Text(complete["choices"]![0]!["message"]!["content"]) };
+                    }
+                    else
+                    {
+                        var events = StreamTests.Events(output);
+                        actual = path switch
+                        {
+                            "/v1/responses" => string.Concat(events.Where(e => OpenWire.Text(e["type"]) == "response.output_text.delta").Select(e => OpenWire.Text(e["delta"]))),
+                            "/v1/messages" => string.Concat(events.Where(e => OpenWire.Text(e["type"]) == "content_block_delta").Select(e => OpenWire.Text(e["delta"]?["text"]))),
+                            _ => string.Concat(events.Select(e => OpenWire.Text(e["choices"]?[0]?["delta"]?["content"])))
+                        };
+                    }
+                    Check(response.IsSuccessStatusCode && actual == expected, "UTF-8 and code content are unchanged in every mode");
+                }
+            }
+            Check(f.Calls.Count == 12 && f.Ledger!.GetUsage(f.KeyId!) is { Total: 24, Requests: 12 } && f.Ledger.Health.PendingAttempts == 0, "twelve requests, twelve sends, twelve measured settlements");
         });
         await Test("upstream error finish fails every protocol while retaining measured usage", async () =>
         {
