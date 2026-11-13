@@ -1,134 +1,69 @@
-using System.Buffers;
 using System.Text;
 
 namespace StreamingMigration;
 
 // Byte framing avoids decoding split UTF-8 sequences. CR, LF and split CRLF are
 // equivalent delimiters; the entire event, including metadata, has one bound.
-// Payloads stay UTF-8 until the JSON parser consumes them, so the hot path does
-// not build a string per line and transcode it back for every SSE frame.
 public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
 {
-    static ReadOnlySpan<byte> Done => "[DONE]"u8;
-    static ReadOnlySpan<byte> DataPrefix => "data:"u8;
-    static ReadOnlySpan<byte> DataWord => "data"u8;
     readonly byte[] buffer = new byte[8192];
-    readonly ArrayBufferWriter<byte> line = new(256);
-    readonly ArrayBufferWriter<byte> data = new(256);
-    int offset, available, frameBytes, dataLines;
+    readonly MemoryStream line = new();
+    readonly List<string> data = [];
+    int offset, available, frameBytes;
     bool skipLf, first = true, done, hadLine;
     IOException? readError;
-    async ValueTask<bool> FillAsync(CancellationToken cancellation)
+    string DecodeLine(ReadOnlySpan<byte> bytes)
     {
-        try { available = await source.ReadAsync(buffer, cancellation); }
-        catch (IOException e) { readError = e; available = 0; }
-        offset = 0;
-        return available != 0;
+        string value = Encoding.UTF8.GetString(bytes);
+        if (first) { first = false; if (value.StartsWith('\ufeff')) value = value[1..]; }
+        return value;
     }
-    void ResetEvent() { frameBytes = 0; hadLine = false; data.Clear(); dataLines = 0; }
-    void AppendData(ReadOnlySpan<byte> value)
+    string TakeLine()
     {
-        if (dataLines++ > 0) data.Write("\n"u8);
-        data.Write(value);
+        string value = DecodeLine(line.GetBuffer().AsSpan(0, (int)line.Length));
+        line.SetLength(0);
+        return value;
     }
-    static ReadOnlySpan<byte> TrimAscii(ReadOnlySpan<byte> value)
+    string? ScanLine()
     {
-        int start = 0, end = value.Length;
-        while (start < end && value[start] <= (byte)' ') start++;
-        while (end > start && value[end - 1] <= (byte)' ') end--;
-        return value[start..end];
+        var bytes = buffer.AsSpan(offset, available - offset);
+        int delimiter = bytes.IndexOfAny((byte)'\r', (byte)'\n');
+        int consumed = delimiter < 0 ? bytes.Length : delimiter + 1;
+        if (consumed >= maxEventBytes - frameBytes) throw new ConversionFailure("event_limit");
+        frameBytes += consumed;
+        offset += consumed;
+
+        if (delimiter < 0)
+        {
+            line.Write(bytes);
+            return null;
+        }
+        skipLf = bytes[delimiter] == '\r';
+        var content = bytes[..delimiter];
+        if (line.Length == 0) return DecodeLine(content);
+        line.Write(content);
+        return TakeLine();
     }
-    byte[]? ProcessLine(ReadOnlySpan<byte> raw, bool eof)
+    void Reset() { frameBytes = 0; hadLine = false; data.Clear(); }
+    // Returns a data payload, null for metadata/comment-only events.
+    string? ProcessLine(string value, bool eof)
     {
-        var value = TrimAscii(raw);
-        if (first)
-        {
-            first = false;
-            if (value.Length >= 3 && value[0] == 0xEF && value[1] == 0xBB && value[2] == 0xBF) value = value[3..];
-        }
-        if (!hadLine && (value.Length > 0 && value[0] == (byte)'{' || value.SequenceEqual(Done)))
-        {
-            var payload = value.ToArray(); ResetEvent(); return payload;
-        }
-        if (!hadLine && value.Length > 0 && value[0] == (byte)':') { ResetEvent(); return null; }
-        if (value.Length == 0 && !eof)
-        {
-            if (dataLines == 0) { ResetEvent(); return null; }
-            var payload = data.WrittenSpan.ToArray(); ResetEvent(); return payload;
-        }
+        string trimmed = value.Trim();
+        if (!hadLine && (trimmed.StartsWith('{') || trimmed == "[DONE]")) { Reset(); return trimmed; }
+        if (!hadLine && trimmed.StartsWith(':')) { Reset(); return null; }
+        if (value.Length == 0 && !eof) { string? payload = data.Count > 0 ? string.Join('\n', data) : null; Reset(); return payload; }
         hadLine = true;
-        if (value.Length >= DataPrefix.Length && value[..DataPrefix.Length].SequenceEqual(DataPrefix))
+        if (trimmed.StartsWith("data:", StringComparison.Ordinal))
         {
-            var rest = value[DataPrefix.Length..];
-            if (rest.Length > 0 && rest[0] == (byte)' ') rest = rest[1..];
-            AppendData(rest);
+            string v = trimmed[5..]; data.Add(v.StartsWith(' ') ? v[1..] : v);
         }
-        else if (value.SequenceEqual(DataWord)) AppendData(default);
-        if (eof && dataLines != 0) throw new ConversionFailure("incomplete_event");
+        else if (trimmed == "data") data.Add("");
+        if (eof && data.Count != 0) throw new ConversionFailure("incomplete_event");
         return null;
-    }
-    byte[]? FinishPayload(byte[] payload)
-    {
-        var value = TrimAscii(payload);
-        // Match stripDataPrefixBytes for repeated prefixes in existing upstreams.
-        while (value.Length >= DataPrefix.Length && value[..DataPrefix.Length].SequenceEqual(DataPrefix))
-            value = TrimAscii(value[DataPrefix.Length..]);
-        if (value.SequenceEqual(Done)) { done = true; readError = null; return null; }
-        if (value.Length == 0) return null;
-        return value.ToArray();
-    }
-    public async ValueTask<byte[]?> NextPayloadBytesAsync(CancellationToken cancellation)
-    {
-        if (done) { if (readError is not null) throw readError; return null; }
-        while (true)
-        {
-            if (offset == available && !await FillAsync(cancellation))
-            {
-                done = true;
-                byte[]? tail = line.WrittenCount > 0 ? ProcessLine(line.WrittenSpan, true) : null;
-                line.Clear();
-                if (dataLines != 0) throw new ConversionFailure("incomplete_event");
-                if (tail is null) { if (readError is not null) throw readError; return null; }
-                var final = FinishPayload(tail);
-                if (final is not null) return final;
-                if (done) { if (readError is not null) throw readError; return null; }
-                continue;
-            }
-            byte value = buffer[offset++];
-            if (skipLf)
-            {
-                skipLf = false;
-                if (value == (byte)'\n')
-                {
-                    // The LF belongs to the preceding CR delimiter. Count it
-                    // while the event is open, including metadata lines.
-                    if (hadLine && ++frameBytes >= maxEventBytes) throw new ConversionFailure("event_limit");
-                    continue;
-                }
-            }
-            if (++frameBytes >= maxEventBytes) throw new ConversionFailure("event_limit");
-            if (value is (byte)'\r' or (byte)'\n')
-            {
-                skipLf = value == (byte)'\r';
-                byte[]? payload = ProcessLine(line.WrittenSpan, false);
-                line.Clear();
-                if (payload is not null)
-                {
-                    var final = FinishPayload(payload);
-                    if (final is not null) return final;
-                    if (done) { if (readError is not null) throw readError; return null; }
-                }
-            }
-            else
-            {
-                line.GetSpan(1)[0] = value;
-                line.Advance(1);
-            }
-        }
     }
     public async ValueTask<ChatChunk?> NextAsync(CancellationToken cancellation)
     {
-        var payload = await NextPayloadBytesAsync(cancellation);
+        var payload = await NextPayloadAsync(cancellation);
         return payload is null ? null : ChunkReader.Parse(payload);
     }
     public async ValueTask ThrowIfFailedFinishAsync(ChatChunk chunk, CancellationToken cancellation)
@@ -144,7 +79,7 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
             trailer.CancelAfter(TimeSpan.FromMilliseconds(500));
             try
             {
-                if (await NextPayloadBytesAsync(trailer.Token) is { } payload)
+                if (await NextPayloadAsync(trailer.Token) is { } payload)
                 {
                     var next = ChunkReader.Parse(payload);
                     if (next.Choices.IsEmpty) usage = next.Usage?.RawJson;
@@ -157,7 +92,46 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
     }
     public async ValueTask<string?> NextPayloadAsync(CancellationToken cancellation)
     {
-        var payload = await NextPayloadBytesAsync(cancellation);
-        return payload is null ? null : Encoding.UTF8.GetString(payload);
+        if (done) { if (readError is not null) throw readError; return null; }
+        while (true)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            if (offset == available)
+            {
+                offset = 0;
+                try { available = await source.ReadAsync(buffer, cancellation); }
+                catch (IOException e) { readError = e; available = 0; }
+            }
+            string? payload = null;
+            if (available == 0)
+            {
+                done = true;
+                if (line.Length > 0) payload = ProcessLine(TakeLine(), true);
+                if (data.Count > 0) throw new ConversionFailure("incomplete_event");
+                if (payload is null) { if (readError is not null) throw readError; return null; }
+            }
+            else
+            {
+                if (skipLf)
+                {
+                    skipLf = false;
+                    if (buffer[offset] == '\n')
+                    {
+                        offset++;
+                        // The LF belongs to the preceding CR delimiter. Count
+                        // it while the event is open, including metadata lines.
+                        if (hadLine && ++frameBytes >= maxEventBytes) throw new ConversionFailure("event_limit");
+                        continue;
+                    }
+                }
+                if (ScanLine() is { } value) payload = ProcessLine(value, false);
+            }
+            if (payload is null || payload.Trim().Length == 0) continue;
+            payload = payload.Trim();
+            // Match stripDataPrefixBytes for repeated prefixes in existing upstreams.
+            while (payload.StartsWith("data:", StringComparison.Ordinal)) payload = payload[5..].Trim();
+            if (payload == "[DONE]") { done = true; readError = null; return null; }
+            return payload;
+        }
     }
 }
