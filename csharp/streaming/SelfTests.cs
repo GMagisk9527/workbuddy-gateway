@@ -15,6 +15,54 @@ internal static class SelfTests
     {
         var passed = new List<string>();
         async Task Run(string name, Func<Task> action) { await action(); passed.Add(name); }
+        await Run("UTF-8 payloads preserve legacy framing and Unicode trimming at every byte boundary", async () =>
+        {
+            const string wire = "\ufeff: heartbeat\r\nid: 1\r\nevent: message\r\ndata: data: \u2003{\"text\":\"中文 😀\",\u00a0\r\ndata\r\ndata: \"n\":1}\u3000\r\n\r\n  {\"bare\":true} \n\ndata: [DONE]\n\ndata: ignored\n\n";
+            foreach (int step in new[] { 1, 2, 7, 8192 })
+            {
+                using var source = new FragmentedInput(Encoding.UTF8.GetBytes(wire), step);
+                var reader = new SseReader(source);
+                var first = await reader.NextPayloadUtf8Async(default);
+                Check(first is not null && Encoding.UTF8.GetString(first.Value.Span) == "{\"text\":\"中文 😀\",\n\n\"n\":1}", "UTF-8 multiline framing");
+                Check(await reader.NextPayloadAsync(default) == "{\"bare\":true}", "mixed byte and string consumption");
+                Check(await reader.NextPayloadUtf8Async(default) is null && await reader.NextAsync(default) is null, "DONE is terminal");
+            }
+        });
+        await Run("UTF-8 reader keeps malformed input replacement and owns parsed values", async () =>
+        {
+            byte[] bytes = [.. "data: {\"choices\":[{\"delta\":{\"content\":\""u8.ToArray(), 0xff, 0xe4, 0xb8,
+                .. "\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"next\"}}]}\n\n"u8.ToArray()];
+            foreach (int step in new[] { 1, 8192 })
+            {
+                using var source = new FragmentedInput(bytes, step); var reader = new SseReader(source);
+                var first = await reader.NextAsync(default); var next = await reader.NextAsync(default);
+                Check(first!.Choices.Single().Text == "\ufffd\ufffd" && next!.Choices.Single().Text == "next", "replacement matches UTF-8 decoder and prior chunk survives buffer reuse");
+            }
+        });
+        await Run("UTF-8 reader enforces metadata limits and rejects partial events", async () =>
+        {
+            foreach (string wire in new[] { "data: {}", "data: {}\n", "data: {}\r", "data: {}\n\rdata: {}" })
+            {
+                using var source = new FragmentedInput(Encoding.UTF8.GetBytes(wire), 1); var reader = new SseReader(source);
+                try { while (await reader.NextPayloadUtf8Async(default) is not null) { } throw new InvalidOperationException("partial event accepted"); }
+                catch (ConversionFailure error) when (error.Code == "incomplete_event") { }
+            }
+            const string metadata = "event: long-metadata\r\ndata: {}\r\n\r\n";
+            using var bounded = new FragmentedInput(Encoding.UTF8.GetBytes(metadata), 1);
+            try { await new SseReader(bounded, Encoding.UTF8.GetByteCount(metadata) - 1).NextPayloadUtf8Async(default); throw new InvalidOperationException("metadata bypassed limit"); }
+            catch (ConversionFailure error) when (error.Code == "event_limit") { }
+        });
+        await Run("UTF-8 framing allocation stays bounded across many payloads", () =>
+        {
+            string text = new('x', 1024); byte[] bytes = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("data: {\"text\":\"" + text + "\"}\n\n", 512)));
+            using var warm = new MemoryStream(bytes); new SseReader(warm).NextPayloadUtf8Async(default).GetAwaiter().GetResult();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            using var source = new MemoryStream(bytes); var reader = new SseReader(source); int count = 0;
+            while (reader.NextPayloadUtf8Async(default).GetAwaiter().GetResult() is { } payload) { Check(payload.Length == 1035, "exact payload length"); count++; }
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Check(count == 512 && allocated < 256 << 10, "framing half a MiB must allocate less than 256 KiB");
+            return Task.CompletedTask;
+        });
         await Run("SSE framing preserves split CRLF, UTF-8 and exact event limits", async () =>
         {
             const string wire = "\ufeff: comment\r\nid: 1\r\ndata: {\"text\":\"中文\",\r\ndata: \"n\":1}\r\n\r\ndata: [DONE]\r\n\r\n";

@@ -143,6 +143,7 @@ internal static class StreamTests
             var body = JsonNode.Parse(request.Body)!; Check(body["messages"]!.AsArray().Count == 2 && OpenWire.Text(body["messages"]![0]!["content"]) == "ok" && OpenWire.Text(body["messages"]![1]!["role"]) == "user", "image promotion"); return Task.CompletedTask;
         });
         tests.AddRange(await ToolArgumentTests.Run());
+        tests.AddRange(await Utf8ResponseTests.Run());
         return tests;
     }
 }

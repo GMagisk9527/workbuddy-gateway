@@ -35,6 +35,14 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     public (JsonObject Raw, ChatChunk Chunk) Feed(string payload)=>Feed(Encoding.UTF8.GetBytes(payload));
     public (JsonObject Raw, ChatChunk Chunk) Feed(ReadOnlyMemory<byte> payload)
     {
+        var (raw, chunk) = FeedCore(payload, materializeRaw: true);
+        return (raw!, chunk);
+    }
+    // Responses uses the typed chunk and accumulated state, not Chat's unknown
+    // fields. Only materialize the full DOM when identity restoration needs it.
+    public ChatChunk FeedResponses(ReadOnlyMemory<byte> payload) => FeedCore(payload, materializeRaw: false).Chunk;
+    (JsonObject? Raw, ChatChunk Chunk) FeedCore(ReadOnlyMemory<byte> payload, bool materializeRaw)
+    {
         Changes.Clear();
         JsonDocument document;
         try { document=JsonDocument.Parse(payload,new JsonDocumentOptions{MaxDepth=10000}); }
@@ -44,36 +52,67 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
         var root=document.RootElement;
         if(root.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) throw new OpenAiFailure("invalid_request","请求体必须是 JSON 对象");
         var parsed = ChunkReader.Parse(root); ReceivedOutput |= parsed.HasOutput;
-        var raw = root.ValueKind==JsonValueKind.Null ? new JsonObject() : (JsonObject)ToNode(root)!;
-        if (raw["usage"] is JsonObject evidence) { Reserve(evidence.ToJsonString()); Usage = (JsonObject)evidence.DeepClone(); }
-        if (responseRestore is { Active: true })
-        { ResponseIdentityWire.Apply(raw, responseRestore, restorers); parsed = ChunkReader.Parse(raw.ToJsonString()); }
-        if (Text(raw["id"]) != "") Id = Text(raw["id"]);
-        if (Text(raw["model"]) != "") Model = Text(raw["model"]);
-        if (raw["created"] is not null) Created = Int(raw["created"]);
-        int choiceIndex = -1;
-        foreach (var choice in Items(raw["choices"]).OfType<JsonObject>())
+        var usage = Field(root, "usage");
+        if (usage.ValueKind == JsonValueKind.Object)
         {
+            var evidence = (JsonObject)ToNode(usage)!;
+            Reserve(evidence.ToJsonString()); Usage = evidence;
+        }
+        JsonObject? raw = materializeRaw || responseRestore is { Active: true }
+            ? root.ValueKind == JsonValueKind.Null ? new JsonObject() : (JsonObject)ToNode(root)! : null;
+        if (responseRestore is { Active: true })
+        {
+            ResponseIdentityWire.Apply(raw!, responseRestore, restorers);
+            using var restored = JsonDocument.Parse(raw!.ToJsonString(), new JsonDocumentOptions { MaxDepth = 10000 });
+            parsed = ChunkReader.Parse(restored.RootElement);
+            Accumulate(restored.RootElement);
+        }
+        else Accumulate(root);
+        return (raw, parsed);
+        }
+    }
+    static JsonElement Field(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) ? field : default;
+    static string String(JsonElement value) => value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+    static long Integer(JsonElement value) => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long n) ? n : 0;
+    static IEnumerable<JsonElement> Elements(JsonElement value) => value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
+    void Append(JsonElement delta, string name, StringBuilder target)
+    { string text = String(Field(delta, name)); Reserve(text); target.Append(text); }
+    void Accumulate(JsonElement root)
+    {
+        string id = String(Field(root, "id")), model = String(Field(root, "model"));
+        if (id != "") Id = id;
+        if (model != "") Model = model;
+        var created = Field(root, "created");
+        if (created.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)) Created = Integer(created);
+        int choiceIndex = -1;
+        foreach (var choice in Elements(Field(root, "choices")))
+        {
+            if (choice.ValueKind != JsonValueKind.Object) continue;
             choiceIndex++;
-            if (Text(choice["finish_reason"]) != "") FinishReason = Text(choice["finish_reason"]);
-            if (choice["delta"] is not JsonObject d) continue;
-            if (Text(d["role"]) != "") Role = Text(d["role"]);
-            foreach (var (name, target) in new[] { ("content", Content), ("reasoning_content", Reasoning), ("refusal", Refusal) })
-            { string text = Text(d[name]); Reserve(text); target.Append(text); }
-            foreach (var fragment in Items(d["tool_calls"]).OfType<JsonObject>())
+            string finish = String(Field(choice, "finish_reason"));
+            if (finish != "") FinishReason = finish;
+            var d = Field(choice, "delta");
+            if (d.ValueKind != JsonValueKind.Object) continue;
+            string role = String(Field(d, "role"));
+            if (role != "") Role = role;
+            Append(d, "content", Content); Append(d, "reasoning_content", Reasoning); Append(d, "refusal", Refusal);
+            foreach (var fragment in Elements(Field(d, "tool_calls")))
             {
-                int index = (int)Int(fragment["index"]);
+                if (fragment.ValueKind != JsonValueKind.Object) continue;
+                int index = (int)Integer(Field(fragment, "index"));
                 if (!tools.TryGetValue(index, out var tool))
                 {
                     if (512 > limit - retained) throw new ConversionFailure("output_budget_exceeded");
                     budget?.Add(512);retained += 512; tool = new() { Index = index }; tools.Add(index, tool); Calls.Add(tool);
                 }
-                string id = Text(fragment["id"]), type = Text(fragment["type"]);
-                if (id != "") { Reserve(id); tool.Id = id; }
+                string toolId = String(Field(fragment, "id")), type = String(Field(fragment, "type"));
+                if (toolId != "") { Reserve(toolId); tool.Id = toolId; }
                 if (type != "") tool.Type = type;
-                if (fragment["function"] is JsonObject fn)
+                var fn = Field(fragment, "function");
+                string arguments = "";
+                if (fn.ValueKind == JsonValueKind.Object)
                 {
-                    string name = Text(fn["name"]), arguments = Text(fn["arguments"]);
+                    string name = String(Field(fn, "name")); arguments = String(Field(fn, "arguments"));
                     if (name != "") { Reserve(name); tool.Name = name; }
                     Reserve(arguments); tool.Arguments.Append(arguments);
                     if ((tool.Id == "" || tool.Name == "") && tool.Arguments.Length > 1 << 20) throw new ConversionFailure("pending_tool_limit");
@@ -81,10 +120,8 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
                 // Only the first Responses delta needs the accumulated prefix.
                 // Capture its boundary, including when this tool appears again
                 // in the same chunk, without copying every preceding fragment.
-                Changes.Add(new(choiceIndex, index, tool.Id, tool.Name, fragment["function"] is JsonObject function ? Text(function["arguments"]) : "", tool.Arguments.Length));
+                Changes.Add(new(choiceIndex, index, tool.Id, tool.Name, arguments, tool.Arguments.Length));
             }
-        }
-        return (raw, parsed);
         }
     }
     internal string ArgumentsThrough(ToolChange change) => tools[change.Index].Arguments.ToString(0, change.AccumulatedLength);
