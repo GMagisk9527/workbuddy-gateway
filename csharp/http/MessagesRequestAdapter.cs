@@ -1,9 +1,11 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Encodings.Web;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using StreamingMigration;
 using TypedMigration;
 
@@ -12,7 +14,7 @@ namespace HttpMigration;
 public sealed record PreparedMessages(string Model, bool Stream, bool Thinking, bool Hidden, byte[] UpstreamBody)
 {public bool OutboundCompatible{get;init;} public ResponseIdentityPlan? ResponseRestore{get;init;}}
 
-public static class MessagesRequestAdapter
+public static partial class MessagesRequestAdapter
 {
     public const int DefaultLimit = 32 << 20;
     static readonly JsonDocumentOptions Document = new() { MaxDepth = 256 };
@@ -66,8 +68,9 @@ public static class MessagesRequestAdapter
             }
             RequestValidation.Input(root); RequestValidation.Output(root);
 
-            var typed=WireReader.ReadBorrowed(root);
-            if(prompts is not null)typed=IdentityRewrite.BeforeMap(typed,root,prompts.Identity);
+            bool omitLeadingSystemBlock = HasClientAttributionBlock(JsonFields.Get(root, "system"));
+            var typed = WireReader.ReadBorrowed(root, omitLeadingSystemBlock);
+            if (prompts is not null) typed = IdentityRewrite.BeforeMap(typed, root, prompts.Identity, omitLeadingSystemBlock);
             var mapped = MessageMapper.Map(typed);
             var messages = mapped.Messages;
             if (mapped.SystemText is { } system) messages = messages.Insert(0, new TextMessage(MessageRole.Parse("system"), system));
@@ -120,6 +123,22 @@ public static class MessagesRequestAdapter
         catch (JsonException) { throw new RequestFailure("无效的 JSON 请求体"); }
         catch (InvalidOperationException) { throw new RequestFailure("无效的 JSON 字段或 Unicode 文本"); }
     }
+
+    // Claude Code encodes client-side billing attribution as its first system text
+    // block. That metadata has no Chat field and is separate from model instructions.
+    static bool HasClientAttributionBlock(JsonElement system)
+    {
+        if (system.ValueKind != JsonValueKind.Array || system.GetArrayLength() == 0) return false;
+        var first = system[0];
+        var text = JsonFields.Get(first, "text");
+        return JsonFields.Get(first, "type") is { ValueKind: JsonValueKind.String } type && type.ValueEquals("text"u8)
+            && text.ValueKind == JsonValueKind.String && JsonMarshal.GetRawUtf8Value(text).Length <= 1024
+            && ClientAttribution().IsMatch(text.GetString()!);
+    }
+
+    [GeneratedRegex(@"\Ax-anthropic-billing-header: cc_version=[0-9][A-Za-z0-9._-]*; cc_entrypoint=[A-Za-z0-9._-]+;(?: cch=[0-9a-fA-F]+;)?(?: cc_workload=[A-Za-z0-9._-]+;)?\z")]
+    private static partial Regex ClientAttribution();
+
     static double Number(JsonElement e)
     {
         if (!e.TryGetDouble(out double n) || !double.IsFinite(n)) throw new RequestFailure("数值超出支持范围");

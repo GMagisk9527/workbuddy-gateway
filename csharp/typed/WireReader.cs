@@ -56,11 +56,14 @@ public static class WireReader
     // The caller must keep root's JsonDocument alive through WireWriter encoding.
     // The normal Read overloads continue to produce independently owned models.
     public static InputRequest ReadBorrowed(JsonElement root)=>Read(root,true);
-    static InputRequest Read(JsonElement root,bool borrowToolResults)
+    public static InputRequest ReadBorrowed(JsonElement root, bool omitLeadingSystemBlock) => Read(root, true, omitLeadingSystemBlock);
+    static InputRequest Read(JsonElement root,bool borrowToolResults,bool omitLeadingSystemBlock=false)
     {
         if (root.ValueKind != JsonValueKind.Object) throw new JsonException("object required");
         var system = Property(root, "system");
-        var systemText = system.ValueKind == JsonValueKind.String ? Text(system) : string.Join("\n", Items(system).Where(b => Text(b, "type") == "text" && Text(b, "text") != "").Select(b => Text(b, "text")));
+        var systemBlocks = Items(system);
+        if (omitLeadingSystemBlock) systemBlocks = systemBlocks.Skip(1);
+        var systemText = system.ValueKind == JsonValueKind.String ? Text(system) : string.Join("\n", systemBlocks.Where(b => Text(b, "type") == "text" && Text(b, "text") != "").Select(b => Text(b, "text")));
         var messages = Items(Property(root, "messages")).Where(m => m.ValueKind == JsonValueKind.Object)
             .Select(m => new InputMessage(MessageRole.Parse(Text(m, "role")), ReadContent(Property(m, "content"),borrowToolResults,borrowToolResults&&Text(m,"role")=="user"))).ToImmutableArray();
         var tools = ImmutableArray.CreateBuilder<InputTool>();

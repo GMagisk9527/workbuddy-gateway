@@ -98,9 +98,54 @@ internal static class ConsoleTests
         File.WriteAllText(Path.Combine(root,"history-seed.json"),JsonSerializer.Serialize(new{schema=1,requests=new[]{new{account="old",model="hy3",at=now,status=200,complete=true,latencyMs=10,ttftMs=1}}}));
         var imported=new ConsoleTelemetry(settings,[new("new","test.json","cn")],new Dictionary<string,string>{{"old","new"}});Check(imported.Rows().Single().Account=="new","Legacy identity maps into owned account");
         var stats=JsonSerializer.SerializeToElement(imported.Stats(new QueryCollection()));Check(stats.GetProperty("summary").GetProperty("ttftSamples").GetInt32()==0,"Unknown legacy TTFT never reclassified");Check(imported.Save(),"Seed persisted");
+        var appended=new ConsoleTelemetry(settings,[]);appended.Complete(new("a","hy3",now,200,true,null,null,null,null,null,1,null,"messages","log-only"),[]);Check(appended.FlushHistory(),"Append log flushed");
+        var replayed=new ConsoleTelemetry(settings,[]);Check(replayed.Rows().Any(r=>r.Trace=="log-only"),"Append-only history survives restart without a snapshot");
+        File.AppendAllText(Path.Combine(root,"history.jsonl"),"{\"seq\":99999,\"row\":{");var torn=new ConsoleTelemetry(settings,[]);Check(torn.Storage!="invalid"&&torn.Rows().Any(r=>r.Trace=="log-only"),"Torn tail ignored on load");
+        torn.Complete(new("a","hy3",now+1,200,true,null,null,null,null,null,1,null,"messages","after-torn"),[]);Check(torn.FlushHistory(),"Append after torn repair");
+        var afterTorn=new ConsoleTelemetry(settings,[]);Check(afterTorn.Storage!="invalid"&&afterTorn.Rows().Any(r=>r.Trace=="after-torn"),"Append after torn repair survives restart");
+        string seqRoot=Path.Combine(root,"seq-accounting");using(var seqSettings=new ConsoleSettings(new(),seqRoot))
+        {
+            for(int round=0;round<3;round++)
+            {
+                var seq=new ConsoleTelemetry(seqSettings,[]);
+                for(int i=0;i<1500;i++)seq.Complete(new("a","hy3",now+i,200,true,null,null,null,null,null,1,null,"messages",$"seq-{round}-{i}"),[]);
+                Check(seq.FlushHistory(),"Append round flushed");
+            }
+            var recovered=new ConsoleTelemetry(seqSettings,[]);Check(recovered.NeedsSnapshot,"Recovery preserves rows pending a snapshot");
+        }
+        string partialRoot=Path.Combine(root,"partial-write");using(var partialSettings=new ConsoleSettings(new(),partialRoot))
+        {
+            var partial=new ConsoleTelemetry(partialSettings,[]);partial.Complete(new("a","hy3",now,200,true,null,null,null,null,null,1,null,"messages","partial"),[]);
+            partial.HistoryLogStreamFactory=path=>new PartialWriteStream(path);
+            Check(!partial.FlushHistory(),"Partial append reports failure");
+            partial.HistoryLogStreamFactory=null;Check(partial.FlushHistory(),"Retry after partial append succeeds");
+            var restoredPartial=new ConsoleTelemetry(partialSettings,[]);Check(restoredPartial.Storage!="invalid"&&restoredPartial.Rows().Any(r=>r.Trace=="partial"),"Partial append retry survives restart");
+        }
         string history=Path.Combine(root,"history.json");File.WriteAllText(history,"{\"schema\":1,\"requests\":[{\"account\":\"a\",\"model\":\"m\",\"at\":"+now+",\"latencyMs\":1},{}]}");string bad=File.ReadAllText(history);
         var corrupt=new ConsoleTelemetry(settings,[]);Check(corrupt.Storage=="invalid"&&corrupt.Rows().Length==0&&!corrupt.Save()&&File.ReadAllText(history)==bad,"Corrupt history never partially loads or overwrites");
         var memory=new ConsoleTelemetry(settings,[]);for(int i=0;i<20100;i++)memory.Complete(new("a","m",now,200,true,null,null,null,null,null,1,null),[]);Check(memory.Rows().Length==20000&&memory.Logs(2000).Length==1000,"History and logs bounded");
         var trace=memory.Begin("messages","bounded");trace.Model("m");trace.Attempt("a");trace.Observe("{\"credit\":1e308,\"prompt_tokens\":9e18,\"completion_tokens\":9e18}","bad\ncode",200,true);trace.End(200);Check(memory.Rows().Length==20000,"Extreme metadata cannot throw or grow history");
     }
+}
+
+// Test-only stream: writes half of the first batch, flushes and fails once.
+internal sealed class PartialWriteStream : Stream
+{
+    readonly FileStream inner;bool failed;
+    internal PartialWriteStream(string path){inner=new(path,FileMode.OpenOrCreate,FileAccess.Write,FileShare.Read);inner.Seek(0,SeekOrigin.End);}
+    public override bool CanRead=>false;public override bool CanSeek=>true;public override bool CanWrite=>true;
+    public override long Length=>inner.Length;
+    public override long Position{get=>inner.Position;set=>inner.Position=value;}
+    public override void Flush()=>inner.Flush();
+    public override int Read(byte[] buffer,int offset,int count)=>throw new NotSupportedException();
+    public override long Seek(long offset,SeekOrigin origin)=>inner.Seek(offset,origin);
+    public override void SetLength(long value)=>inner.SetLength(value);
+    public override void Write(byte[] buffer,int offset,int count)=>Write(buffer.AsSpan(offset,count));
+    public override void Write(ReadOnlySpan<byte> buffer)
+    {
+        if(!failed){failed=true;inner.Write(buffer[..Math.Max(1,buffer.Length/2)]);inner.Flush();throw new IOException("synthetic partial write");}
+        inner.Write(buffer);
+    }
+    public override void WriteByte(byte value)=>inner.WriteByte(value);
+    protected override void Dispose(bool disposing){if(disposing)inner.Dispose();base.Dispose(disposing);}
 }

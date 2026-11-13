@@ -51,6 +51,15 @@ internal static class StreamTests
                 Check(result.Outcome == StreamOutcome.Failed && !output.Contains("[DONE]", StringComparison.Ordinal) && !output.Contains("response.completed", StringComparison.Ordinal) && !output.Contains("\"finish_reason\":\"stop\"", StringComparison.Ordinal), "no false terminal");
             }
         });
+        await Test("non-object upstream event is a controlled protocol failure", async () =>
+        {
+            foreach (bool responses in new[] { false, true })
+            {
+                int callbacks = 0;
+                var (result, output) = await Pump(Text + "data: []\n\n", Request(responses), terminal: _ => callbacks++);
+                Check(result.Outcome == StreamOutcome.Failed && callbacks == 1 && output.Contains("\"error\"", StringComparison.Ordinal) && !output.Contains("[DONE]", StringComparison.Ordinal), "controlled invalid upstream event");
+            }
+        });
         await Test("EOF or DONE without a finish remains failure", async () =>
         {
             foreach (string suffix in new[] { "", "data: [DONE]\n\n" })
