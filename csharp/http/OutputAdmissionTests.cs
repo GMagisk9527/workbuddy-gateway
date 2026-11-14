@@ -23,9 +23,55 @@ internal static class OutputAdmissionTests
         gate.Configure(new(512,4096));second.Add(1000);using var fresh=gate.Acquire();Reject(()=>fresh.Add(513));
         Check(gate.Status.Request==512,"Hot shrink affects new request budgets without terminating old lease");second.Dispose();fresh.Dispose();Check(gate.Status.Used==0,"Output leases idempotently release all global reservations");
         using(var settings=new ConsoleSettings(new())){settings.AttachOutput(gate);settings.Update("""{"output":{"maxRequestBytes":2048,"maxSharedBytes":8192}}""",settings.View().Revision);Check(gate.Options==new OutputOptions(2048,8192),"Output budget hot reload");}
+        await Reservations();
         foreach(string path in new[]{"/v1/messages","/v1/chat/completions","/v1/responses"})foreach(bool stream in new[]{false,true})foreach(bool shared in new[]{false,true})
             await Http(Path.Combine(root,Guid.NewGuid().ToString("N")),path,stream,shared);
         return checks;
+    }
+    static async Task Reservations()
+    {
+        int samples=0;var gate=new OutputAdmission(()=>{Interlocked.Increment(ref samples);return MemorySample.Empty;});
+        gate.Configure(new(65536,131072));
+        using(var lease=gate.Acquire())
+        {
+            for(int i=0;i<4096;i++)lease.Add(1);
+            Check(samples==1,"Small appends only sample/refill once per reserved block");
+            lease.Scratch(512);lease.Remove(4096);lease.Add(3584);
+            Check(samples==2,"Scratch and remove reuse the existing reservation");
+            // An in-flight request keeps its old per-request limit and can use
+            // already reserved shared blocks after a hot shrink, as before.
+            gate.Configure(new(64,128));lease.Add(1);
+            Reject(()=>lease.Add(8192));
+            using var fresh=gate.Acquire();Reject(()=>fresh.Add(65));Reject(()=>fresh.Add(1));
+            Check(gate.Status.Used==8192,"Shrinking does not revoke an existing block or admit a new request");
+        }
+        Check(gate.Status.Used==0&&gate.Status.Rejected==3,"Refill rejection and release remain exact after hot shrink");
+        gate.Configure(new(4096,16384));
+        var leases=Enumerable.Range(0,32).Select(_=>gate.Acquire()).ToArray();
+        int admitted=0,denied=0;
+        await Task.WhenAll(leases.Select(lease=>Task.Run(()=>
+        {
+            try{lease.Add(4096);Interlocked.Increment(ref admitted);}
+            catch(ConversionFailure e)when(e.Code=="output_budget_exceeded"){Interlocked.Increment(ref denied);}
+        })));
+        Check(admitted==4&&denied==28&&gate.Status.Used==16384&&gate.Status.Rejected==31,"Concurrent refills never over-admit the shared budget");
+        foreach(var lease in leases)lease.Dispose();
+        Check(gate.Status.Used==0,"Concurrent leases release all reservations");
+        gate.Configure(new(1<<20,1<<22));
+        for(int round=0;round<24;round++)
+        {
+            var lease=gate.Acquire();lease.Scratch(16);
+            var workers=Enumerable.Range(0,4).Select(_=>Task.Run(()=>
+            {
+                for(int i=0;i<256;i++)
+                {
+                    try{lease.Add(8);lease.Scratch(32);lease.Remove(8);}
+                    catch(ObjectDisposedException){break;}
+                }
+            })).Append(Task.Run(()=>{lease.Dispose();lease.Dispose();}));
+            await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(5));lease.Dispose();
+        }
+        Check(gate.Status.Used==0,"Concurrent scratch/remove/cancellation disposal neither leaks nor deadlocks");
     }
     sealed class Control:IAccountControlPlane
     {

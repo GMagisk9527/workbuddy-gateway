@@ -11,17 +11,20 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
     readonly long created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     readonly Dictionary<int, (int Index, string Id)> tools = [];
     readonly List<bool> parts = [];
+    readonly List<ResponsesEvent> output = [];
     int next, sequence, message = -1, reasoning = -1;
     string messageId = "", reasoningId = "";
-    JsonObject Event(string type, JsonObject fields) { fields["type"] = type; fields["sequence_number"] = sequence++; return fields; }
-    public IReadOnlyList<JsonObject> Start()
+    ResponsesEvent Event(string type, JsonObject fields) { fields["type"] = type; fields["sequence_number"] = sequence; return new(type,sequence++,fields); }
+    ResponsesEvent Delta(string type,string itemId,int index,string delta,int part=0)=>new(type,sequence++,ItemId:itemId,OutputIndex:index,PartIndex:part,Delta:delta);
+    public IReadOnlyList<ResponsesEvent> Start()
     {
         var response = ResponsesOutput.Envelope(id, request.Model, created, request.Metadata);
         return [Event("response.created", new() { ["response"] = response }), Event("response.in_progress", new() { ["response"] = response.DeepClone() })];
     }
-    public IReadOnlyList<JsonObject> Feed(ChatChunk chunk, ChatState state)
+    // Borrowed list: the pump fully sends it before the next Feed call.
+    public IReadOnlyList<ResponsesEvent> Feed(ChatChunk chunk, ChatState state)
     {
-        var output = new List<JsonObject>();
+        output.Clear();
         int choiceIndex = -1;
         foreach (var choice in chunk.Choices)
         {
@@ -34,7 +37,7 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
                     output.Add(Event("response.output_item.added", new() { ["output_index"] = reasoning, ["item"] = new JsonObject { ["id"] = reasoningId, ["type"] = "reasoning", ["status"] = "in_progress", ["summary"] = new JsonArray() } }));
                     output.Add(Event("response.reasoning_summary_part.added", new() { ["item_id"] = reasoningId, ["output_index"] = reasoning, ["summary_index"] = 0, ["part"] = new JsonObject { ["type"] = "summary_text", ["text"] = "" } }));
                 }
-                output.Add(Event("response.reasoning_summary_text.delta", new() { ["item_id"] = reasoningId, ["output_index"] = reasoning, ["summary_index"] = 0, ["delta"] = choice.Reasoning }));
+                output.Add(Delta("response.reasoning_summary_text.delta",reasoningId,reasoning,choice.Reasoning));
             }
             void TextPart(bool refusal, string delta)
             {
@@ -51,7 +54,7 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
                     var part = refusal ? new JsonObject { ["type"] = "refusal", ["refusal"] = "" } : new JsonObject { ["type"] = "output_text", ["text"] = "", ["annotations"] = new JsonArray() };
                     output.Add(Event("response.content_part.added", new() { ["item_id"] = messageId, ["output_index"] = message, ["content_index"] = index, ["part"] = part }));
                 }
-                output.Add(Event(refusal ? "response.refusal.delta" : "response.output_text.delta", new() { ["item_id"] = messageId, ["output_index"] = message, ["content_index"] = index, ["delta"] = delta }));
+                output.Add(Delta(refusal ? "response.refusal.delta" : "response.output_text.delta",messageId,message,delta,index));
             }
             TextPart(false, choice.Text); TextPart(true, choice.Refusal);
             foreach (var change in state.Changes.Where(c => c.Choice == choiceIndex))
@@ -66,14 +69,14 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
                     output.Add(Event("response.output_item.added", new() { ["output_index"] = identity.Index, ["item"] = item }));
                 }
                 string delta = opened ? state.ArgumentsThrough(change) : change.Arguments;
-                if (!custom && delta != "") output.Add(Event("response.function_call_arguments.delta", new() { ["item_id"] = identity.Id, ["output_index"] = identity.Index, ["delta"] = delta }));
+                if (!custom && delta != "") output.Add(Delta("response.function_call_arguments.delta",identity.Id,identity.Index,delta));
             }
         }
         return output;
     }
-    public IReadOnlyList<JsonObject> Finish(ChatState state)
+    public IReadOnlyList<ResponsesEvent> Finish(ChatState state)
     {
-        state.Validate(); string status = ResponsesOutput.Status(state.FinishReason); var events = new List<JsonObject>(); var items = new SortedDictionary<int, JsonObject>();
+        state.Validate(); string status = ResponsesOutput.Status(state.FinishReason); var events = new List<ResponsesEvent>(); var items = new SortedDictionary<int, JsonObject>();
         void Done(int index, JsonObject item) { items.Add(index, item); events.Add(Event("response.output_item.done", new() { ["output_index"] = index, ["item"] = item.DeepClone() })); }
         if (reasoning >= 0)
         {
@@ -121,6 +124,6 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
     {
         var response = ResponsesOutput.Envelope(id, request.Model, created, request.Metadata); response["status"] = "failed";
         response["error"] = new JsonObject { ["code"] = code, ["message"] = "上游响应不完整" };
-        return Event("response.failed", new() { ["response"] = response });
+        var fields=new JsonObject { ["response"] = response, ["type"] = "response.failed", ["sequence_number"] = sequence++ };return fields;
     }
 }

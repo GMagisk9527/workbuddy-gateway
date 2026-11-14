@@ -46,3 +46,55 @@ lock, without an asynchronous queue or dropped-log policy. Deterministic stalled
 I/O tests verify rows, traces, account summaries and history flushes remain
 available, with concurrent in-memory/disk log order preserved. Log retention,
 rotation and the billing WAL format/durability policy are unchanged.
+
+## Stream state, Responses deltas and output admission (2026-11-14)
+
+This iteration uses main `79acdc42cc67296897077bdf6c9951d978081b83` as its
+baseline, with the same benchmark, SDK/runtime, warmups and five-round median
+method described above. No production configuration or model requests are used.
+
+| Path | Baseline allocated bytes | Updated allocated bytes | Reduction | Baseline ms | Updated ms |
+|---|---:|---:|---:|---:|---:|
+| Chat stream | 15,075,000 | 14,013,536 | 7.04% | 10.199 | 10.468 |
+| Responses stream | 16,990,968 | 14,861,544 | 12.53% | 9.251 | 7.995 |
+| Messages stream (control) | 2,718,352 | 2,718,352 | 0% | 4.767 | 4.665 |
+| Chat aggregate (control) | 16,076,632 | 16,076,632 | 0% | 9.004 | 10.959 |
+| Responses aggregate (control) | 8,043,080 | 8,043,120 | ~0% | 6.226 | 5.990 |
+
+Allocation reductions are repeatable; this short timing sample is noisy,
+including the unchanged aggregate control. It does not establish production
+latency or AOT throughput gains. Output bytes, write counts and flush counts
+match the baseline for every path. The benchmark does not use the HTTP memory
+admission lease, so its timings do not measure that lock optimization.
+
+Streamed Chat keeps cumulative logical output accounting but no longer retains
+content/reasoning/refusal builders or reserves shared retained-memory budget for
+already forwarded text. Tools, usage evidence, restoration buffers, frame scratch
+and held terminal frames remain accounted for. Aggregated Chat and all Responses
+paths still accumulate the text needed for their final bodies/events. A
+streaming-only ChatState explicitly refuses aggregate completion.
+
+Responses text/refusal/reasoning/function-argument deltas use value events and
+Utf8JsonWriter with cached property names. Complex lifecycle events keep the
+existing DOM path. A request-local event list is borrowed only until the next
+Feed; the pump awaits each write and flush before reusing it. Deferred success
+events still own their bytes and wait for validation and settlement.
+
+Output admission keeps local used/scratch accounting under a lease lock. It only
+takes the shared lock and samples memory when reserving another block (up to
+64 KiB), or when releasing a lease. An offline regression verifies 4,096 one-byte
+appends use one sample/refill instead of 4,096. Existing reserved blocks and pinned
+request limits survive a hot shrink; refills and new requests consult current
+shared limits. Concurrent refills, request-limit failures, scratch/remove and
+idempotent cancellation disposal verify exact rejection counts and no leaks.
+The shared budget remains authoritative for every reservation.
+
+Regressions cover byte-exact typed-event field order/escaping, contiguous event
+sequences, delayed downstream writes, split-prefix response restoration, late
+tool identities, custom tools, measured usage, failed tails and settlement
+barriers. Emitting 64 Chat text chunks reserves the same memory as one chunk of
+the same size, while cumulative logical overflow still fails. Differential
+checks against the baseline compare 1,400 Chat/Responses results (successful
+SSE also compared as raw text after normalizing generated IDs/times) and 350
+Messages results. Existing HTTP output-budget/WAL checks continue to exercise all
+three protocols and both streaming and aggregate modes without real model calls.
