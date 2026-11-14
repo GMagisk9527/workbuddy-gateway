@@ -6,7 +6,7 @@ using static OpenAiProtocols.OpenWire;
 
 namespace OpenAiProtocols;
 
-public sealed class ChatState(string model, long limit,IRetainedOutputBudget? budget=null,ResponseIdentityPlan? responseRestore=null)
+public sealed class ChatState(string model, long limit,IRetainedOutputBudget? budget=null,ResponseIdentityPlan? responseRestore=null,bool retainText=true)
 {
     public sealed class Tool
     {
@@ -28,9 +28,9 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     public JsonObject? Usage { get; private set; }
     public bool ReceivedOutput { get; private set; }
     long retained;
-    void Reserve(string value)
+    void Reserve(string value,bool keep=true)
     {
-        int bytes = Encoding.UTF8.GetByteCount(value); if (bytes > limit - retained) throw new ConversionFailure("output_budget_exceeded");budget?.Add(bytes); retained += bytes;
+        int bytes = Encoding.UTF8.GetByteCount(value); if (bytes > limit - retained) throw new ConversionFailure("output_budget_exceeded");if(keep)budget?.Add(bytes); retained += bytes;
     }
     public (JsonObject Raw, ChatChunk Chunk) Feed(string payload)=>Feed(Encoding.UTF8.GetBytes(payload));
     public (JsonObject Raw, ChatChunk Chunk) Feed(ReadOnlyMemory<byte> payload)
@@ -76,7 +76,13 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     static long Integer(JsonElement value) => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out long n) ? n : 0;
     static IEnumerable<JsonElement> Elements(JsonElement value) => value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
     void Append(JsonElement delta, string name, StringBuilder target)
-    { string text = String(Field(delta, name)); Reserve(text); target.Append(text); }
+    {
+        string text = String(Field(delta, name));
+        // Chat streaming forwards the cleaned chunk, never an accumulated body.
+        // Keep its cumulative logical limit without retaining or reserving text
+        // that is already sent; frame scratch remains admitted by the writer.
+        Reserve(text,retainText);if(retainText)target.Append(text);
+    }
     void Accumulate(JsonElement root)
     {
         string id = String(Field(root, "id")), model = String(Field(root, "model"));
@@ -132,6 +138,7 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     }
     public JsonObject Completion()
     {
+        if(!retainText)throw new InvalidOperationException("Streaming-only state has no aggregate body");
         Validate();
         var message = new JsonObject { ["role"] = Role, ["content"] = Content.ToString() };
         if (Refusal.Length > 0) message["refusal"] = Refusal.ToString();
