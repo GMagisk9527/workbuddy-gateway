@@ -12,7 +12,7 @@ public sealed class MessageStreamState(string model, bool wantThinking, Reasonin
         public int Index { get; } = index; public string Id = "", Name = "";
         public bool Open; public StringBuilder Arguments { get; } = new(); public int Sent;
     }
-    readonly EventWriter writer = new();
+    readonly EventBufferWriter writer = new(budget is null ? null : budget.Scratch);
     readonly Dictionary<int, ToolSlot> tools = [];
     readonly List<int> toolOrder = [];
     readonly List<(ProtocolEvent Event, int Bytes)> pending = [];

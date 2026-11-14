@@ -8,6 +8,8 @@ dll="$PWD/out/jit/HttpMigration.dll"
 dotnet build http/HttpMigration.csproj -c Release --configfile NuGet.Config -p:GatewayLibraryBuild=true -p:NuGetAudit=false -p:UseSharedCompilation=false -o out/jit
 dotnet build bench-aot/BenchAot.csproj -c Release --configfile NuGet.Config -p:NuGetAudit=false -p:GatewayAssemblies="$PWD/out/jit" -o out/aot-reference
 dotnet out/aot-reference/BenchAot.dll > out/verification/aot-reference.json
+dotnet build bench-outbound/BenchOutbound.csproj -c Release --configfile NuGet.Config -p:NuGetAudit=false -p:GatewayAssemblies="$PWD/out/jit" -o out/outbound-bench
+DOTNET_TieredCompilation=0 dotnet out/outbound-bench/BenchOutbound.dll > out/verification/outbound-bench.json
 python3 - <<'PY'
 import json,pathlib
 out=pathlib.Path('out/verification');d=json.loads((out/'aot-reference.json').read_text());assert d['Checks']==2508

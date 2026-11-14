@@ -144,6 +144,7 @@ internal static class StreamTests
         });
         tests.AddRange(await ToolArgumentTests.Run());
         tests.AddRange(await Utf8ResponseTests.Run());
+        tests.AddRange(await FrameBufferTests.Run());
         return tests;
     }
 }

@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><TargetFramework>net11.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><EnableNETAnalyzers>true</EnableNETAnalyzers></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../streaming/StreamingMigration.csproj" /><Compile Include="../typed/GoJson.cs" Link="GoJson.cs" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../streaming/StreamingMigration.csproj" /><Compile Include="../typed/GoJson.cs" Link="GoJson.cs" /><Compile Include="../streaming/SseFrameBuffer.cs" Link="SseFrameBuffer.cs" /></ItemGroup>
 </Project>
