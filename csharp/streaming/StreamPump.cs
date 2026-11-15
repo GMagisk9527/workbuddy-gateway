@@ -40,6 +40,7 @@ public static class StreamPump
                 {
                     if (chunk.HasOutput && !receivedOutput) options.FirstOutput?.Invoke();
                     receivedOutput |= chunk.HasOutput;
+                    state.ObserveDeliverable(chunk);
                     if (chunk.Choices.Any(c => c.Finish.Length > 0))
                     {
                         options.UpstreamCompleted?.Invoke();
@@ -48,10 +49,10 @@ public static class StreamPump
                     if (options.ResponseRestore is { Active: true } plan) chunk = plan.RestoreChunk(chunk, restorers);
                     await Send(state.Feed(chunk));
                 }
-                var terminal = state.Finish();
-                Notify(StreamOutcome.Complete, "");
+                var terminal = state.Finish(streaming: true);
+                Notify(StreamOutcome.Complete, state.Truncated ? ChunkReader.OutputBudgetExhausted : "");
                 await Send(terminal);
-                return Result(StreamOutcome.Complete, "");
+                return Result(StreamOutcome.Complete, state.Truncated ? ChunkReader.OutputBudgetExhausted : "");
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return Notify(StreamOutcome.Cancelled, "cancelled"); }
             catch (Exception e) when (e is ConversionFailure or IOException or ObjectDisposedException)

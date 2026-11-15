@@ -78,6 +78,7 @@ public sealed class MessageAggregate(long limit,IRetainedOutputBudget? budget=nu
                 {
                     if (chunk.HasOutput && !receivedOutput) options.FirstOutput?.Invoke();
                     receivedOutput |= chunk.HasOutput;
+                    state.ObserveDeliverable(chunk);
                     if (chunk.Choices.Any(c => c.Finish.Length > 0))
                     {
                         options.UpstreamCompleted?.Invoke();
@@ -87,7 +88,7 @@ public sealed class MessageAggregate(long limit,IRetainedOutputBudget? budget=nu
                     foreach (var e in state.Feed(chunk)) e.Accept(accumulator);
                 }
                 foreach (var e in state.Finish()) e.Accept(accumulator);
-                return new(true, "", accumulator.Encode(state.Model), state.Usage, state.RawUsageJson, receivedOutput);
+                return new(true, state.Truncated ? ChunkReader.OutputBudgetExhausted : "", accumulator.Encode(state.Model), state.Usage, state.RawUsageJson, receivedOutput);
             }
             catch (ConversionFailure e) { return new(false, e.Code, null, state.Usage, e.RawUsageJson??state.RawUsageJson, receivedOutput); }
             catch (IOException) { return new(false, "read_error", null, state.Usage, state.RawUsageJson, receivedOutput); }

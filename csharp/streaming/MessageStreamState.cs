@@ -23,12 +23,14 @@ public sealed class MessageStreamState(string model, bool wantThinking, Reasonin
     string model = model, finish = "";
     int nextIndex, pendingIndex = -1, pendingBytes, pendingArgumentBytes;
     long retained, scratch;
-    bool started, refused, completed;
+    bool started, refused, completed, hasDeliverable;
     public Usage Usage { get; private set; } = new(0, 0, 0, 0);
     // Owned JSON text survives document disposal and includes upstream credit
     // evidence which must not be inferred from the normalized client token view.
     public string? RawUsageJson { get; private set; }
     public bool HasFinish => finish.Length != 0;
+    public bool Truncated => finish == "length";
+    public void ObserveDeliverable(ChatChunk chunk) => hasDeliverable |= chunk.HasDeliverable;
     public string Model => model;
 
     static int Bytes(string value) => Encoding.UTF8.GetByteCount(value);
@@ -60,6 +62,7 @@ public sealed class MessageStreamState(string model, bool wantThinking, Reasonin
     public IReadOnlyList<ProtocolEvent> Feed(ChatChunk chunk)
     {
         if (completed) throw new InvalidOperationException("Stream is already terminal");
+        ObserveDeliverable(chunk);
         output = [];
         if (chunk.Model.Length > 0) model = chunk.Model;
         if (!started) { started = true; Emit(new MessageStart(id, model)); }
@@ -138,15 +141,25 @@ public sealed class MessageStreamState(string model, bool wantThinking, Reasonin
             slot.Sent = slot.Arguments.Length; Emit(new ToolDelta(slot.Index, unsent));
         }
     }
-    public IReadOnlyList<ProtocolEvent> Finish()
+    public IReadOnlyList<ProtocolEvent> Finish(bool streaming = false)
     {
         if (completed) throw new InvalidOperationException("Stream is already terminal");
         if (!HasFinish) throw new ConversionFailure("missing_finish");
+        if (Truncated && !hasDeliverable) throw new ConversionFailure(ChunkReader.OutputBudgetExhausted);
         foreach (int index in toolOrder)
         {
             var t = tools[index];
-            if (t.Id.Length == 0 || t.Name.Length == 0) throw new ConversionFailure("incomplete_tool_identity");
-            Temporary(Bytes(t.Arguments.ToString())); ChunkReader.ValidateArguments(t.Arguments.ToString());
+            if (t.Id.Length == 0 || t.Name.Length == 0)
+                throw new ConversionFailure(Truncated ? ChunkReader.OutputBudgetExhausted : "incomplete_tool_identity");
+            if (Truncated && streaming) continue;
+            string arguments = t.Arguments.ToString();
+            Temporary(Bytes(arguments));
+            try { ChunkReader.ValidateArguments(arguments); }
+            catch (ConversionFailure) when (Truncated)
+            {
+                // The non-streaming Anthropic input field must be a JSON object.
+                throw new ConversionFailure(ChunkReader.OutputBudgetExhausted);
+            }
         }
         output = []; StopThinking(); StopText();
         foreach (int index in toolOrder) { var t = tools[index]; if (t.Open) { Emit(new BlockStop(t.Index)); t.Open = false; } }

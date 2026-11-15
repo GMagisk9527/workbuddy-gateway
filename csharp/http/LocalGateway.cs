@@ -21,7 +21,7 @@ public sealed record LocalGatewayOptions(Uri Upstream, byte[] ReasoningKey, int 
     long MaxOutputBytes = 64L << 20, int MaxConcurrent = 4, TimeSpan? HeaderTimeout = null, TimeSpan? IdleTimeout = null, LocalKeySecurity? Security = null,
     AccountPool? Accounts = null, CredentialManager? Credentials = null, bool GoBridge = false,
     long MaxInFlightBodyBytes = 0, int MaxPreparing = 2, bool DirectUpstream = false, HttpMessageHandler? UpstreamHandler = null, ModelCatalog? Catalog = null, TimeSpan? CatalogRefreshInterval = null, CatalogCache? CatalogCache = null, SystemPromptOptions? SystemPrompts = null, AffinityOptions? Affinity = null,CredentialMaintenanceOptions? Maintenance=null,AccountResourceOptions? Resources=null,ResourceSnapshotCache? ResourceCache=null,RuntimeSnapshotCache? RuntimeCache=null,string? ConsoleDirectory=null,CalendarMaintenanceOptions? Calendar=null,StandaloneAccounts? AccountOwner=null,TimeSpan? CredentialReloadInterval=null,bool PriceProbe=false,bool NpmCatalog=false)
-{internal TimeSpan RestrictedReplayDelay{get;init;}=RestrictedReplay.DefaultDelay;public AdmissionOptions? Admission{get;init;}public TimeSpan? FirstTokenTimeout{get;init;}internal ServiceTimeouts? ServiceTimeouts{get;init;}}
+{public AdmissionOptions? Admission{get;init;}public TimeSpan? FirstTokenTimeout{get;init;}internal ServiceTimeouts? ServiceTimeouts{get;init;}}
 
 // Listens on loopback. Direct upstream mode requires independent credential and ledger owners.
 public static class LocalGateway
@@ -164,7 +164,7 @@ public static class LocalGateway
         using var memory = resources.Acquire(); bool preparing = false;
         AccountLease? accountLease = null;
         CredentialLease? credentialLease = null;
-        RestrictedReplay? replay=null;
+        PendingStreamHeartbeat? heartbeatWhileWaiting=null;
         LedgerAttempt? attempt = null; bool sent = false, settlementAttempted = false, restricted = false; string? evidence = null, modelName=null;
         var affinity=c.RequestServices.GetRequiredService<SessionAffinity>();string? affinityKey=null,selectedIdentity=null;
         void Settle(string? raw, string code, bool receivedOutput, int status, string? errorBody=null)
@@ -172,7 +172,7 @@ public static class LocalGateway
             if(settlementAttempted)return;settlementAttempted=true;
             raw ??= evidence;
             trace?.Observe(raw,code,status,status==200&&code.Length==0);
-            if (options.DirectUpstream && code=="11140" && accountLease is not null)
+            if (options.DirectUpstream && code==ChunkReader.AccountRestricted && accountLease is not null)
             { restricted=true; affinity.Forget(affinityKey,accountLease.Account.Id); options.Credentials!.Block(accountLease.Account.Id); }
             if(options.DirectUpstream && accountLease is not null && modelName is not null)
             {
@@ -183,7 +183,7 @@ public static class LocalGateway
             if (attempt is null || options.Security?.Ledger is not { } ledger) return;
             bool hasEvidence = false;
             if (raw is not null) { using var doc = JsonDocument.Parse(raw); hasEvidence = doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.EnumerateObject().Any(); }
-            if (!hasEvidence && !receivedOutput && code is "11128" or "11140") ledger.CancelUncharged(attempt);
+            if (!hasEvidence && !receivedOutput && code is "11128" or "11140" or ChunkReader.AccountRestricted) ledger.CancelUncharged(attempt);
             else ledger.Complete(attempt, raw, status);
         }
         try
@@ -258,40 +258,20 @@ public static class LocalGateway
             affinityKey??=affinity.Key(keyLease?.Identity?.Id,prepared.Model,sessionDigest,prepared.UpstreamBody);
             admission?.FinishPreparing();if(preparing){resources.Preparing.Release(); preparing = false;}
             if(options.Catalog is { } directory && !directory.Allows(prepared.Model))throw new RequestFailure("模型被网关禁用",403,"permission_error");
-            if(options.DirectUpstream&&prepared.Stream){replay=new(c,prepared.Model,true,timeouts.Keepalive);replay.StartWaiting();}
-            var excluded=new HashSet<AccountId>();
-            async Task<bool> RetryRestricted()
-            {
-                if(!options.DirectUpstream || accountLease is null || excluded.Count>0) return false;
-                keyLease?.CheckModel(prepared.Model);
-                var candidates=new HashSet<AccountId>(excluded){accountLease.Account.Id};
-                if(!options.Accounts!.HasEligibleAccount(prepared.Model,candidates))return false;
-                var id=accountLease.Account.Id; await options.Credentials!.DisableAsync(id); excluded.Add(id);
-                restricted=false; accountLease.Dispose(); accountLease=null;
-                attempt=null; settlementAttempted=false; sent=false; evidence=null;
-                replay??=new(c,prepared.Model,prepared.Stream,timeouts.Keepalive);
-                await replay.WaitAsync(options.RestrictedReplayDelay,firstToken.Token);
-                return true;
-            }
-            while(true)
-            {
+            if(options.DirectUpstream&&prepared.Stream){heartbeatWhileWaiting=new(c,prepared.Model,timeouts.Keepalive);heartbeatWhileWaiting.StartWaiting();}
             using var outboundMemory=resources.Acquire();
             keyLease?.CheckModel(prepared.Model);
             AccountId? preferred=null;
             if (options.Accounts is { } pool)
             {
                 options.Catalog?.RefreshPricing();
-                try
-                {
-                    preferred=affinity.Lookup(affinityKey);
-                    var preferredIdentity=preferred is null?null:options.Credentials?.AffinityIdentity(preferred);
-                    accountLease=affinityKey is null
-                        ?await pool.AcquireAsync(prepared.Model,attempted:excluded,cancellation:c.RequestAborted)
-                        :await pool.AcquireAffinityAsync(prepared.Model,preferred:preferred,attempted:excluded,cancellation:c.RequestAborted,
-                            cacheGrace:affinity.CacheGrace(affinityKey,preferred,preferredIdentity,prepared.UpstreamBody.Length,pool.Options.CacheGrace));
-                    selectedIdentity=options.Credentials?.AffinityIdentity(accountLease.Account.Id);
-                }
-                catch(SchedulingFailure e) when(excluded.Count>0 && e.Code=="no_eligible_account") { await Error(c,403,"upstream_error","没有可回退的账号","11140"); return; }
+                preferred=affinity.Lookup(affinityKey);
+                var preferredIdentity=preferred is null?null:options.Credentials?.AffinityIdentity(preferred);
+                accountLease=affinityKey is null
+                    ?await pool.AcquireAsync(prepared.Model,cancellation:c.RequestAborted)
+                    :await pool.AcquireAffinityAsync(prepared.Model,preferred:preferred,cancellation:c.RequestAborted,
+                        cacheGrace:affinity.CacheGrace(affinityKey,preferred,preferredIdentity,prepared.UpstreamBody.Length,pool.Options.CacheGrace));
+                selectedIdentity=options.Credentials?.AffinityIdentity(accountLease.Account.Id);
             }
             if (options.Credentials is { } credentials && accountLease is not null)
                 credentialLease = await credentials.AcquireForHeadersAsync(accountLease, c.RequestAborted);
@@ -350,11 +330,12 @@ public static class LocalGateway
                     try { raw = await ReadBounded(await response.Content.ReadAsStreamAsync(deadline.Token), 65536, deadline.Token); }
                     catch (RequestFailure) { throw new RequestFailure("上游错误响应超过大小限制", 502, "api_error"); }
                     string? code = null;
-                    try { ChunkReader.Parse(Encoding.UTF8.GetString(raw)); } catch (ConversionFailure e) { if (e.Code is "11128" or "11140" or "11134" or "6004" or "14003" or "14018" or "429") code = e.Code; }
+                    try { ChunkReader.Parse(raw.AsMemory()); } catch (ConversionFailure e) { if (e.Code is "11128" or "11140" or ChunkReader.AccountRestricted or "11134" or "6004" or "14003" or "14018" or "429") code = e.Code; }
                     try { using var parsed = JsonDocument.Parse(raw); if (parsed.RootElement.ValueKind == JsonValueKind.Object && parsed.RootElement.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object) evidence = u.GetRawText(); } catch (JsonException) { }
-                    int status = response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest ? 502 : (int)response.StatusCode;
+                    int status = code == ChunkReader.AccountRestricted ? 403 :
+                        response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest ? 502 : (int)response.StatusCode;
                     Settle(evidence, code ?? "http_error", false, status,Encoding.UTF8.GetString(raw));
-                    if(code=="11140" && status==403 && await RetryRestricted()) continue;
+                    if (code == ChunkReader.AccountRestricted) { await DeliveryError(c, code); return; }
                     await Error(c, status, "api_error", code=="11128"?"上游渠道校验未通过（11128）；请使用上游授权接口或客户端，或向上游反馈":"上游拒绝请求", code); return;
                 }
                 if (response.Content.Headers.ContentType?.MediaType != "text/event-stream") throw new RequestFailure("上游未返回 SSE 响应", 502, "api_error");
@@ -366,25 +347,25 @@ public static class LocalGateway
                     var probe=await RestrictionProbe.Run(source,c.RequestAborted,raw=>evidence=raw,FirstOutput,firstToken.Finish);
                     if(probe.Restricted)
                     {
-                        Settle(probe.Usage,"11140",false,400);
-                        await Error(c,400,"upstream_error","账号已被上游限制","11140"); return;
+                        Settle(probe.Usage, ChunkReader.AccountRestricted, false, 403);
+                        await DeliveryError(c, ChunkReader.AccountRestricted); return;
                     }
                     source=probe.Replay;
                     evidence=probe.Usage;
                 }
                 if(accountLease is not null)affinity.Remember(affinityKey,accountLease.Account.Id);
-                if(replay is not null)await replay.StopAsync();
+                if(heartbeatWhileWaiting is not null)await heartbeatWhileWaiting.StopAsync();
                 if (openAi is not null)
                 {
                     if (openAi.Stream&&!c.Response.HasStarted) { c.Response.ContentType = "text/event-stream"; c.Response.Headers.CacheControl = "no-cache"; c.Response.Headers["X-Accel-Buffering"] = "no"; }
                     await using var heartbeat = openAi.Stream && (options.GoBridge||options.DirectUpstream) ? new SseHeartbeat(c,timeouts.Keepalive) : null;
                     var result = await OpenAiPump.RunAsync(source, (Stream?)heartbeat ?? c.Response.Body, openAi, reasoningKey, options.MaxOutputBytes, c.RequestAborted,
-                        r => Settle(r.RawUsageJson, r.Code, r.ReceivedOutput, r.Outcome == StreamOutcome.Complete ? 200 : 502),FirstOutput,firstToken.Finish,outputBudget);
+                        r => Settle(r.RawUsageJson, r.Code, r.ReceivedOutput, DeliveryStatus(r.Outcome == StreamOutcome.Complete, r.Code)),FirstOutput,firstToken.Finish,outputBudget);
                     trace?.Result(result.Outcome,result.Code);
                     if (result.Outcome is StreamOutcome.Cancelled or StreamOutcome.DownstreamFailed) c.Abort();
                     else if (!openAi.Stream)
                     {
-                        if (result.Outcome != StreamOutcome.Complete) { await Error(c, result.Code==FirstTokenBudget.ErrorCode?504:502, "upstream_error", "上游响应不完整", result.Code); return; }
+                        if (result.Outcome != StreamOutcome.Complete) { await DeliveryError(c, result.Code); return; }
                         c.Response.ContentType = "application/json"; await c.Response.Body.WriteAsync(result.Body!, c.RequestAborted);
                     }
                     return;
@@ -394,20 +375,19 @@ public static class LocalGateway
                 {
                     if(!c.Response.HasStarted){c.Response.ContentType = "text/event-stream"; c.Response.Headers.CacheControl = "no-cache"; c.Response.Headers["X-Accel-Buffering"] = "no";}
                     await using var heartbeat = options.GoBridge||options.DirectUpstream ? new SseHeartbeat(c,timeouts.Keepalive) : null;
-                    var result = await StreamPump.RunAsync(source, (Stream?)heartbeat ?? c.Response.Body, streamOptions, c.RequestAborted, beforeTerminal: r => Settle(r.RawUsageJson, r.Code, r.ReceivedOutput, r.Outcome == StreamOutcome.Complete ? 200 : 502));
+                    var result = await StreamPump.RunAsync(source, (Stream?)heartbeat ?? c.Response.Body, streamOptions, c.RequestAborted, beforeTerminal: r => Settle(r.RawUsageJson, r.Code, r.ReceivedOutput, DeliveryStatus(r.Outcome == StreamOutcome.Complete, r.Code)));
                     trace?.Result(result.Outcome,result.Code);
                     if (result.Outcome is StreamOutcome.Cancelled or StreamOutcome.DownstreamFailed) c.Abort();
                 }
                 else
                 {
                     var result = await MessageAggregate.RunAsync(source, streamOptions, options.MaxOutputBytes, c.RequestAborted);
-                    Settle(result.RawUsageJson, result.Code, result.ReceivedOutput, result.Complete ? 200 : 502);
+                    Settle(result.RawUsageJson, result.Code, result.ReceivedOutput, DeliveryStatus(result.Complete, result.Code));
                     if (result.Code == "cancelled") { c.Abort(); return; }
-                    if (!result.Complete) { await Error(c, result.Code==FirstTokenBudget.ErrorCode?504:502, "api_error", "上游响应不完整", result.Code); return; }
+                    if (!result.Complete) { await DeliveryError(c, result.Code); return; }
                     c.Response.ContentType = "application/json"; await c.Response.Body.WriteAsync(result.Body!, c.RequestAborted);
                 }
                 return;
-            }
             }
         }
         catch (ConversionFailure e)when(e.Code==FirstTokenBudget.ErrorCode){await Error(c,504,"upstream_error","等待上游首个有效增量超时",e.Code);}
@@ -424,7 +404,7 @@ public static class LocalGateway
         catch (IOException) { await Error(c, 502, "api_error", "连接中断"); }
         finally
         {
-            try{if(replay is not null)await replay.DisposeAsync();}
+            try{if(heartbeatWhileWaiting is not null)await heartbeatWhileWaiting.DisposeAsync();}
             finally
             {
             try
@@ -444,6 +424,19 @@ public static class LocalGateway
             }
         }
     }
+    static int DeliveryStatus(bool delivered, string code) => delivered ? 200 : code switch
+    {
+        ChunkReader.AccountRestricted => 403,
+        ChunkReader.OutputBudgetExhausted => 400,
+        FirstTokenBudget.ErrorCode => 504,
+        _ => 502
+    };
+    static Task DeliveryError(HttpContext context, string code) => code switch
+    {
+        ChunkReader.AccountRestricted => Error(context, 403, "permission_error", ChunkReader.AccountRestrictedMessage, code),
+        ChunkReader.OutputBudgetExhausted => Error(context, 400, "invalid_request_error", ChunkReader.OutputBudgetMessage, code),
+        _ => Error(context, DeliveryStatus(false, code), "upstream_error", "上游响应不完整", code)
+    };
     internal static async Task<byte[]> ReadBody(HttpContext c, int limit, PreparationAdmission.Lease memory)
     {
         string coding = c.Request.Headers.ContentEncoding.ToString().Trim().ToLowerInvariant();
@@ -531,7 +524,7 @@ public static class LocalGateway
     }
     static async Task Error(HttpContext c, int status, string type, string message, string? code = null)
     {
-        if(await RestrictedReplay.WriteError(c,type,message,code))return;
+        if(await PendingStreamHeartbeat.WriteError(c,type,message,code))return;
         if (c.Response.HasStarted) { c.Abort(); return; }
         c.Response.StatusCode = status;
         if(status is 429 or 503)c.Response.Headers.RetryAfter="1";

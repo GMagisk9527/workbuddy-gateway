@@ -89,10 +89,13 @@ public static class OpenAiPump
                     }
                 }
                 state.Validate();
+                string terminalCode = state.FinishReason == "length" ? ChunkReader.OutputBudgetExhausted : "";
+                if (terminalCode.Length != 0 && responses is null && !state.HasDeliverable)
+                    throw new ConversionFailure(terminalCode);
                 if (!request.Stream)
                 {
                     byte[] body = Encode(responses is null ? state.Completion() : ResponsesOutput.Complete(state, request, key), limit,budget);
-                    return Notify(StreamOutcome.Complete, "", body);
+                    return Notify(StreamOutcome.Complete, terminalCode, body);
                 }
                 if (responses is not null)
                 {
@@ -103,9 +106,9 @@ public static class OpenAiPump
                     }
                 }
                 if (14 > limit - written - held) throw new ConversionFailure("output_budget_exceeded");
-                Notify(StreamOutcome.Complete, "");
+                Notify(StreamOutcome.Complete, terminalCode);
                 foreach (var frame in pending) await Send(frame);
-                await Send(Done); return Result(StreamOutcome.Complete, "");
+                await Send(Done); return Result(StreamOutcome.Complete, terminalCode);
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return Notify(StreamOutcome.Cancelled, "cancelled"); }
             catch (Exception e) when (e is ConversionFailure or OpenAiFailure or IOException or ObjectDisposedException)
@@ -116,7 +119,13 @@ public static class OpenAiPump
                 var result = Notify(StreamOutcome.Failed, code);
                 if (request.Stream)
                 {
-                    var error = responses?.Failed(code) ?? new JsonObject { ["error"] = new JsonObject { ["code"] = code, ["type"] = "upstream_error", ["message"] = "上游响应不完整" } };
+                    var (type, message) = code switch
+                    {
+                        ChunkReader.OutputBudgetExhausted => ("invalid_request_error", ChunkReader.OutputBudgetMessage),
+                        ChunkReader.AccountRestricted => ("permission_error", ChunkReader.AccountRestrictedMessage),
+                        _ => ("upstream_error", "上游响应不完整")
+                    };
+                    var error = responses?.Failed(code) ?? new JsonObject { ["error"] = new JsonObject { ["code"] = code, ["type"] = type, ["message"] = message } };
                     try { using var errors = new FrameWriter(65536,null); var frame = errors.Write(error, responses is not null); await downstream.WriteAsync(frame, cancellation); await downstream.FlushAsync(cancellation); }
                     catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return Result(StreamOutcome.Cancelled, "cancelled"); }
                     catch (Exception write) when (write is IOException or ObjectDisposedException) { return Result(StreamOutcome.DownstreamFailed, "downstream_write"); }

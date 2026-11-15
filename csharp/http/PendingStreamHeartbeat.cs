@@ -3,17 +3,16 @@ using System.Text.Json;
 
 namespace HttpMigration;
 
-// One incoming request owns the delay; there is no persisted body or replay queue.
-internal sealed class RestrictedReplay(HttpContext context,string model,bool stream,TimeSpan? interval=null):IAsyncDisposable
+// Send a heartbeat if the upstream takes longer than the configured interval.
+internal sealed class PendingStreamHeartbeat(HttpContext context,string model,TimeSpan? interval=null):IAsyncDisposable
 {
-    internal static readonly TimeSpan DefaultDelay=TimeSpan.FromMinutes(2);
     static readonly object Key=new();
     readonly string modelName=model;
     SseHeartbeat? heartbeat;
     CancellationTokenSource? waiting;Task? pendingStart;
     internal void StartWaiting()
     {
-        context.Items[Key]=this;if(!stream||pendingStart is not null)return;
+        context.Items[Key]=this;if(pendingStart is not null)return;
         waiting=CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);var token=waiting.Token;
         pendingStart=StartDelayed(token);
     }
@@ -29,16 +28,6 @@ internal sealed class RestrictedReplay(HttpContext context,string model,bool str
         if(!context.Response.HasStarted){context.Response.ContentType="text/event-stream";context.Response.Headers.CacheControl="no-cache";context.Response.Headers["X-Accel-Buffering"]="no";}
         await context.Response.StartAsync(token);heartbeat=new(context,interval);
     }
-    internal async Task WaitAsync(TimeSpan delay,CancellationToken cancellation=default)
-    {
-        context.Items[Key]=this;
-        if(stream)
-        {
-            await StopAsync();await StartHeartbeat(context.RequestAborted);
-        }
-        using var linked=CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted,cancellation);
-        await Task.Delay(delay,linked.Token);
-    }
     internal async Task StopAsync()
     {
         var cancel=Interlocked.Exchange(ref waiting,null);var start=Interlocked.Exchange(ref pendingStart,null);
@@ -47,7 +36,7 @@ internal sealed class RestrictedReplay(HttpContext context,string model,bool str
     }
     internal static async Task<bool> WriteError(HttpContext context,string type,string message,string? code)
     {
-        if(!context.Items.TryGetValue(Key,out var value)||value is not RestrictedReplay replay)return false;
+        if(!context.Items.TryGetValue(Key,out var value)||value is not PendingStreamHeartbeat replay)return false;
         await replay.StopAsync();if(!context.Response.HasStarted)return false;
         if(context.RequestAborted.IsCancellationRequested){context.Abort();return true;}
         string? eventName=null;object error=new Dictionary<string, object?> { ["type"] = type, ["code"] = code??type, ["message"] = message };object payload=new Dictionary<string, object?> { ["error"] = error };

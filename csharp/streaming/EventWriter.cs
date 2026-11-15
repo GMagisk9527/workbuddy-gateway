@@ -94,7 +94,14 @@ internal sealed class EventBufferWriter(Action<long>? reserve = null) : IEventWr
     ReadOnlyMemory<byte> Error(StreamError e)
     {
         Reset(); Prefix("error");
-        Raw("{\"error\":{\"code\":"); Quote(e.Code); Raw(",\"message\":\"Response incomplete\",\"type\":\"api_error\"},\"type\":\"error\"}");
+        var (type, message) = e.Code switch
+        {
+            ChunkReader.OutputBudgetExhausted => ("invalid_request_error", ChunkReader.OutputBudgetMessage),
+            ChunkReader.AccountRestricted => ("permission_error", ChunkReader.AccountRestrictedMessage),
+            _ => ("api_error", "Response incomplete")
+        };
+        Raw("{\"error\":{\"code\":"); Quote(e.Code); Raw(",\"message\":"); Quote(message);
+        Raw(",\"type\":"); Quote(type); Raw("},\"type\":\"error\"}");
         return Finish();
     }
 }

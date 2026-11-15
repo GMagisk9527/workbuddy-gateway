@@ -7,11 +7,13 @@ namespace StreamingMigration;
 
 public sealed record ToolFragment(int Index, string Id, string Name, string Arguments, bool Named = false);
 public sealed record Choice(string Reasoning, string Text, string Refusal, ImmutableArray<ToolFragment> Tools, string Finish, bool OtherOutput = false)
-{ public int Index { get; init; } }
+{ public int Index { get; init; } public bool LegacyToolOutput { get; init; } }
 public sealed record UsageObservation(Usage Tokens, string RawJson);
 public sealed record ChatChunk(string Model, ImmutableArray<Choice> Choices, UsageObservation? Usage)
 {
     public bool HasOutput => Choices.Any(c => c.Text.Length > 0 || c.Reasoning.Length > 0 || c.Refusal.Length > 0 || c.OtherOutput || c.Tools.Any(t => t.Named || t.Arguments.Length > 0));
+    public bool HasDeliverable => Choices.Any(c => !string.IsNullOrWhiteSpace(c.Text) || !string.IsNullOrWhiteSpace(c.Refusal) ||
+        c.Tools.Any(t => !string.IsNullOrWhiteSpace(t.Name) || !string.IsNullOrWhiteSpace(t.Arguments)) || c.LegacyToolOutput);
 }
 public sealed class ConversionFailure(string code) : Exception(code)
 {
@@ -22,6 +24,10 @@ public sealed class ConversionFailure(string code) : Exception(code)
 // Leniency for unknown fields and wrong optional field types matches the Go adapter.
 public static class ChunkReader
 {
+    public const string OutputBudgetExhausted = "output_budget_exhausted";
+    public const string AccountRestricted = "account_restricted";
+    public const string OutputBudgetMessage = "上游已耗尽本次输出预算，响应未完整生成";
+    public const string AccountRestrictedMessage = "上游确认账号风控限制";
     static JsonElement Field(JsonElement e, string key) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(key, out var v) ? v : default;
     static string Text(JsonElement e)
     {
@@ -84,6 +90,9 @@ public static class ChunkReader
         var obj = error.ValueKind == JsonValueKind.Object && (Code(Field(error, "code")) == "11128" || Field(root, "code").ValueKind is JsonValueKind.Undefined or JsonValueKind.Null) ? error : root;
         string code = Code(Field(obj, "code"));
         ConversionFailure Failure(string failure) => new(failure) { RawUsageJson = Field(root, "usage").ValueKind == JsonValueKind.Object ? Field(root, "usage").GetRawText() : null };
+        for (var envelope = root; envelope.ValueKind == JsonValueKind.Object; envelope = Field(envelope, "error"))
+            if (Code(Field(envelope, "code")) == "11140" && (RestrictionText(Text(Field(envelope, "msg"))) || RestrictionText(Text(Field(envelope, "message")))))
+                throw Failure(AccountRestricted);
         if (code is "11128" or "11140" or "6004" or "14018" or "429") throw Failure(code);
         if (error.ValueKind == JsonValueKind.Object)
         {
@@ -92,6 +101,11 @@ public static class ChunkReader
             if (failure.Length == 0 || failure.Length > 128 || failure.Any(char.IsControl)) failure = "upstream_error";
             throw Failure(failure);
         }
+        if (error.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) ||
+            (Field(root, "choices").ValueKind == JsonValueKind.Undefined && code != "0" &&
+             Field(root, "code").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) &&
+             (Field(root, "msg").ValueKind == JsonValueKind.String || Field(root, "message").ValueKind == JsonValueKind.String)))
+            throw Failure("upstream_error");
         var u = Field(root, "usage");
         UsageObservation? usage = null;
         if (u.ValueKind == JsonValueKind.Object)
@@ -116,9 +130,15 @@ public static class ChunkReader
             }).ToImmutableArray();
             var legacy = Field(d, "function_call");
             return new Choice(Text(Field(d, "reasoning_content")), Text(Field(d, "content")), Text(Field(d, "refusal")), tools, Text(Field(c, "finish_reason")),
-                Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0){Index=(int)Integer(Field(c,"index"))};
+                Text(Field(d, "reasoning")).Length > 0 || Field(legacy, "name").ValueKind == JsonValueKind.String || Text(Field(legacy, "arguments")).Length > 0)
+            {
+                Index = (int)Integer(Field(c, "index")),
+                LegacyToolOutput = !string.IsNullOrWhiteSpace(Text(Field(legacy, "name"))) || !string.IsNullOrWhiteSpace(Text(Field(legacy, "arguments")))
+            };
         }).ToImmutableArray(), usage);
     }
+    static bool RestrictionText(string text) => text.Contains("账号存在异常行为", StringComparison.Ordinal) ||
+        text.Contains("unusual activity", StringComparison.OrdinalIgnoreCase) || text.Contains("request illegal", StringComparison.OrdinalIgnoreCase);
     static string Code(JsonElement e) => e.ValueKind == JsonValueKind.String && uint.TryParse(Text(e), NumberStyles.None, CultureInfo.InvariantCulture, out uint v) ? v.ToString(CultureInfo.InvariantCulture) :
         e.ValueKind == JsonValueKind.Number && e.TryGetDouble(out double n) && n is >= 0 and <= 999999999 && n == Math.Truncate(n) ? n.ToString("0", CultureInfo.InvariantCulture) : "";
     public static void ValidateArguments(string args)

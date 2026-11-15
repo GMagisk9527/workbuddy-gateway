@@ -38,7 +38,8 @@ internal static class StandaloneTests
             if(ExpectedUser is not null)Check(doc.RootElement.GetProperty("messages").EnumerateArray().Last(m=>m.GetProperty("role").GetString()=="user").GetProperty("content").GetString()==ExpectedUser,"User text remains unchanged with configured prompt names");
             Check(doc.RootElement.GetProperty("stream").GetBoolean(),"SSE upstream");
             if(Mode=="timeout") { await Task.Delay(Timeout.InfiniteTimeSpan,cancellation); }
-            if(Mode=="sse11140") return new(HttpStatusCode.OK){Content=new StringContent("data: {\"code\":11140,\"msg\":\"synthetic restricted\"}\n\n",Encoding.UTF8,"text/event-stream")};
+            if(Mode=="sse11140") return new(HttpStatusCode.OK){Content=new StringContent("data: {\"code\":11140,\"msg\":\"Unusual activity\"}\n\n",Encoding.UTF8,"text/event-stream")};
+            if(Mode=="11140") return Json("{\"code\":11140,\"msg\":\"Unusual activity\"}",HttpStatusCode.Forbidden);
             if(Mode=="403") return Json("forbidden",HttpStatusCode.Forbidden);
             if(Mode!="ok") return Json("{\"code\":"+Mode+",\"msg\":\"synthetic rejection\"}",HttpStatusCode.BadRequest);
             return new(HttpStatusCode.OK) {Content=new StringContent("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":2,\"prompt_tokens\":10,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")};
@@ -77,7 +78,7 @@ internal static class StandaloneTests
             using(var refused=await client.PostAsJsonAsync("/v1/messages",new{model="test-model",messages=new[]{new{role="user",content="hello"}}})) {string refusal=await refused.Content.ReadAsStringAsync();Check((int)refused.StatusCode==400 && refusal.Contains("11128")&&refusal.Contains("渠道校验未通过"),"Channel rejection preserves code and gives an actionable explanation");}
             Check(handler.Models==7 && ledger.GetUsage(issued.Item.Id).Total==12 && !manager.Status.Single().Disabled,"11128 no retry and no charge"); checks++;
             byte[] retained=CredentialCodec.Export(files.Load().Credential); handler.Mode="11140";
-            using(var refused=await client.PostAsJsonAsync("/v1/messages",new{model="test-model",messages=new[]{new{role="user",content="hello"}}})) Check((int)refused.StatusCode==400,"Restriction returned");
+            using(var refused=await client.PostAsJsonAsync("/v1/messages",new{model="test-model",messages=new[]{new{role="user",content="hello"}}})) Check((int)refused.StatusCode==403,"Restriction returned");
             Check(files.Load().Disabled && retained.SequenceEqual(CredentialCodec.Export(files.Load().Credential)),"Restriction persists without deleting tokens"); checks++;
             using(var stopped=await client.PostAsJsonAsync("/v1/messages",new{model="test-model",messages=new[]{new{role="user",content="hello"}}})) Check((int)stopped.StatusCode==503 && handler.Models==8,"Restricted account no longer scheduled"); checks++;
             foreach(string mode in new[]{"403","timeout","sse11140"})
@@ -125,7 +126,7 @@ internal static class StandaloneTests
         string raw=await response.Content.ReadAsStringAsync();
         if(mode=="403") Check((int)response.StatusCode==403 && !manager.Status.Single().Disabled,"Plain 403 never stops account");
         if(mode=="timeout") Check((int)response.StatusCode==504 && !manager.Status.Single().Disabled,"Timeout bounded without stopping account");
-        if(mode=="sse11140") Check(raw.Contains("11140") && !raw.Contains("message_stop") && manager.Status.Single().Disabled && files.Load().Disabled,"SSE restriction is durable and never completed");
+        if(mode=="sse11140") Check(raw.Contains("account_restricted") && !raw.Contains("message_stop") && manager.Status.Single().Disabled && files.Load().Disabled,"SSE restriction is durable and never completed");
         Check(handler.Models==1 && ledger.Health.PendingAttempts==0 && pool.Status.Active==0,"One call and all ownership released");
     }
 }
