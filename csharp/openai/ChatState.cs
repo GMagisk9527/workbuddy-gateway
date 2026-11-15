@@ -27,6 +27,7 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
     public string FinishReason { get; private set; } = "";
     public JsonObject? Usage { get; private set; }
     public bool ReceivedOutput { get; private set; }
+    internal bool HasDeliverable { get; private set; }
     long retained;
     void Reserve(string value,bool keep=true)
     {
@@ -52,6 +53,7 @@ public sealed class ChatState(string model, long limit,IRetainedOutputBudget? bu
         var root=document.RootElement;
         if(root.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null)) throw new OpenAiFailure("invalid_request","请求体必须是 JSON 对象");
         var parsed = ChunkReader.Parse(root); ReceivedOutput |= parsed.HasOutput;
+        HasDeliverable |= parsed.HasDeliverable;
         var usage = Field(root, "usage");
         if (usage.ValueKind == JsonValueKind.Object)
         {

@@ -10,6 +10,7 @@ namespace HttpMigration;
 
 internal static class HttpTests
 {
+    enum ClientProtocolPath { Messages, Chat, Responses }
     const string Text = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
     const string Finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":3,\"cached_tokens\":5}}\n\n";
     static readonly object Request = new { model = "test-model", stream = true, messages = new[] { new { role = "user", content = "hi" } } };
@@ -34,6 +35,56 @@ internal static class HttpTests
             using var r = await f.Post(request); var body = await Json(r);
             Check(r.StatusCode == HttpStatusCode.OK && body.GetProperty("content")[0].GetProperty("text").GetString() == "hello", "aggregate body");
             Check(body.GetProperty("usage").GetProperty("input_tokens").GetInt32() == 15 && body.GetProperty("usage").GetProperty("cache_read_input_tokens").GetInt32() == 5, "cache usage");
+        });
+        await Test("Messages forwards a valid JSON Schema and rejects invalid formats", async () =>
+        {
+            await using var f = await Fixture.Create(Normal);
+            const string schema = """{"type":"object","properties":{"city":{"type":"string"}},"additionalProperties":false}""";
+            foreach (string format in new[] { """{"type":"text"}""", """{"type":"json_schema","schema":[]}""" })
+            {
+                using var invalid = await f.PostRaw($$$"""{"messages":[{"role":"user","content":"hi"}],"output_config":{"format":{{{format}}}}}""");
+                Check((int)invalid.StatusCode == 400 && f.Requests.IsEmpty, "reject invalid format before outbound request");
+            }
+            using var r = await f.Post(new
+            {
+                messages = new[] { new { role = "user", content = "hi" } },
+                output_config = new { format = new { type = "json_schema", schema = JsonNode.Parse(schema) }, effort = "high" }
+            });
+            var sent = f.Requests.Single();
+            var formatObject = sent.GetProperty("response_format").GetProperty("json_schema");
+            Check(r.IsSuccessStatusCode && formatObject.GetProperty("name").GetString() == "response" &&
+                formatObject.GetProperty("strict").GetBoolean() &&
+                JsonNode.DeepEquals(JsonNode.Parse(schema), JsonNode.Parse(formatObject.GetProperty("schema").GetRawText())) &&
+                sent.GetProperty("reasoning_effort").GetString() == "high", "preserve schema and explicit effort");
+        });
+        await Test("glued SSE objects and empty length terminals across all API protocols", async () =>
+        {
+            const string usage = """{"usage":{"prompt_tokens":20,"completion_tokens":3,"credit":2}}""";
+            const string reasoning = """{"choices":[{"delta":{"reasoning_content":"thinking"}}]}""";
+            const string visible = """{"choices":[{"delta":{"content":"literal } { text"}}]}""";
+            const string length = """{"choices":[{"finish_reason":"length"}]}""";
+            foreach (ClientProtocolPath protocol in Enum.GetValues<ClientProtocolPath>())
+            foreach (bool stream in new[] { false, true })
+            foreach (bool hasText in new[] { false, true })
+            {
+                await using var f = await Fixture.Create(async c =>
+                {
+                    c.Response.ContentType = "text/event-stream";
+                    await c.Response.WriteAsync("data: " + (hasText ? visible : reasoning) + length + usage + "\n\ndata: [DONE]\n\n");
+                });
+                var path = protocol switch { ClientProtocolPath.Messages => "/v1/messages", ClientProtocolPath.Chat => "/v1/chat/completions", _ => "/v1/responses" };
+                var request = protocol == ClientProtocolPath.Responses ? new { model="test-model", stream, input="hi" } :
+                    (object)new { model="test-model", stream, messages=new[] { new { role="user", content="hi" } } };
+                using var r = await f.Client.PostAsJsonAsync(path, request);
+                var response = await r.Content.ReadAsStringAsync();
+                if (protocol == ClientProtocolPath.Responses)
+                    Check(r.IsSuccessStatusCode && response.Contains("max_output_tokens") && !response.Contains("response.completed"), "Responses incomplete");
+                else if (hasText)
+                    Check(r.IsSuccessStatusCode && response.Contains("literal } { text") && response.Contains(protocol == ClientProtocolPath.Chat ? "length" : "max_tokens"), "Visible truncated output preserved");
+                else
+                    Check((int)r.StatusCode == (stream ? 200 : 400) && response.Contains("output_budget_exhausted") &&
+                        !response.Contains("message_stop") && !response.Contains("[DONE]"), "Empty truncated output is an explicit failure");
+            }
         });
         await Test("invalid JSON, role, messages and capability never reach upstream", async () =>
         {

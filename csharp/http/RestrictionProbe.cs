@@ -19,7 +19,7 @@ internal static class RestrictionProbe
                 try { using var d=System.Text.Json.JsonDocument.Parse(payload); if(d.RootElement.ValueKind==System.Text.Json.JsonValueKind.Object && d.RootElement.TryGetProperty("usage",out var u) && u.ValueKind==System.Text.Json.JsonValueKind.Object) { usage=u.GetRawText(); observeUsage?.Invoke(usage); } } catch(System.Text.Json.JsonException) { }
                 ChatChunk chunk;
                 try { chunk=ChunkReader.Parse(payload); }
-                catch(ConversionFailure e) when(e.Code=="11140") { return new(Stream.Null,true,usage); }
+                catch(ConversionFailure e) when(e.Code==ChunkReader.AccountRestricted) { return new(Stream.Null,true,usage); }
                 if(chunk.HasOutput)firstOutput?.Invoke();
                 if(chunk.Choices.Any(c=>c.Finish.Length>0))completed?.Invoke();
                 if(chunk.HasOutput || chunk.Choices.Any(c=>c.Finish.Length>0)) break;

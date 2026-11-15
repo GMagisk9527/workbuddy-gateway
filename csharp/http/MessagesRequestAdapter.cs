@@ -66,7 +66,8 @@ public static partial class MessagesRequestAdapter
                 NormalizeReferences(body!, limit);
                 root = JsonSerializer.SerializeToElement(body, NodeJson.JsonObject);
             }
-            RequestValidation.Input(root); RequestValidation.Output(root);
+            RequestValidation.Input(root);
+            var schema = RequestValidation.OutputSchema(root);
 
             bool omitLeadingSystemBlock = HasClientAttributionBlock(JsonFields.Get(root, "system"));
             var typed = WireReader.ReadBorrowed(root, omitLeadingSystemBlock);
@@ -77,6 +78,12 @@ public static partial class MessagesRequestAdapter
             if (messages.IsEmpty) throw new RequestFailure("messages 字段缺失或为空");
             var raw = WireWriter.ToNode(mapped with { SystemText = null, Messages = messages });
             raw["model"] = model;
+            if (schema.ValueKind == JsonValueKind.Object)
+                raw["response_format"] = new JsonObject
+                {
+                    ["type"] = "json_schema",
+                    ["json_schema"] = new JsonObject { ["name"] = "response", ["strict"] = true, ["schema"] = JsonObject.Create(schema) }
+                };
             if (raw["tools"] is JsonArray tools && tools.Count == 0) raw.Remove("tools");
             foreach (string name in new[] { "temperature", "top_p", "top_k" })
                 if (JsonFields.Get(root, name).ValueKind == JsonValueKind.Number)

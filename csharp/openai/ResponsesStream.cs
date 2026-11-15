@@ -107,6 +107,11 @@ internal sealed class ResponsesStream(OpenAiRequest request, byte[] key)
         foreach (var call in state.Calls)
         {
             var identity = tools[call.Index]; var item = ResponsesTools.Call(call.Id, call.Name, call.Arguments.ToString(), request.Tools); item["id"] = identity.Id; item["status"] = status;
+            if (state.FinishReason == "length")
+            {
+                Done(identity.Index, item);
+                continue;
+            }
             bool custom = Text(item["type"]) == "custom_tool_call";
             if (custom) events.Add(Event("response.custom_tool_call_input.delta", new() { ["item_id"] = identity.Id, ["output_index"] = identity.Index, ["delta"] = Text(item["input"]) }));
             var done = new JsonObject { ["item_id"] = identity.Id, ["output_index"] = identity.Index, [custom ? "input" : "arguments"] = Text(item[custom ? "input" : "arguments"]) };

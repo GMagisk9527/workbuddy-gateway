@@ -1,5 +1,6 @@
 using System.Text;
 using System.Buffers;
+using System.Text.Json;
 using System.Text.Unicode;
 
 namespace StreamingMigration;
@@ -14,6 +15,7 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
     int offset, available, frameBytes;
     bool skipLf, first = true, done, hadLine, hasData;
     IOException? readError;
+    ReadOnlyMemory<byte> pendingPayload;
     ReadOnlyMemory<byte> FirstLine(ReadOnlyMemory<byte> bytes)
     {
         if (first) { first = false; if (bytes.Span.StartsWith("\ufeff"u8)) bytes = bytes[3..]; }
@@ -127,6 +129,8 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
     // synchronously or copy it before advancing the reader; never retain it.
     public async ValueTask<ReadOnlyMemory<byte>?> NextPayloadUtf8Async(CancellationToken cancellation)
     {
+        cancellation.ThrowIfCancellationRequested();
+        if (!pendingPayload.IsEmpty) return TakePayload(pendingPayload);
         if (done) { if (readError is not null) throw readError; return null; }
         while (true)
         {
@@ -169,7 +173,40 @@ public sealed class SseReader(Stream source, int maxEventBytes = 4 << 20)
             if (result.Span.SequenceEqual("[DONE]"u8)) { done = true; readError = null; return null; }
             // Encoding.UTF8 previously replaced malformed input. Keep that
             // behavior on the rare invalid path without transcoding normal SSE.
-            return Utf8.IsValid(result.Span) ? result : Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(result.Span));
+            if (!Utf8.IsValid(result.Span)) result = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(result.Span));
+            return ContainsMultipleObjects(result.Span) ? TakePayload(result) : result;
         }
+    }
+
+    static bool ContainsMultipleObjects(ReadOnlySpan<byte> payload)
+    {
+        if (!payload.StartsWith("{"u8)) return false;
+        int firstEnd = payload.IndexOf((byte)'}');
+        if (firstEnd < 0 || !payload[(firstEnd + 1)..].Contains((byte)'{')) return false;
+        // Avoid parsing ordinary frames twice. Confirm all objects before
+        // releasing any piece of a malformed event to a streamer.
+        try
+        {
+            var reader = new Utf8JsonReader(payload, new JsonReaderOptions { MaxDepth = 10000, AllowMultipleValues = true });
+            int objects = 0;
+            while (reader.Read())
+            {
+                if (reader.TokenType != JsonTokenType.StartObject) return false;
+                reader.Skip();
+                objects++;
+            }
+            return objects > 1;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    ReadOnlyMemory<byte> TakePayload(ReadOnlyMemory<byte> payload)
+    {
+        var reader = new Utf8JsonReader(payload.Span, new JsonReaderOptions { MaxDepth = 10000 });
+        reader.Read();
+        reader.Skip();
+        int end = (int)reader.BytesConsumed;
+        pendingPayload = Trim(payload[end..]);
+        return payload[..end];
     }
 }

@@ -73,7 +73,7 @@ internal static class StandaloneAccountsTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
         {
             Users.Add(request.Headers.GetValues("X-User-Id").Single());
-            if(Users.Count==1)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"code\":11140,\"msg\":\"synthetic restriction\"}")});
+            if(Users.Count==1)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"code\":11140,\"msg\":\"Unusual activity\"}")});
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":2}}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")});
         }
     }
@@ -84,11 +84,13 @@ internal static class StandaloneAccountsTests
         using(var runtime=StandaloneAccounts.OpenManifest(manifest,_=>new Control()))
         {
             using var keys=PreviewKeyDirectory.Open(Path.Combine(directory,"keys"));using var ledger=CreditLedger.Open(Path.Combine(directory,"keys"),[]);keys.AttachAccounting(ledger);var issued=keys.Create(new("synthetic",QuotaTotal:100));
-            var handler=new Handler();await using var app=LocalGateway.Build(new(runtime.Upstream,Program.TestKey,Security:new(keys,new("synthetic-admin"),ledger),Accounts:runtime.Pool,Credentials:runtime.Credentials,DirectUpstream:true,UpstreamHandler:handler){RestrictedReplayDelay=TimeSpan.FromMilliseconds(20)});await app.StartAsync();
+            var handler=new Handler();await using var app=LocalGateway.Build(new(runtime.Upstream,Program.TestKey,Security:new(keys,new("synthetic-admin"),ledger),Accounts:runtime.Pool,Credentials:runtime.Credentials,DirectUpstream:true,UpstreamHandler:handler));await app.StartAsync();
             using var client=new HttpClient(new SocketsHttpHandler{UseProxy=false}){BaseAddress=new(LocalGateway.Address(app))};client.DefaultRequestHeaders.Authorization=new AuthenticationHeaderValue("Bearer",issued.TakeSecret());
             object body=protocol=="/v1/responses"?new{model="m",input="hello",stream}:(object)new{model="m",messages=new[]{new{role="user",content="hello"}},stream};
             using var response=await client.PostAsJsonAsync(protocol,body);string text=await response.Content.ReadAsStringAsync();
-            Check(response.IsSuccessStatusCode&&text.Contains("ok",StringComparison.Ordinal)&&handler.Users.Count==2&&handler.Users[0]!=handler.Users[1],"Manifest accounts support pre-output restriction fallback for all protocols/modes");
+            Check(response.StatusCode==HttpStatusCode.Forbidden&&text.Contains("account_restricted",StringComparison.Ordinal)&&handler.Users.Count==1,"Restricted request does not switch accounts");
+            using var next=await client.PostAsJsonAsync(protocol,body);
+            Check(next.IsSuccessStatusCode&&(await next.Content.ReadAsStringAsync()).Contains("ok",StringComparison.Ordinal)&&handler.Users.Count==2&&handler.Users[0]!=handler.Users[1],"Next request can use a healthy account");
             Check(runtime.Credentials.Status.Count(s=>s.Disabled)==1&&ledger.GetUsage(issued.Item.Id).Total==2&&ledger.Health.PendingAttempts==0,"Only restricted account disabled; exactly one successful settlement");
         }
         using(var reopened=StandaloneAccounts.OpenManifest(manifest,_=>new Control()))Check(reopened.Credentials.Status.Count(s=>s.Disabled)==1,"HTTP restriction persisted across manifest restart");

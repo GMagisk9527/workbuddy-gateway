@@ -127,11 +127,16 @@ internal static class RequestValidation
             Require(valid, $"{at} 的内容块类型或字段无法转换到 Chat；支持文本、图片及客户端工具调用/结果，不支持文档、搜索结果或托管工具块");
         }
     }
-    public static void Output(JsonElement root)
+    public static JsonElement OutputSchema(JsonElement root)
     {
         var output = JsonFields.Get(root, "output_config");
-        if (!JsonFields.Present(output)) return;
+        if (!JsonFields.Present(output)) return default;
         Require(output.ValueKind == JsonValueKind.Object, "output_config 必须是对象");
-        Require(!JsonFields.Present(JsonFields.Get(output, "format")), "当前 WorkBuddy Chat 上游不支持保证 JSON Schema 约束的 output_config.format；请移除此选项或使用原生支持结构化输出的上游");
+        var format = JsonFields.Get(output, "format");
+        if (!JsonFields.Present(format)) return default;
+        Require(format.ValueKind == JsonValueKind.Object && JsonFields.Text(format, "type") == "json_schema", "output_config.format 仅支持 json_schema 对象");
+        var schema = JsonFields.Get(format, "schema");
+        Require(schema.ValueKind == JsonValueKind.Object, "output_config.format.schema 必须是 JSON Schema 对象");
+        return schema;
     }
 }

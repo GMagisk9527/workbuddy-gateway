@@ -38,7 +38,7 @@ internal static class AffinityTests
             Conversations.Add(tuple);
             Check(Guid.TryParse(tuple.Item1,out var conversation)&&conversation!=Guid.Empty&&Guid.TryParse(tuple.Item2,out var turn)&&turn!=Guid.Empty&&Guid.TryParse(tuple.Item3,out var message)&&message!=Guid.Empty,"Direct upstream receives normal session/turn/message identifiers");
             Check(!request.Headers.Contains("thread-id")&&!request.Headers.Contains("session_id")&&!request.Headers.Contains("X-Client-ID"),"No raw session/official identity forwarded");
-            if(id==Reject)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"code\":11140,\"msg\":\"synthetic\"}",Encoding.UTF8,"application/json")});
+            if(id==Reject)return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden){Content=new StringContent("{\"code\":11140,\"msg\":\"Unusual activity\"}",Encoding.UTF8,"application/json")});
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"credit\":1}}\n\ndata: [DONE]\n\n",Encoding.UTF8,"text/event-stream")});
         }
     }
@@ -187,26 +187,26 @@ internal static class AffinityTests
         using var keys=PreviewKeyDirectory.Open(Path.Combine(dir,"keys"));using var ledger=CreditLedger.Open(Path.Combine(dir,"keys"),keys.List().Select(k=>k.Id));keys.AttachAccounting(ledger);
         var issued=keys.Create(new("affinity",QuotaTotal:100,MaxConcurrent:2));var other=keys.Create(new("other",QuotaTotal:100));
         string token=issued.TakeSecret(),otherToken=other.TakeSecret();var fake=new Fake();
-        await using var app=LocalGateway.Build(new(endpoint,new byte[32],Security:new(keys,new("synthetic-admin"),ledger),Accounts:pool,Credentials:manager,DirectUpstream:true,UpstreamHandler:fake,Affinity:new(true)){RestrictedReplayDelay=TimeSpan.FromMilliseconds(20)});
+        await using var app=LocalGateway.Build(new(endpoint,new byte[32],Security:new(keys,new("synthetic-admin"),ledger),Accounts:pool,Credentials:manager,DirectUpstream:true,UpstreamHandler:fake,Affinity:new(true)));
         await app.StartAsync();using var client=new HttpClient(new SocketsHttpHandler{UseProxy=false}){BaseAddress=new(LocalGateway.Address(app)),Timeout=TimeSpan.FromSeconds(10)};
-        async Task Send(string auth,string? session,bool stream=false)
+        async Task Send(string auth,string? session,bool stream=false,bool restricted=false)
         {
             using var req=new HttpRequestMessage(HttpMethod.Post,path);req.Headers.Authorization=new("Bearer",auth);
             if(session is not null)req.Headers.Add("session_id",session);
             req.Content=JsonContent.Create(path=="/v1/responses"?(object)new{model="m",input="question",stream}:new{model="m",messages=new[]{new{role="user",content="question"}},stream});
-            using var response=await client.SendAsync(req);var text=await response.Content.ReadAsStringAsync();Check(response.IsSuccessStatusCode&&text.Contains("ok"),"HTTP protocol completes: "+path);
+            using var response=await client.SendAsync(req);var text=await response.Content.ReadAsStringAsync();
+            Check(restricted ? response.StatusCode==HttpStatusCode.Forbidden&&text.Contains("account_restricted") : response.IsSuccessStatusCode&&text.Contains("ok"),"Expected HTTP response: "+path);
         }
         await Send(token,"session-one");var chosen=fake.Accounts.Last();var firstIds=fake.Conversations.Last();await Send(token,"session-one",true);Check(fake.Accounts.Last()==chosen,"HTTP stable session across stream modes");
         var nextIds=fake.Conversations.Last();Check(firstIds.Conversation==nextIds.Conversation&&firstIds.Turn!=nextIds.Turn&&firstIds.Message!=nextIds.Message,"Stable upstream session with fresh independent turn/message IDs");
         await Send(otherToken,"session-one");Check(fake.Accounts.Last()!=chosen,"HTTP same session different key isolation");
         Check(fake.Conversations.Last().Conversation!=firstIds.Conversation,"Upstream session identity isolated by authenticated caller");
         await Send(token,"session-one");Check(fake.Accounts.Last()==chosen,"Other caller did not overwrite binding");
-        fake.Reject=chosen;int before=fake.Accounts.Count;await Send(token,"session-one");
-        Check(fake.Accounts.Count==before+2&&fake.Accounts.Last()!=chosen,"Restricted preference falls back once to eligible account");
-        Check(fake.Conversations[^1]==fake.Conversations[^2],"Internal account fallback preserves logical request identifiers");
-        fake.Reject=null;await Send(token,"session-one",true);Check(fake.Accounts.Last()!=chosen,"Successful fallback rebinds session");
+        fake.Reject=chosen;int before=fake.Accounts.Count;await Send(token,"session-one",restricted:true);
+        Check(fake.Accounts.Count==before+1&&fake.Accounts.Last()==chosen,"Restriction does not switch accounts");
+        fake.Reject=null;await Send(token,"session-one",true);Check(fake.Accounts.Last()!=chosen,"Next request rebinds session");
         Check(manager.Status.Single(x=>x.Id==(chosen=="account-a"?a:b)).Disabled,"Restricted account remains disabled");
-        Check(ledger.Health.PendingAttempts==0&&ledger.GetUsage(issued.Item.Id).Total==5&&ledger.GetUsage(other.Item.Id).Total==1,"Affinity leaves per-attempt billing correct");
+        Check(ledger.Health.PendingAttempts==0&&ledger.GetUsage(issued.Item.Id).Total==4&&ledger.GetUsage(other.Item.Id).Total==1,"Affinity leaves per-attempt billing correct");
         Check(app.Services.GetRequiredService<SessionAffinity>().Count==2,"Only caller-scoped digest entries retained");
         await app.StopAsync();
     }
